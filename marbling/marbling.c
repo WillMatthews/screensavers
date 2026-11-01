@@ -32,6 +32,18 @@
  * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen,
  * --bench N to time N frames offscreen.
  *
+ * A portrait screen gets the bath turned on its side: the recipes are laid
+ * out for a landscape one, and the sheet is shown rotated a quarter turn.
+ *
+ * Spanning: run one instance per monitor with the same --seed and --epoch,
+ * with --layout (every output's logical rect) and --output = this one's
+ * index, as for flightsim. Simulating one bath across the whole wall would
+ * cost too much, so each output instead marbles its own sheet in the shared
+ * palette: the "front" output (the one under the middle of the layout)
+ * plays the recipes in the seed's order from the epoch, and the others play
+ * the same order a recipe or more ahead and part way through it, staggered
+ * so their papers come off at different times.
+ *
  * The inks come from one of several palettes after traditional marbled
  * papers (brass, ebru, florentine, sea, ink), picked from the seed for the
  * whole session, or fixed with --palette NAME.
@@ -66,6 +78,14 @@ static uint32_t opt_seed;
 static const char *opt_shot;
 static double opt_at = 40;             /* --shot / --bench: from this many seconds in */
 static int off_w = 1920, off_h = 1080;
+static double opt_epoch;               /* CLOCK_REALTIME seconds the clock starts at */
+
+/* ---- spanning ---- */
+#define MAX_OUT 8
+static float span[MAX_OUT][4];         /* x, y, w, h of each output (logical) */
+static int span_n, span_me = -1;
+static int rec_shift;                  /* this output plays recipes from this one on */
+static double span_toff;               /* and this far into them */
 
 static void die(const char *what) { fprintf(stderr, "marbling: %s\n", what); exit(1); }
 
@@ -271,6 +291,7 @@ static void getgel(float ang, float sp) {
 
 static int kind_of(int idx) {
     if (opt_recipe >= 0) return opt_recipe;
+    idx += rec_shift;
     int deck = idx / NKIND, pos = idx % NKIND, order[NKIND], prev_last = -1;
     for (int d = deck - 1; d <= deck; d++) {
         if (d < 0) continue;
@@ -284,6 +305,7 @@ static int kind_of(int idx) {
 }
 
 static int dark_of(int idx) {
+    idx += rec_shift;
     rng = mix32(opt_seed * 747796405U ^ (uint32_t)idx * 2891336453U ^ 0xba7eU);
     return frand() < 0.58f;
 }
@@ -295,7 +317,7 @@ static void gen_recipe(int idx, float aspect, Recipe *out) {
     R->dark = dark_of(idx);
     R->aspect = A_ = aspect;
     hex(R->dark ? P->bath_dark : P->bath_cream, R->bath);
-    rng = mix32(opt_seed ^ (uint32_t)idx * 0x9E3779B9U);
+    rng = mix32(opt_seed ^ (uint32_t)(idx + rec_shift) * 0x9E3779B9U);
     const int *set = R->dark ? P->dark[irange(0, 4)] : P->cream[irange(0, 4)];
     for (ninks = 0; ninks < 5 && set[ninks] >= 0; ninks++) inks[ninks] = set[ninks];
     R->pdir = frange(0, 6.2831853f);
@@ -761,7 +783,7 @@ static void load_recipe(int idx) {
 static float ease(float x) { x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); }
 
 /* the bath at clock time t, into the framebuffer target */
-static void render(double t, GLuint target) {
+static void render_bath(double t, GLuint target) {
     double lt;
     int idx = recipe_at(t, &lt);
     glBindVertexArray(vao);
@@ -913,10 +935,90 @@ static int wl_poll(void) {
     return !wl.closed;
 }
 
+/* portrait: the bath is made landscape (W x H swapped) in here, then turned */
+static GLuint prog_rot, rot_tex, rot_fbo;
+static int rot_w, rot_h;
+static const char *FS_ROT = GLSL(
+    uniform sampler2D uSrc;
+    uniform int uW;             /* the real window's width */
+    out vec4 o;
+    void main() { o = texelFetch(uSrc, ivec2(int(gl_FragCoord.y), uW - 1 - int(gl_FragCoord.x)), 0); });
+
+static void render(double t, GLuint target) {
+    t += span_toff;
+    if (W >= H) { render_bath(t, target); return; }
+    int rw = W, rh = H;
+    if (!prog_rot) {
+        prog_rot = mk_prog(FS_ROT);
+        glUseProgram(prog_rot);
+        glUniform1i(glGetUniformLocation(prog_rot, "uSrc"), 0);
+    }
+    if (rot_w != rh || rot_h != rw) {
+        if (rot_w) { glDeleteTextures(1, &rot_tex); glDeleteFramebuffers(1, &rot_fbo); }
+        rot_w = rh; rot_h = rw;
+        glGenTextures(1, &rot_tex);
+        glBindTexture(GL_TEXTURE_2D, rot_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, rot_w, rot_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glGenFramebuffers(1, &rot_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, rot_fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rot_tex, 0);
+    }
+    W = rh; H = rw;
+    render_bath(t, rot_fbo);
+    W = rw; H = rh;
+    glBindFramebuffer(GL_FRAMEBUFFER, target);
+    glViewport(0, 0, W, H);
+    glUseProgram(prog_rot);
+    glUniform1i(glGetUniformLocation(prog_rot, "uW"), W);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, rot_tex);
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+}
+
+static double wallclock(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+/* "x,y,w,h;x,y,w,h;..." */
+static void parse_layout(const char *str) {
+    for (span_n = 0; span_n < MAX_OUT; span_n++) {
+        float *r = span[span_n];
+        int used = 0;
+        if (sscanf(str, "%f,%f,%f,%f%n", &r[0], &r[1], &r[2], &r[3], &used) != 4 || r[2] <= 0 || r[3] <= 0)
+            break;
+        str += used;
+        if (*str == ';') str++;
+    }
+}
+
+/* spanning: this output's place in the round, counted from the front one
+ * (under the middle of the layout), sets which recipes it plays and when */
+static void span_setup(void) {
+    if (span_me < 0) return;
+    float x0 = 1e9f, x1 = -1e9f;
+    for (int i = 0; i < span_n; i++) {
+        x0 = fminf(x0, span[i][0]); x1 = fmaxf(x1, span[i][0] + span[i][2]);
+    }
+    float mx = (x0 + x1) / 2;
+    int front = 0;
+    for (int i = 0; i < span_n; i++)
+        if (span[i][0] <= mx && mx < span[i][0] + span[i][2]) { front = i; break; }
+    int k = (span_me - front + span_n) % span_n;
+    /* a recipe ahead per step round (so neighbours differ), and that
+     * fraction of the way into it (so they don't finish together) */
+    rec_shift = k;
+    span_toff = recipe_start(1) * k / span_n;
+}
+
 static void usage(void) {
     fprintf(stderr,
         "usage: marbling [--window | --root | --layer] [--seed N] [--recipe NAME]\n"
-        "                [--palette NAME]\n"
+        "                [--palette NAME] [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
         "                [--shot FILE.ppm | --bench N] [--size WxH] [--at SECONDS]\n"
         "recipes: stone ripple nonpareil chevron bouquet whirl\n"
         "palettes: brass ebru florentine sea ink (default: from the seed)\n");
@@ -968,11 +1070,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-bench") && i + 1 < argc) opt_bench = atoi(argv[++i]);
         else if (!strcmp(a, "-size") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &off_w, &off_h) != 2) usage(); }
         else if (!strcmp(a, "-at") && i + 1 < argc) opt_at = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-epoch") && i + 1 < argc) opt_epoch = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-layout") && i + 1 < argc) parse_layout(argv[++i]);
+        else if (!strcmp(a, "-output") && i + 1 < argc) span_me = atoi(argv[++i]);
         else usage();
     }
+    if (span_me >= span_n) span_me = -1;
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
     if (!opt_seed) opt_seed = 1;
     P = &PALETTES[opt_palette >= 0 ? opt_palette : (int)(mix32(opt_seed * 2246822519U ^ 0x9a1e77eU) % NPAL)];
+    span_setup();
     int offline = opt_shot || opt_bench > 0;
 
     Display *dpy = NULL;
@@ -1034,7 +1141,9 @@ int main(int argc, char **argv) {
     }
 
     double t0 = now();
+    if (span_me >= 0 && opt_epoch) t0 -= wallclock() - opt_epoch;   /* the clock runs from the shared epoch */
     for (;;) {
+
         if (opt_layer && !wl_poll()) return 0;
         while (dpy && XPending(dpy)) {
             XEvent ev;
