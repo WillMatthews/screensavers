@@ -5,6 +5,9 @@
 
 SAVERS=(pipes maze flightsim stir splitflap gauges marbling contours plotter rain clockwork nightsky)
 
+# savers that take --epoch/--layout/--output and treat all outputs as one wall
+SPANNING=(flightsim)
+
 # the executable for a saver
 saver_bin() {
     case $2 in
