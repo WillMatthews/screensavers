@@ -3,7 +3,7 @@
 # in git, so a saver nobody has built here yet must never be picked: a pick
 # that can't start leaves swaylock-plugin re-running it over a blank screen.
 
-SAVERS=(pipes maze flightsim stir splitflap coral gauges marbling contours plotter rain clockwork nightsky)
+SAVERS=(pipes maze flightsim stir splitflap gauges marbling contours plotter rain clockwork nightsky)
 
 # the executable for a saver
 saver_bin() {
