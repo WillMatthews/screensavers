@@ -26,6 +26,21 @@
  * Sensors are read once a second; needles follow on springs (a little
  * overshoot, then settle) with a faint tremble at rest.
  *
+ * Spanning: run one instance per monitor with the same --seed and --epoch,
+ * --layout (every output's logical rect) and --output = this one's index.
+ * The output under the middle of the layout shows the cluster above; the
+ * others, left to right, take turns at
+ *   CORE BANK    the load averages (1, 5, 15 minutes, an OVERLOAD lamp)
+ *                over a grid of per-CPU load dials (SMT siblings paired
+ *                past 24)
+ *   AUXILIARIES  a chronograph of the time away, network RX/TX and disk
+ *                read/write on twin-needle log dials (with a LINK lamp),
+ *                the turning fans, and a rack of thermometers (CPU, GPU,
+ *                NVMe, Wi-Fi, board... whatever hwmon offers)
+ * each on its own stretch of the same steel and wood, with a title plaque.
+ * Every instance reads its sensors on the same wall-clock second and the
+ * springs run from the shared epoch, so the wall powers up and moves as one.
+ *
  * Same plumbing as stir: Xlib + GLX for --window / --root, a native
  * wlr-layer-shell surface over EGL for --layer (swaylock-plugin), and
  * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen.
@@ -59,6 +74,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/utsname.h>
 #include "proto-layer-shell.h"
 
 #define PI 3.14159265f
@@ -72,6 +88,14 @@ static uint32_t opt_seed;
 static const char *opt_shot;
 static double opt_at = 25;             /* --shot: the frame this many seconds in */
 static int off_w = 1920, off_h = 1080;
+static double opt_epoch;               /* CLOCK_REALTIME seconds the instruments powered up at */
+
+/* ---- spanning: one instance per output, each with a role ---- */
+#define MAX_OUT 8
+static float span[MAX_OUT][4];         /* x, y, w, h of each output (logical) */
+static int span_n, span_me = -1;
+enum { R_FRONT, R_BANK, R_AUX };
+static int role = R_FRONT;
 
 static void die(const char *what) { fprintf(stderr, "gauges: %s\n", what); exit(1); }
 
@@ -234,6 +258,97 @@ static int on_mains(void) {
     return on;
 }
 
+/* The side panels' sensors: discovered once, read with the rest */
+#define MAXCPU 256
+#define MAXTH 6
+#define MAXFAN 2
+static int nth, nfan;
+static char th_path[MAXTH][300], th_name[MAXTH][16];
+static char fanx_path[MAXFAN][300], fanx_name[MAXFAN][24];
+static float fanx_top[MAXFAN];
+
+/* a few thermometers: one per interesting hwmon device, best label first */
+static void find_thermometers(void) {
+    glob_t g;
+    if (glob("/sys/class/hwmon/hwmon*/temp*_input", 0, NULL, &g)) return;
+    struct { char path[300], name[16]; int pri, dev; } c[64];
+    int nc = 0;
+    for (size_t i = 0; i < g.gl_pathc && nc < 64; i++) {
+        const char *in = g.gl_pathv[i];
+        char dir[256], name[64], lpath[300], label[64];
+        snprintf(dir, sizeof dir, "%.*s", (int)(strrchr(in, '/') - in), in);
+        snprintf(lpath, sizeof lpath, "%s/name", dir);
+        slurp_line(lpath, name, sizeof name);
+        snprintf(lpath, sizeof lpath, "%.*s_label", (int)(strlen(in) - 6), in);
+        slurp_line(lpath, label, sizeof label);
+        long v = read_long(in, -1);
+        if (v <= 0 || v > 150000) continue;
+        const char *nm = NULL;
+        int pri = 0;
+        if (!strcmp(name, "coretemp") || !strcmp(name, "k10temp") || !strcmp(name, "zenpower")) {
+            nm = "CPU"; pri = 100;
+            if (!strncmp(label, "Package", 7) || !strcmp(label, "Tctl") || !strcmp(label, "Tdie")) pri = 101;
+        } else if (!strcmp(name, "amdgpu") || !strcmp(name, "nouveau") || !strcmp(name, "radeon") || !strcmp(name, "i915") || !strcmp(name, "xe")) {
+            nm = "GPU"; pri = 90 + (!label[0] || !strcmp(label, "edge"));
+        } else if (!strcmp(name, "nvme")) {
+            nm = "NVME"; pri = 80 + (!label[0] || !strcmp(label, "Composite"));
+        } else if (!strcmp(name, "drivetemp")) { nm = "DISK"; pri = 75; }
+        else if (!strncmp(name, "spd5118", 7) || !strcmp(name, "jc42")) { nm = "DIMM"; pri = 60; }
+        else if (!strncmp(name, "iwlwifi", 7) || !strncmp(name, "mt79", 4) || !strncmp(name, "ath1", 4)) { nm = "WIFI"; pri = 55; }
+        else if (!strncmp(name, "pch_", 4)) { nm = "CHIPSET"; pri = 50; }
+        else if (!strncmp(name, "acpitz", 6)) { nm = "BOARD"; pri = 30; }
+        else if (!strncmp(name, "nct", 3) || !strncmp(name, "it87", 4)) { nm = "BOARD"; pri = 35 + !strcmp(label, "SYSTIN"); }
+        if (!nm) continue;
+        /* one per device: keep its best-labelled sensor */
+        int dev = atoi(dir + strlen("/sys/class/hwmon/hwmon")), k;
+        for (k = 0; k < nc && c[k].dev != dev; k++) {}
+        if (k < nc && c[k].pri >= pri) continue;
+        if (k == nc) nc++;
+        snprintf(c[k].path, sizeof c[k].path, "%s", in);
+        snprintf(c[k].name, sizeof c[k].name, "%s", nm);
+        c[k].pri = pri; c[k].dev = dev;
+    }
+    globfree(&g);
+    /* best first, at most one board, then numbered where names repeat */
+    for (int n = 0; n < MAXTH; n++) {
+        int best = -1;
+        for (int k = 0; k < nc; k++)
+            if (c[k].pri >= 0 && (best < 0 || c[k].pri > c[best].pri)) best = k;
+        if (best < 0) break;
+        int same = 0;
+        for (int j = 0; j < nth; j++) if (!strncmp(th_name[j], c[best].name, strlen(c[best].name))) same++;
+        if (!(same && !strcmp(c[best].name, "BOARD"))) {
+            snprintf(th_path[nth], sizeof th_path[nth], "%s", c[best].path);
+            if (same) snprintf(th_name[nth], sizeof th_name[nth], "%s %d", c[best].name, same + 1);
+            else snprintf(th_name[nth], sizeof th_name[nth], "%s", c[best].name);
+            nth++;
+        }
+        c[best].pri = -1;
+        if (nth == MAXTH) break;
+    }
+}
+
+/* fans that are turning now, up to two */
+static void find_fans(void) {
+    glob_t g;
+    if (glob("/sys/class/hwmon/hwmon*/fan*_input", 0, NULL, &g)) return;
+    for (size_t i = 0; i < g.gl_pathc && nfan < MAXFAN; i++) {
+        long v = read_long(g.gl_pathv[i], 0);
+        if (v <= 0) continue;
+        char lpath[300], label[64];
+        snprintf(lpath, sizeof lpath, "%.*s_label", (int)(strlen(g.gl_pathv[i]) - 6), g.gl_pathv[i]);
+        slurp_line(lpath, label, sizeof label);
+        snprintf(fanx_path[nfan], sizeof fanx_path[nfan], "%s", g.gl_pathv[i]);
+        if (label[0] && strlen(label) < 12) {
+            for (char *p = label; *p; p++) *p = (char)toupper((unsigned char)*p);
+            snprintf(fanx_name[nfan], sizeof fanx_name[nfan], "%s", label);
+        } else snprintf(fanx_name[nfan], sizeof fanx_name[nfan], "FAN %d", nfan + 1);
+        fanx_top[nfan] = fmaxf(3000, v * 1.6f);
+        nfan++;
+    }
+    globfree(&g);
+}
+
 /* latest readings */
 static struct {
     float temp;                        /* degrees C */
@@ -243,6 +358,15 @@ static struct {
     int charging, mains;
     double uptime, uptime_at;          /* /proc/uptime, and now() when read */
     unsigned long long cpu_busy, cpu_total;
+    /* the side panels' */
+    float lavg[3];
+    float core[MAXCPU];
+    unsigned long long core_busy[MAXCPU], core_total[MAXCPU];
+    double net_rx, net_tx, disk_r, disk_w;   /* bytes a second */
+    unsigned long long net_c[2], disk_c[2];  /* the counters, at io_at */
+    double io_at;
+    int link;
+    float th[MAXTH], fan[MAXFAN];
 } sens;
 
 static void read_cpu(unsigned long long *busy, unsigned long long *total) {
@@ -253,6 +377,79 @@ static void read_cpu(unsigned long long *busy, unsigned long long *total) {
     *total = 0;
     for (int i = 0; i < 8; i++) *total += v[i];
     *busy = *total - v[3] - v[4];
+}
+
+/* per-core load from the cpuN lines of /proc/stat */
+static void read_cores(void) {
+    FILE *f = fopen("/proc/stat", "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        int n;
+        unsigned long long v[8] = {0};
+        if (strncmp(line, "cpu", 3) || !isdigit((unsigned char)line[3])) continue;
+        if (sscanf(line, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu", &n, &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) < 5 ||
+            n < 0 || n >= MAXCPU) continue;
+        unsigned long long t = 0;
+        for (int i = 0; i < 8; i++) t += v[i];
+        unsigned long long b = t - v[3] - v[4];
+        if (sens.core_total[n] && t > sens.core_total[n])
+            sens.core[n] = (float)(b - sens.core_busy[n]) / (float)(t - sens.core_total[n]);
+        sens.core_busy[n] = b; sens.core_total[n] = t;
+    }
+    fclose(f);
+}
+
+/* is this a real device (not lo, a bridge, a tunnel, a container's veth)? */
+static int physical_if(const char *name) {
+    char p[300];
+    snprintf(p, sizeof p, "/sys/class/net/%.64s/device", name);
+    return access(p, F_OK) == 0;
+}
+
+static void read_io(void) {
+    unsigned long long rx = 0, tx = 0, rd = 0, wr = 0;
+    int link = 0;
+    char line[512];
+    FILE *f = fopen("/proc/net/dev", "r");
+    if (f) {
+        while (fgets(line, sizeof line, f)) {
+            char *c = strchr(line, ':');
+            if (!c) continue;
+            *c = 0;
+            char *name = line;
+            while (*name == ' ') name++;
+            if (!physical_if(name)) continue;
+            unsigned long long v[9];
+            if (sscanf(c + 1, "%llu %llu %llu %llu %llu %llu %llu %llu %llu", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8]) == 9) {
+                rx += v[0]; tx += v[8];
+            }
+            char p[300], st[32];
+            snprintf(p, sizeof p, "/sys/class/net/%.64s/operstate", name);
+            slurp_line(p, st, sizeof st);
+            if (!strcmp(st, "up")) link = 1;
+        }
+        fclose(f);
+    }
+    if ((f = fopen("/proc/diskstats", "r"))) {
+        while (fgets(line, sizeof line, f)) {
+            char name[64], p[300];
+            unsigned long long v[7];
+            if (sscanf(line, "%*u %*u %63s %llu %llu %llu %llu %llu %llu %llu", name, &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]) != 8) continue;
+            snprintf(p, sizeof p, "/sys/block/%s/device", name);
+            if (access(p, F_OK)) continue;          /* partitions, loops, device-mapper */
+            rd += v[2] * 512; wr += v[6] * 512;
+        }
+        fclose(f);
+    }
+    double t = now(), dt = t - sens.io_at;
+    if (sens.io_at > 0 && dt > 0.05) {
+        sens.net_rx = (rx - sens.net_c[0]) / dt; sens.net_tx = (tx - sens.net_c[1]) / dt;
+        sens.disk_r = (rd - sens.disk_c[0]) / dt; sens.disk_w = (wr - sens.disk_c[1]) / dt;
+    }
+    sens.net_c[0] = rx; sens.net_c[1] = tx; sens.disk_c[0] = rd; sens.disk_c[1] = wr;
+    sens.io_at = t;
+    sens.link = link;
 }
 
 static void read_sensors(void) {
@@ -295,15 +492,34 @@ static void read_sensors(void) {
     slurp_line("/proc/uptime", buf, sizeof buf);
     sens.uptime = strtod(buf, NULL);
     sens.uptime_at = now();
+
+    if (role == R_BANK) {
+        read_cores();
+        slurp_line("/proc/loadavg", buf, sizeof buf);
+        sscanf(buf, "%f %f %f", &sens.lavg[0], &sens.lavg[1], &sens.lavg[2]);
+    } else if (role == R_AUX) {
+        read_io();
+        for (int i = 0; i < nth; i++) sens.th[i] = read_long(th_path[i], 0) / 1000.0f;
+        for (int i = 0; i < nfan; i++) sens.fan[i] = (float)read_long(fanx_path[i], 0);
+    }
 }
 
 /* ---- the instruments ---- */
-enum { G_TEMP, G_LOAD, G_MEM, G_AUX, G_CLOCK, NG };
-enum { K_DIAL, K_CLOCK };
+enum { G_TEMP, G_LOAD, G_MEM, G_AUX, G_CLOCK, NG_FRONT };
+#define MAXG 32
+/* kinds: a dial with a needle (or two), the clock, a chronograph of the
+ * time away, a thermometer (r is its mount's half-height) */
+enum { K_DIAL, K_CLOCK, K_CHRONO, K_THERMO };
+/* where a needle's reading comes from */
+enum { S_TEMP, S_LOAD, S_MEM, S_AUX, S_CORE, S_LAVG, S_NET, S_DISK, S_FAN, S_THERM, S_NONE };
+/* how the scale is numbered */
+enum { SC_LIN, SC_FUEL, SC_LOG };
 
 typedef struct {
-    int kind;
-    float dx, dy, dr;                  /* design units */
+    int kind, src, idx, scale;
+    int dual;                          /* a second (red) needle */
+    int hot;                           /* numerals in the red zone printed red */
+    float txt;                         /* the label's size, relative */
     float cx, cy, r;                   /* px: centre, face radius */
     float a0, a1;                      /* the sweep: radians clockwise from 12 o'clock */
     float vmin, vmax;
@@ -312,9 +528,11 @@ typedef struct {
     char label[24], unit[24];
     float omega, zeta;                 /* needle spring */
     float x, v, target;                /* needle state, fraction of the scale */
+    float x2, v2, target2;             /* the second needle */
     float ph[3];                       /* tremble phases */
 } Gauge;
-static Gauge G[NG];
+static Gauge G[MAXG];
+static int NG = NG_FRONT;
 
 /* a "nice" full-scale and major step for 0..v */
 static void nice_scale(float v, float *top, int *nmaj) {
@@ -326,91 +544,193 @@ static void nice_scale(float v, float *top, int *nmaj) {
     *top = v; *nmaj = 5;
 }
 
+static Gauge *add_gauge(int kind, int src, int idx, const char *label, const char *unit) {
+    Gauge *g = &G[NG++];
+    g->kind = kind; g->src = src; g->idx = idx;
+    snprintf(g->label, sizeof g->label, "%s", label);
+    snprintf(g->unit, sizeof g->unit, "%s", unit);
+    return g;
+}
+
+/* load-average and fan dials, shared by the panels */
+static void lavg_scale(Gauge *g) {
+    nice_scale((float)ncpu, &g->vmax, &g->nmaj);
+    g->nmin = 5;
+    g->red0 = ncpu / g->vmax; g->red1 = 1;
+}
+
+/* bytes a second on decades from 100 B/s to 10^top */
+static void log_scale(Gauge *g, int top) {
+    g->scale = SC_LOG; g->vmin = 2; g->vmax = (float)top;
+    g->nmaj = top - 2; g->nmin = 2; g->numevery = 1;
+    g->dual = 1;
+    g->omega = 2 * PI * 0.9f; g->zeta = 0.4f;
+}
+
+static int core_groups;                /* core dials on the bank; each shows ncpu / core_groups CPUs */
+
 static void gauges_init(void) {
     Gauge *g;
+    NG = 0;
+    if (role == R_FRONT) {
+        add_gauge(K_DIAL, S_TEMP, 0, "CPU TEMP", "\x7f" "C");
+        add_gauge(K_DIAL, S_LOAD, 0, "CPU LOAD", "PER CENT");
+        add_gauge(K_DIAL, S_MEM, 0, "MEMORY", "GB");
+        add_gauge(K_DIAL, S_AUX, 0, "", "");
+        add_gauge(K_CLOCK, S_NONE, 0, "", "");
+    } else if (role == R_BANK) {
+        static const char *u[3] = {"1 MINUTE", "5 MINUTES", "15 MINUTES"};
+        for (int i = 0; i < 3; i++) add_gauge(K_DIAL, S_LAVG, i, "LOAD AVG", u[i]);
+        core_groups = ncpu;
+        while (core_groups > 24) core_groups = (core_groups + 1) / 2;
+        for (int i = 0; i < core_groups; i++) {
+            char b[24];
+            snprintf(b, sizeof b, "%s %d", core_groups == ncpu ? "CPU" : "CORE", i);
+            add_gauge(K_DIAL, S_CORE, i, b, "");
+        }
+    } else {
+        add_gauge(K_CHRONO, S_NONE, 0, "CHRONOGRAPH", "TIME AWAY");
+        add_gauge(K_DIAL, S_NET, 0, "NETWORK", "BYTES / SEC");
+        add_gauge(K_DIAL, S_DISK, 0, "DISKS", "BYTES / SEC");
+        for (int i = 0; i < nfan; i++) add_gauge(K_DIAL, S_FAN, i, fanx_name[i], "RPM x 1000");
+        for (int i = 0; i < nth; i++) add_gauge(K_THERMO, S_THERM, i, th_name[i], "\x7f" "C");
+    }
     for (int i = 0; i < NG; i++) {
         G[i].a0 = -135 * DEG; G[i].a1 = 135 * DEG;
         G[i].red0 = G[i].red1 = G[i].amb0 = G[i].amb1 = -1;
-        G[i].numevery = 1; G[i].nmin = 5;
+        G[i].numevery = 1; G[i].nmin = 5; G[i].txt = 1;
         G[i].omega = 2 * PI * 0.8f; G[i].zeta = 0.42f;
-        G[i].x = -0.03f;                   /* resting on the stop pin */
+        G[i].x = G[i].x2 = -0.03f;         /* resting on the stop pin */
         for (int k = 0; k < 3; k++) G[i].ph[k] = frand() * 2 * PI;
     }
-    g = &G[G_TEMP];
-    g->vmin = 20; g->vmax = 100; g->nmaj = 8; g->nmin = 5; g->numevery = 1;
-    g->red0 = (85 - 20) / 80.0f; g->red1 = 1;
-    g->omega = 2 * PI * 0.45f; g->zeta = 0.5f;
-    snprintf(g->label, sizeof g->label, "CPU TEMP");
-    snprintf(g->unit, sizeof g->unit, "\x7f" "C");
-
-    g = &G[G_LOAD];
-    g->vmin = 0; g->vmax = 100; g->nmaj = 10; g->nmin = 2; g->numevery = 2;
-    g->amb0 = 0.8f; g->amb1 = 1;
-    g->omega = 2 * PI * 1.0f; g->zeta = 0.34f;
-    snprintf(g->label, sizeof g->label, "CPU LOAD");
-    snprintf(g->unit, sizeof g->unit, "PER CENT");
-
-    g = &G[G_MEM];
-    nice_scale(sens.mem_total_gb, &g->vmax, &g->nmaj);
-    g->vmin = 0; g->nmin = 4; g->numevery = g->nmaj > 6 ? 2 : 1;
-    g->amb0 = sens.mem_total_gb * 0.9f / g->vmax; g->amb1 = sens.mem_total_gb / g->vmax;
-    g->omega = 2 * PI * 0.6f; g->zeta = 0.45f;
-    snprintf(g->label, sizeof g->label, "MEMORY");
-    snprintf(g->unit, sizeof g->unit, "GB");
-
-    g = &G[G_AUX];
-    g->vmin = 0; g->omega = 2 * PI * 0.5f; g->zeta = 0.5f;
-    if (aux_kind == AUX_BATT) {
-        /* a fuel gauge: E to F over the top */
-        g->a0 = -60 * DEG; g->a1 = 60 * DEG;
-        g->vmax = 100; g->nmaj = 4; g->nmin = 2; g->numevery = 2;
-        g->red0 = 0; g->red1 = 0.15f;
-        snprintf(g->label, sizeof g->label, "BATTERY");
-        snprintf(g->unit, sizeof g->unit, "CHARGE");
-    } else if (aux_kind == AUX_FAN) {
-        nice_scale(fmaxf(6000, sens.aux * 1.3f) / 1000, &g->vmax, &g->nmaj);
-        g->nmin = 5;
-        snprintf(g->label, sizeof g->label, "FAN");
-        snprintf(g->unit, sizeof g->unit, "RPM x 1000");
-    } else {
-        nice_scale((float)ncpu, &g->vmax, &g->nmaj);
-        g->nmin = 5;
-        g->red0 = ncpu / g->vmax; g->red1 = 1;
-        snprintf(g->label, sizeof g->label, "LOAD AVG");
-        snprintf(g->unit, sizeof g->unit, "1 MINUTE");
+    for (int i = 0; i < NG; i++) {
+        g = &G[i];
+        switch (g->src) {
+        case S_TEMP:
+            g->vmin = 20; g->vmax = 100; g->nmaj = 8; g->nmin = 5; g->numevery = 1;
+            g->red0 = (85 - 20) / 80.0f; g->red1 = 1; g->hot = 1;
+            g->omega = 2 * PI * 0.45f; g->zeta = 0.5f;
+            break;
+        case S_LOAD:
+            g->vmin = 0; g->vmax = 100; g->nmaj = 10; g->nmin = 2; g->numevery = 2;
+            g->amb0 = 0.8f; g->amb1 = 1;
+            g->omega = 2 * PI * 1.0f; g->zeta = 0.34f;
+            break;
+        case S_MEM:
+            nice_scale(sens.mem_total_gb, &g->vmax, &g->nmaj);
+            g->vmin = 0; g->nmin = 4; g->numevery = g->nmaj > 6 ? 2 : 1;
+            g->amb0 = sens.mem_total_gb * 0.9f / g->vmax; g->amb1 = sens.mem_total_gb / g->vmax;
+            g->omega = 2 * PI * 0.6f; g->zeta = 0.45f;
+            break;
+        case S_AUX:
+            g->vmin = 0; g->omega = 2 * PI * 0.5f; g->zeta = 0.5f;
+            if (aux_kind == AUX_BATT) {
+                /* a fuel gauge: E to F over the top */
+                g->a0 = -60 * DEG; g->a1 = 60 * DEG;
+                g->vmax = 100; g->nmaj = 4; g->nmin = 2; g->numevery = 2;
+                g->red0 = 0; g->red1 = 0.15f; g->scale = SC_FUEL;
+                snprintf(g->label, sizeof g->label, "BATTERY");
+                snprintf(g->unit, sizeof g->unit, "CHARGE");
+            } else if (aux_kind == AUX_FAN) {
+                nice_scale(fmaxf(6000, sens.aux * 1.3f) / 1000, &g->vmax, &g->nmaj);
+                g->nmin = 5;
+                snprintf(g->label, sizeof g->label, "FAN");
+                snprintf(g->unit, sizeof g->unit, "RPM x 1000");
+            } else {
+                lavg_scale(g);
+                snprintf(g->label, sizeof g->label, "LOAD AVG");
+                snprintf(g->unit, sizeof g->unit, "1 MINUTE");
+            }
+            break;
+        case S_LAVG:
+            lavg_scale(g);
+            g->omega = 2 * PI * (0.35f - 0.08f * g->idx); g->zeta = 0.6f;
+            break;
+        case S_CORE:
+            g->vmin = 0; g->vmax = 100; g->nmaj = 4; g->nmin = 5; g->numevery = 1;
+            g->amb0 = 0.8f; g->amb1 = 1; g->txt = 1.55f;
+            g->omega = 2 * PI * (1.0f + 0.15f * frand()); g->zeta = 0.3f;
+            break;
+        case S_NET: log_scale(g, 9); break;
+        case S_DISK: log_scale(g, 10); break;
+        case S_FAN:
+            nice_scale(fanx_top[g->idx] / 1000, &g->vmax, &g->nmaj);
+            g->vmin = 0; g->nmin = 5;
+            g->omega = 2 * PI * 0.5f; g->zeta = 0.5f;
+            break;
+        case S_THERM:
+            g->vmin = 0; g->vmax = 100; g->nmaj = 10; g->nmin = 2; g->numevery = 2;
+            g->red0 = 0.85f; g->red1 = 1;
+            g->omega = 2 * PI * 0.3f; g->zeta = 0.8f;      /* mercury: slow, no bounce */
+            break;
+        }
+        if (g->kind == K_CLOCK || g->kind == K_CHRONO) {
+            g->a0 = 0; g->a1 = 2 * PI; g->nmaj = 12; g->nmin = 5;
+            g->omega = 2 * PI * 7.0f; g->zeta = 0.3f;    /* the seconds hand: a quick tick with a bounce */
+        }
     }
+}
 
-    g = &G[G_CLOCK];
-    g->kind = K_CLOCK;
-    g->a0 = 0; g->a1 = 2 * PI; g->nmaj = 12; g->nmin = 5;
-    g->omega = 2 * PI * 7.0f; g->zeta = 0.3f;    /* the seconds hand: a quick tick with a bounce */
+static float logx(double rate, const Gauge *g) {
+    return ((float)log10(rate > 1 ? rate : 1) - g->vmin) / (g->vmax - g->vmin);
 }
 
 /* the needles' targets from the latest readings */
 static void set_targets(void) {
-    Gauge *g = &G[G_TEMP];
-    g->target = (sens.temp - g->vmin) / (g->vmax - g->vmin);
-    G[G_LOAD].target = sens.load;
-    G[G_MEM].target = sens.mem_gb / G[G_MEM].vmax;
-    g = &G[G_AUX];
-    if (aux_kind == AUX_BATT) g->target = sens.aux / 100.0f;
-    else if (aux_kind == AUX_FAN) g->target = sens.aux / 1000.0f / g->vmax;
-    else g->target = sens.aux / g->vmax;
-    for (int i = 0; i < G_CLOCK; i++) G[i].target = clampf(G[i].target, -0.03f, 1.03f);
+    for (int i = 0; i < NG; i++) {
+        Gauge *g = &G[i];
+        switch (g->src) {
+        case S_TEMP: case S_THERM:
+            g->target = ((g->src == S_TEMP ? sens.temp : sens.th[g->idx]) - g->vmin) / (g->vmax - g->vmin);
+            break;
+        case S_LOAD: g->target = sens.load; break;
+        case S_MEM: g->target = sens.mem_gb / g->vmax; break;
+        case S_AUX:
+            if (aux_kind == AUX_BATT) g->target = sens.aux / 100.0f;
+            else if (aux_kind == AUX_FAN) g->target = sens.aux / 1000.0f / g->vmax;
+            else g->target = sens.aux / g->vmax;
+            break;
+        case S_LAVG: g->target = sens.lavg[g->idx] / g->vmax; break;
+        case S_CORE: {
+            float s = 0;
+            int n = 0;
+            for (int c = g->idx; c < ncpu && c < MAXCPU; c += core_groups) { s += sens.core[c]; n++; }
+            g->target = n ? s / n : 0;
+            break;
+        }
+        case S_NET: g->target = logx(sens.net_rx, g); g->target2 = logx(sens.net_tx, g); break;
+        case S_DISK: g->target = logx(sens.disk_r, g); g->target2 = logx(sens.disk_w, g); break;
+        case S_FAN: g->target = sens.fan[g->idx] / 1000.0f / g->vmax; break;
+        default: break;
+        }
+        g->target = clampf(g->target, -0.03f, 1.03f);
+        g->target2 = clampf(g->target2, -0.03f, 1.03f);
+    }
+}
+
+static void spring(Gauge *g, float *x, float *v, float tgt, float dt) {
+    float a = g->omega * g->omega * (tgt - *x) - 2 * g->zeta * g->omega * *v;
+    *v += a * dt;
+    *x += *v * dt;
+    float lo = g->kind == K_THERMO ? -0.06f : -0.035f;
+    if (*x < lo) { *x = lo; *v = -0.3f * *v; }
+    if (*x > 1.035f) { *x = 1.035f; *v = -0.3f * *v; }
 }
 
 /* one step of the needle springs; the stop pins at either end bounce them */
 static float sec_angle, sec_vel;     /* the clock's seconds hand, degrees */
 static void physics(double t, float dt, int powered) {
-    for (int i = 0; i < G_CLOCK; i++) {
+    int clock = -1;
+    for (int i = 0; i < NG; i++) {
         Gauge *g = &G[i];
-        float tgt = powered ? g->target : -0.03f;
-        float a = g->omega * g->omega * (tgt - g->x) - 2 * g->zeta * g->omega * g->v;
-        g->v += a * dt;
-        g->x += g->v * dt;
-        if (g->x < -0.035f) { g->x = -0.035f; g->v = -0.3f * g->v; }
-        if (g->x > 1.035f) { g->x = 1.035f; g->v = -0.3f * g->v; }
+        if (g->kind == K_CLOCK) { clock = i; continue; }
+        if (g->kind == K_CHRONO) continue;
+        /* unpowered, the thermometers sit at the room's temperature */
+        float rest = g->kind == K_THERMO ? 0.2f : -0.03f;
+        spring(g, &g->x, &g->v, powered ? g->target : rest, dt);
+        if (g->dual) spring(g, &g->x2, &g->v2, powered ? g->target2 : -0.03f, dt);
     }
+    if (clock < 0) return;
     /* the seconds hand jumps to each new second and rings a little */
     double tt = t;
     struct tm tm;
@@ -418,17 +738,17 @@ static void physics(double t, float dt, int powered) {
     localtime_r(&ts, &tm);
     float tgt = tm.tm_sec * 6.0f;
     float d = fmodf(tgt - sec_angle + 540.0f, 360.0f) - 180.0f;
-    Gauge *c = &G[G_CLOCK];
+    Gauge *c = &G[clock];
     float a = c->omega * c->omega * d - 2 * c->zeta * c->omega * sec_vel;
     sec_vel += a * dt;
     sec_angle = fmodf(sec_angle + sec_vel * dt + 360.0f, 360.0f);
 }
 
 /* the needle's angle as drawn, with a faint tremble */
-static float needle_angle(const Gauge *g, double t) {
+static float needle_angle(const Gauge *g, float x, double t) {
     float j = 0.0012f * (sinf((float)t * 7.1f + g->ph[0]) * 0.5f + sinf((float)t * 11.3f + g->ph[1]) * 0.3f +
                          sinf((float)t * 17.9f + g->ph[2]) * 0.2f);
-    float x = clampf(g->x + j, -0.035f, 1.035f);
+    x = clampf(x + j, -0.035f, 1.035f);
     return g->a0 + (g->a1 - g->a0) * x;
 }
 
@@ -436,7 +756,7 @@ static float needle_angle(const Gauge *g, double t) {
  * text style used, rasterised at its exact pixel size ---- */
 typedef struct { short x, y, w, h, left, top, adv; } Glyph;
 typedef struct { int face, px; Glyph g[96]; } Style;
-#define MAXSTYLE 24
+#define MAXSTYLE 64
 static Style styles[MAXSTYLE];
 static int nstyles;
 static FT_Library ft;
@@ -578,7 +898,6 @@ static float drum_rect[NDRUM][4];
 static float win_rect[2][4];
 static int drum_spec[NDRUM];           /* which digit of the time each drum shows, see digit_of() */
 static int drum_style;                 /* text style of the drum digits */
-static float lamp_pos[2][3];           /* x, y, r: the HOT lamp on the temperature gauge, the MAINS lamp on the battery */
 static int nlamp;
 
 enum { D_S1, D_S10, D_M1, D_M10, D_H1, D_H10, D_D1, D_D10, D_D100 };
@@ -600,6 +919,151 @@ static int radix_of(int spec) { return spec == D_S10 || spec == D_M10 ? 6 : spec
 
 typedef struct { float x, y, r; } Disc;
 
+/* an instrument's outline (bezel or mount) in units of its r */
+static float ext_x(int i) { return G[i].kind == K_THERMO ? 0.26f : 1.22f; }
+static float ext_y(int i) { return G[i].kind == K_THERMO ? 1.0f : 1.22f; }
+
+/* The side panels are laid out as rows of instruments, each row centred;
+ * an item is a gauge index or -1 for the plaque. */
+#define MAXROW 30
+#define MAXITEM 16
+typedef struct { int n, it[MAXITEM]; } Row;
+typedef struct { int n; Row r[MAXROW]; } Rows;
+
+static void row_add(Rows *R, int item) {
+    Row *w = &R->r[R->n - 1];
+    if (w->n < MAXITEM) w->it[w->n++] = item;
+}
+static void row_new(Rows *R) { if (R->n < MAXROW) R->r[R->n++].n = 0; }
+
+/* place the rows (centred on 0, 0) into d / the plaque; returns the extent */
+static void stack_rows(const Rows *R, Disc *d, float pqw, float pqh, float *pqx, float *pqy, float *bw, float *bh) {
+    const float gx = 0.32f, gy = 0.3f;
+    float hw[MAXROW], hh[MAXROW], tot_h = 0, max_w = 0;
+    for (int r = 0; r < R->n; r++) {
+        const Row *w = &R->r[r];
+        hw[r] = 0; hh[r] = 0;
+        for (int k = 0; k < w->n; k++) {
+            int i = w->it[k];
+            float ex = i < 0 ? pqw / 2 : ext_x(i) * d[i].r, ey = i < 0 ? pqh / 2 : ext_y(i) * d[i].r;
+            hw[r] += 2 * ex + (k ? gx : 0);
+            hh[r] = fmaxf(hh[r], ey);
+        }
+        tot_h += 2 * hh[r] + (r ? gy : 0);
+        max_w = fmaxf(max_w, hw[r]);
+    }
+    float y = -tot_h / 2;
+    for (int r = 0; r < R->n; r++) {
+        const Row *w = &R->r[r];
+        float x = -hw[r] / 2, cy = y + hh[r];
+        for (int k = 0; k < w->n; k++) {
+            int i = w->it[k];
+            float ex = i < 0 ? pqw / 2 : ext_x(i) * d[i].r;
+            if (i < 0) { *pqx = x + ex; *pqy = cy; }
+            else { d[i].x = x + ex; d[i].y = cy; }
+            x += 2 * ex + gx;
+        }
+        y += 2 * hh[r] + gy;
+    }
+    *bw = max_w; *bh = tot_h;
+}
+
+/* the largest scale that fits these rows into aw x ah */
+static float rows_fit(const Rows *R, Disc *d, float pqw, float pqh, float aw, float ah) {
+    float px, py, bw, bh;
+    stack_rows(R, d, pqw, pqh, &px, &py, &bw, &bh);
+    return fminf(aw / bw, ah / bh);
+}
+
+/* the side panels' arrangement: try a few, keep the one whose instruments come out biggest */
+static void layout_rows(Disc *d, float pqw, float pqh, float aw, float ah, float *pqx, float *pqy) {
+    Rows best = {0}, R;
+    float bs = -1, rc = 1, best_rc = 1, pen = 1;
+    /* the bank: as big a core dial as fits, up to a little under the load
+     * dials, and rather a full grid than a ragged last row */
+#define TRY() do { float s_ = rows_fit(&R, d, pqw, pqh, aw, ah) * fminf(rc, 1.2f) * pen; if (s_ > bs * 1.01f) { bs = s_; best = R; best_rc = rc; } } while (0)
+    if (role == R_BANK) {
+        int n = NG - 3;
+        for (rc = 0.8f; rc < 1.21f; rc += 0.1f)
+        for (int cols = 1; cols <= n; cols++) {
+            for (int i = 3; i < NG; i++) d[i].r = rc;
+            pen = n % cols ? 0.88f : 1;
+            for (int v = 0; v < 2; v++) {
+                R.n = 0;
+                row_new(&R);
+                for (int i = 0; i < 3; i++) row_add(&R, i);
+                if (v) row_add(&R, -1);
+                for (int c = 0; c < n; c++) {
+                    if (c % cols == 0) row_new(&R);
+                    row_add(&R, 3 + c);
+                }
+                if (!v) { row_new(&R); row_add(&R, -1); }
+                TRY();
+            }
+        }
+    } else {
+        /* 0 chronograph, 1 network, 2 disks, then fans, then thermometers */
+        int f0 = 3, t0 = 3 + nfan;
+        /* the plaque among the thermometers, a fan at either end
+         * (tried first: it wins a tie) */
+        for (int v = 0; v < 2; v++) {
+            R.n = 0;
+            row_new(&R);
+            if (!v) { row_add(&R, 1); row_add(&R, 0); row_add(&R, 2); }
+            else { row_add(&R, 0); row_new(&R); row_add(&R, 1); row_add(&R, 2); }
+            row_new(&R);
+            if (nfan) row_add(&R, f0);
+            for (int i = 0; i < nth / 2; i++) row_add(&R, t0 + i);
+            row_add(&R, -1);
+            for (int i = nth / 2; i < nth; i++) row_add(&R, t0 + i);
+            if (nfan > 1) row_add(&R, f0 + 1);
+            TRY();
+        }
+        for (int v = 0; v < 4; v++) {
+            R.n = 0;
+            row_new(&R);
+            if (v < 2) { row_add(&R, 1); row_add(&R, 0); row_add(&R, 2); }
+            else { row_add(&R, 0); row_new(&R); row_add(&R, 1); row_add(&R, 2); }
+            row_new(&R);
+            if (nfan) row_add(&R, f0);
+            for (int i = 0; i < nth; i++) row_add(&R, t0 + i);
+            if (v & 1) { if (nfan > 1) row_add(&R, f0 + 1); row_add(&R, -1); }
+            else { if (nfan > 1) row_add(&R, f0 + 1); row_new(&R); row_add(&R, -1); }
+            if (R.r[1].n == 0 && v < 2) continue;
+            TRY();
+        }
+    }
+#undef TRY
+    for (int i = 3; role == R_BANK && i < NG; i++) d[i].r = best_rc;
+    float bw, bh;
+    stack_rows(&best, d, pqw, pqh, pqx, pqy, &bw, &bh);
+}
+
+static int pq_title;                   /* the side panels' plaque: just a title, no drums */
+static float lamp_pos[4][3];           /* x, y, r */
+static int lamp_kind[4], lamp_g[4];
+enum { L_HOT, L_MAINS, L_OVER, L_LINK };
+
+static void add_lamp(int kind, int g, float dy, float rf) {
+    if (nlamp == 4) return;
+    lamp_kind[nlamp] = kind; lamp_g[nlamp] = g;
+    lamp_pos[nlamp][0] = G[g].cx; lamp_pos[nlamp][1] = G[g].cy + dy * G[g].r;
+    lamp_pos[nlamp][2] = rf * G[g].r;
+    nlamp++;
+}
+
+/* thermometer geometry, in units of its half-height r: the scale from
+ * vmin at TH_Y0 up to vmax at TH_Y1 */
+#define TH_Y0 0.56f
+#define TH_Y1 (-0.66f)
+#define TH_TX (-0.035f)                /* the tube's centre line */
+
+static void upper(char *dst, const char *src, size_t n) {
+    size_t i = 0;
+    for (; src[i] && i + 1 < n; i++) dst[i] = (char)toupper((unsigned char)src[i]);
+    dst[i] = 0;
+}
+
 static void layout(void) {
     float m = (float)(W < H ? W : H);
     float frame = roundf(0.026f * m);
@@ -609,40 +1073,51 @@ static void layout(void) {
 
     /* design positions, in units; the plaque height in the same units */
     int tall = W < H * 1.15f;
-    Disc d[NG];
-    float pqx, pqy, pqh = 1.95f;
-    if (!tall) {
-        d[G_CLOCK] = (Disc){8.0f, 3.6f, 2.3f};
-        d[G_TEMP] = (Disc){2.95f, 3.35f, 1.72f};
-        d[G_LOAD] = (Disc){13.05f, 3.35f, 1.72f};
-        d[G_MEM] = (Disc){0, 7.45f, 1.12f};
-        d[G_AUX] = (Disc){0, 7.45f, 1.12f};
-        pqx = 8.0f; pqy = 7.6f;
-    } else {
-        d[G_CLOCK] = (Disc){4.5f, 3.2f, 2.4f};
-        d[G_TEMP] = (Disc){2.25f, 7.85f, 1.7f};
-        d[G_LOAD] = (Disc){6.75f, 7.85f, 1.7f};
-        d[G_MEM] = (Disc){2.25f, 11.45f, 1.15f};
-        d[G_AUX] = (Disc){6.75f, 11.45f, 1.15f};
-        pqx = 4.5f; pqy = 14.3f;
-    }
-    /* the plaque, in plaque-height tenths (k): label column, window of drums */
+    Disc d[MAXG];
+    float pqx = 0, pqy = 0, pqh = 1.95f, pqw;
     float k = pqh / 10;
     float dw = 1.3f * k, dgap = 0.07f * k, ggap = 0.5f * k, wpad = 0.16f * k;
-    float upw = 9 * dw + 5 * dgap + 3 * ggap + 2 * wpad;
-    float pqw = 2.0f * k + 5.4f * k + 0.6f * k + upw + 2.0f * k;
-    if (!tall) {
-        float gap = 0.3f;
-        d[G_MEM].x = pqx - pqw / 2 - gap - 1.22f * d[G_MEM].r;
-        d[G_AUX].x = pqx + pqw / 2 + gap + 1.22f * d[G_AUX].r;
+    pq_title = role != R_FRONT;
+    if (role == R_FRONT) {
+        if (!tall) {
+            d[G_CLOCK] = (Disc){8.0f, 3.6f, 2.3f};
+            d[G_TEMP] = (Disc){2.95f, 3.35f, 1.72f};
+            d[G_LOAD] = (Disc){13.05f, 3.35f, 1.72f};
+            d[G_MEM] = (Disc){0, 7.45f, 1.12f};
+            d[G_AUX] = (Disc){0, 7.45f, 1.12f};
+            pqx = 8.0f; pqy = 7.6f;
+        } else {
+            d[G_CLOCK] = (Disc){4.5f, 3.2f, 2.4f};
+            d[G_TEMP] = (Disc){2.25f, 7.85f, 1.7f};
+            d[G_LOAD] = (Disc){6.75f, 7.85f, 1.7f};
+            d[G_MEM] = (Disc){2.25f, 11.45f, 1.15f};
+            d[G_AUX] = (Disc){6.75f, 11.45f, 1.15f};
+            pqx = 4.5f; pqy = 14.3f;
+        }
+        /* the plaque, in plaque-height tenths (k): label column, window of drums */
+        float upw = 9 * dw + 5 * dgap + 3 * ggap + 2 * wpad;
+        pqw = 2.0f * k + 5.4f * k + 0.6f * k + upw + 2.0f * k;
+        if (!tall) {
+            float gap = 0.3f;
+            d[G_MEM].x = pqx - pqw / 2 - gap - 1.22f * d[G_MEM].r;
+            d[G_AUX].x = pqx + pqw / 2 + gap + 1.22f * d[G_AUX].r;
+        }
+    } else {
+        pqh = 1.45f; pqw = 6.2f;
+        for (int i = 0; i < NG; i++) {
+            Gauge *g = &G[i];
+            d[i].r = g->kind == K_CHRONO ? 2.15f : g->kind == K_THERMO ? 1.75f : g->src == S_CORE ? 1.0f
+                   : g->src == S_LAVG ? 1.3f : g->src == S_FAN ? 1.1f : 1.5f;
+        }
+        layout_rows(d, pqw, pqh, ax1 - ax0, ay1 - ay0, &pqx, &pqy);
     }
 
     /* fit the bounding box into the plate, spreading a little if there's room */
     float bx0 = 1e9f, by0 = 1e9f, bx1 = -1e9f, by1 = -1e9f;
     for (int i = 0; i < NG; i++) {
-        float rb = d[i].r * 1.22f;
-        bx0 = fminf(bx0, d[i].x - rb); bx1 = fmaxf(bx1, d[i].x + rb);
-        by0 = fminf(by0, d[i].y - rb); by1 = fmaxf(by1, d[i].y + rb);
+        float rx = d[i].r * ext_x(i), ry = d[i].r * ext_y(i);
+        bx0 = fminf(bx0, d[i].x - rx); bx1 = fmaxf(bx1, d[i].x + rx);
+        by0 = fminf(by0, d[i].y - ry); by1 = fmaxf(by1, d[i].y + ry);
     }
     bx0 = fminf(bx0, pqx - pqw / 2); bx1 = fmaxf(bx1, pqx + pqw / 2);
     by0 = fminf(by0, pqy - pqh / 2); by1 = fmaxf(by1, pqy + pqh / 2);
@@ -664,48 +1139,87 @@ static void layout(void) {
     /* inside the plaque: hostname, rule, captions, two windows of drums */
     nstyles = 0;
     char hn[64];
-    int n = 0;
-    for (const char *p = host; *p && n < 63; p++) hn[n++] = (char)toupper((unsigned char)*p);
-    hn[n] = 0;
-    /* the hostname as large as fits between the corner screws */
-    float name_px = 2.0f * kp;
-    while (name_px > 8 && measure(1, name_px, hn, 0.22f) > (plq[2] - plq[0]) - 5.0f * kp) name_px *= 0.94f;
-    int st_name = style(1, name_px), st_lab = style(1, 1.0f * kp), st_cap = style(0, 0.78f * kp);
-    float rx1 = plq[2] - 2.0f * kp;   /* the windows' right edge */
-    float wy[2] = {plq[1] + 4.6f * kp, plq[1] + 7.35f * kp}, wh = 2.05f * kp;
-    int counts[2] = {9, 8};
-    int nd = 0;
-    for (int w = 0; w < 2; w++) {
-        float x = rx1 - wpad * s;
-        int groups = counts[w] == 9 ? 4 : 4;
-        int per[4] = {counts[w] == 9 ? 3 : 2, 2, 2, 2};
-        int specs[4][3] = {{D_D100, D_D10, D_D1}, {D_H10, D_H1}, {D_M10, D_M1}, {D_S10, D_S1}};
-        if (counts[w] == 8) { specs[0][0] = D_D10; specs[0][1] = D_D1; }
-        /* lay out right to left */
-        float right = x;
-        for (int gidx = groups - 1; gidx >= 0; gidx--) {
-            for (int j = per[gidx] - 1; j >= 0; j--) {
-                float x1 = right, x0 = right - dw * s;
-                drum_rect[nd][0] = roundf(x0); drum_rect[nd][2] = roundf(x1);
-                drum_rect[nd][1] = roundf(wy[w] + wpad * s); drum_rect[nd][3] = roundf(wy[w] + wh - wpad * s);
-                drum_spec[nd] = specs[gidx][j];
-                nd++;
-                right = x0 - dgap * s;
+    upper(hn, host, sizeof hn);
+    int st_name, st_lab = 0, st_cap = 0, st_sub = 0;
+    char title[64], sub[96];
+    if (!pq_title) {
+        /* the hostname as large as fits between the corner screws */
+        float name_px = 2.0f * kp;
+        while (name_px > 8 && measure(1, name_px, hn, 0.22f) > (plq[2] - plq[0]) - 5.0f * kp) name_px *= 0.94f;
+        st_name = style(1, name_px); st_lab = style(1, 1.0f * kp); st_cap = style(0, 0.78f * kp);
+        float rx1 = plq[2] - 2.0f * kp;   /* the windows' right edge */
+        float wy[2] = {plq[1] + 4.6f * kp, plq[1] + 7.35f * kp}, wh = 2.05f * kp;
+        int counts[2] = {9, 8};
+        int nd = 0;
+        for (int w = 0; w < 2; w++) {
+            float x = rx1 - wpad * s;
+            int groups = 4;
+            int per[4] = {counts[w] == 9 ? 3 : 2, 2, 2, 2};
+            int specs[4][3] = {{D_D100, D_D10, D_D1}, {D_H10, D_H1}, {D_M10, D_M1}, {D_S10, D_S1}};
+            if (counts[w] == 8) { specs[0][0] = D_D10; specs[0][1] = D_D1; }
+            /* lay out right to left */
+            float right = x;
+            for (int gidx = groups - 1; gidx >= 0; gidx--) {
+                for (int j = per[gidx] - 1; j >= 0; j--) {
+                    float x1 = right, x0 = right - dw * s;
+                    drum_rect[nd][0] = roundf(x0); drum_rect[nd][2] = roundf(x1);
+                    drum_rect[nd][1] = roundf(wy[w] + wpad * s); drum_rect[nd][3] = roundf(wy[w] + wh - wpad * s);
+                    drum_spec[nd] = specs[gidx][j];
+                    nd++;
+                    right = x0 - dgap * s;
+                }
+                right += dgap * s;
+                if (gidx) right -= ggap * s;
             }
-            right += dgap * s;
-            if (gidx) right -= ggap * s;
+            win_rect[w][0] = roundf(right - wpad * s); win_rect[w][1] = roundf(wy[w]);
+            win_rect[w][2] = roundf(rx1); win_rect[w][3] = roundf(wy[w] + wh);
         }
-        win_rect[w][0] = roundf(right - wpad * s); win_rect[w][1] = roundf(wy[w]);
-        win_rect[w][2] = roundf(rx1); win_rect[w][3] = roundf(wy[w] + wh);
+    } else {
+        /* a title, a rule, and the host and what this panel is under it */
+        if (role == R_BANK) {
+            snprintf(title, sizeof title, "CORE BANK");
+            snprintf(sub, sizeof sub, "%s  -  %d THREADS", hn, ncpu);
+        } else {
+            struct utsname u;
+            char rel[32] = "";
+            if (uname(&u) == 0) {
+                snprintf(rel, sizeof rel, "%.31s", u.release);
+                rel[strspn(rel, "0123456789.")] = 0;
+                size_t l = strlen(rel);
+                if (l && rel[l - 1] == '.') rel[l - 1] = 0;
+            }
+            snprintf(title, sizeof title, "AUXILIARIES");
+            snprintf(sub, sizeof sub, "%s  -  LINUX %s", hn, rel);
+        }
+        float tk = pqh * s / 10;       /* this plaque's tenth */
+        float name_px = 3.4f * tk;
+        while (name_px > 8 && measure(1, name_px, title, 0.22f) > (plq[2] - plq[0]) - 2.6f * tk) name_px *= 0.94f;
+        st_name = style(1, name_px);
+        float sub_px = 1.45f * tk;
+        while (sub_px > 7 && measure(0, sub_px, sub, 0.18f) > (plq[2] - plq[0]) - 2.6f * tk) sub_px *= 0.94f;
+        st_sub = style(0, sub_px);
+        for (int j = 0; j < NDRUM; j++) {
+            drum_rect[j][0] = drum_rect[j][1] = -100; drum_rect[j][2] = drum_rect[j][3] = -90;
+            drum_spec[j] = D_S1;
+        }
+        for (int w = 0; w < 2; w++) { win_rect[w][0] = win_rect[w][1] = -100; win_rect[w][2] = win_rect[w][3] = -90; }
     }
     drum_style = style(0, (drum_rect[0][3] - drum_rect[0][1]) * 0.7f);
 
-    /* text styles for the dials */
-    int st_num[NG], st_glab[NG], st_unit[NG], st_mark[NG];
+    /* text styles for the instruments */
+    int st_num[MAXG], st_glab[MAXG], st_unit[MAXG], st_mark[MAXG];
     for (int i = 0; i < NG; i++) {
-        float r = G[i].r;
-        st_num[i] = style(0, (G[i].kind == K_CLOCK ? 0.17f : i == G_AUX && aux_kind == AUX_BATT ? 0.19f : 0.145f) * r);
-        st_glab[i] = style(1, 0.092f * r);
+        Gauge *g = &G[i];
+        float r = g->r;
+        if (g->kind == K_THERMO) {
+            st_num[i] = style(0, 0.062f * r);
+            st_glab[i] = style(1, 0.07f * r);
+            st_unit[i] = st_mark[i] = style(0, 0.05f * r);
+            continue;
+        }
+        st_num[i] = style(0, (g->kind != K_DIAL ? 0.17f : g->scale == SC_FUEL ? 0.19f : g->src == S_CORE ? 0.16f
+                              : g->scale == SC_LOG ? 0.115f : 0.145f) * r);
+        st_glab[i] = style(1, 0.092f * g->txt * r);
         st_unit[i] = style(0, 0.082f * r);
         st_mark[i] = style(0, 0.058f * r);
     }
@@ -713,11 +1227,11 @@ static void layout(void) {
 
     /* lamps */
     nlamp = 0;
-    lamp_pos[nlamp][0] = G[G_TEMP].cx; lamp_pos[nlamp][1] = G[G_TEMP].cy + 0.55f * G[G_TEMP].r;
-    lamp_pos[nlamp][2] = 0.058f * G[G_TEMP].r; nlamp++;
-    if (aux_kind == AUX_BATT) {
-        lamp_pos[nlamp][0] = G[G_AUX].cx; lamp_pos[nlamp][1] = G[G_AUX].cy + 0.5f * G[G_AUX].r;
-        lamp_pos[nlamp][2] = 0.075f * G[G_AUX].r; nlamp++;
+    for (int i = 0; i < NG; i++) {
+        if (G[i].src == S_TEMP) add_lamp(L_HOT, i, 0.55f, 0.058f);
+        if (G[i].src == S_AUX && aux_kind == AUX_BATT) add_lamp(L_MAINS, i, 0.5f, 0.075f);
+        if (G[i].src == S_LAVG && G[i].idx == 0) add_lamp(L_OVER, i, 0.62f, 0.06f);
+        if (G[i].src == S_NET) add_lamp(L_LINK, i, 0.6f, 0.05f);
     }
 
     /* the print: numerals and labels on the faces, engraving on the plaque */
@@ -726,50 +1240,88 @@ static void layout(void) {
     for (int i = 0; i < NG; i++) {
         Gauge *g = &G[i];
         float r = g->r;
-        if (g->kind == K_CLOCK) {
+        if (g->kind == K_CLOCK || g->kind == K_CHRONO) {
+            int chrono = g->kind == K_CHRONO;
             for (int h = 1; h <= 12; h++) {
                 char b[8];
-                snprintf(b, sizeof b, "%d", h);
+                snprintf(b, sizeof b, "%d", chrono ? h * 5 : h);
                 float a = h * 30 * DEG;
                 text_c(st_num[i], g->cx + sinf(a) * 0.68f * r, g->cy - cosf(a) * 0.68f * r, b, ink, 0);
             }
-            text_c(st_mark[i], g->cx, g->cy - 0.33f * r, "AGED BRASS & CO.", ink, 0.18f * styles[st_mark[i]].px);
-            text_c(st_unit[i], g->cx, g->cy + 0.34f * r, "LOCAL TIME", ink, 0.2f * styles[st_unit[i]].px);
+            text_c(st_mark[i], g->cx, g->cy - 0.33f * r, chrono ? "CHRONOGRAPH" : "AGED BRASS & CO.", ink, 0.18f * styles[st_mark[i]].px);
+            text_c(st_unit[i], g->cx, g->cy + 0.34f * r, chrono ? "TIME AWAY" : "LOCAL TIME", ink, 0.2f * styles[st_unit[i]].px);
             continue;
         }
-        float nr = i == G_AUX && aux_kind == AUX_BATT ? 0.62f : 0.655f;
+        if (g->kind == K_THERMO) {
+            /* numerals right of the tube, the name at the top, the unit at the bottom */
+            for (int k2 = 0; k2 <= g->nmaj; k2 += g->numevery) {
+                char b[16];
+                snprintf(b, sizeof b, "%g", g->vmin + (g->vmax - g->vmin) * k2 / g->nmaj);
+                float y = g->cy + (TH_Y0 + (TH_Y1 - TH_Y0) * k2 / g->nmaj) * r;
+                text(st_num[i], g->cx + 0.035f * r, y + cap_h(st_num[i]) * 0.5f, -1, b,
+                     (float)k2 / g->nmaj >= g->red0 - 1e-3f ? red : ink, 0);
+            }
+            text_c(st_glab[i], g->cx, g->cy - 0.785f * r, g->label, ink, 0.12f * styles[st_glab[i]].px);
+            text_c(st_unit[i], g->cx + 0.09f * r, g->cy + 0.72f * r, g->unit, ink, 0);
+            continue;
+        }
+        int fuel = g->scale == SC_FUEL;
+        float nr = fuel ? 0.62f : 0.655f;
         for (int k2 = 0; k2 <= g->nmaj; k2 += g->numevery) {
             char b[16];
             float v = g->vmin + (g->vmax - g->vmin) * k2 / g->nmaj;
-            if (i == G_AUX && aux_kind == AUX_BATT) snprintf(b, sizeof b, "%s", k2 == 0 ? "E" : k2 == g->nmaj ? "F" : k2 * 2 == g->nmaj ? "1/2" : "");
-            else snprintf(b, sizeof b, "%g", v);
+            if (fuel) snprintf(b, sizeof b, "%s", k2 == 0 ? "E" : k2 == g->nmaj ? "F" : k2 * 2 == g->nmaj ? "1/2" : "");
+            else if (g->scale == SC_LOG) {
+                static const char *dec[] = {"1", "10", "100", "1K", "10K", "100K", "1M", "10M", "100M", "1G", "10G", "100G"};
+                snprintf(b, sizeof b, "%s", dec[(int)lroundf(v)]);
+            } else snprintf(b, sizeof b, "%g", v);
             if (!b[0]) continue;
             float a = g->a0 + (g->a1 - g->a0) * k2 / g->nmaj;
-            int over = (g->red0 >= 0 && (float)k2 / g->nmaj >= g->red0 - 1e-3f && (float)k2 / g->nmaj <= g->red1 + 1e-3f && i == G_TEMP);
-            text_c(st_num[i], g->cx + sinf(a) * nr * r, g->cy - cosf(a) * nr * r, b, over ? red : ink, 0);
+            int over = g->hot && g->red0 >= 0 && (float)k2 / g->nmaj >= g->red0 - 1e-3f && (float)k2 / g->nmaj <= g->red1 + 1e-3f;
+            float rr = g->scale == SC_LOG ? 0.67f : nr;
+            text_c(st_num[i], g->cx + sinf(a) * rr * r, g->cy - cosf(a) * rr * r, b, over ? red : ink, 0);
         }
         float lt = 0.14f * styles[st_glab[i]].px;
-        if (i == G_AUX && aux_kind == AUX_BATT) {
+        if (fuel) {
             text_c(st_glab[i], g->cx, g->cy + 0.27f * r, g->label, ink, lt);
             text_c(st_mark[i], g->cx, g->cy + 0.69f * r, "MAINS", ink, 0.2f * styles[st_mark[i]].px);
+        } else if (g->src == S_CORE) {
+            text_c(st_glab[i], g->cx, g->cy - 0.3f * r, g->label, ink, lt);
         } else {
             text_c(st_glab[i], g->cx, g->cy - 0.33f * r, g->label, ink, lt);
-            text_c(st_unit[i], g->cx, g->cy + 0.3f * r, g->unit, ink, 0.1f * styles[st_unit[i]].px);
-            if (i == G_TEMP) text_c(st_mark[i], g->cx, g->cy + 0.73f * r, "HOT", ink, 0.2f * styles[st_mark[i]].px);
+            text_c(st_unit[i], g->cx, g->cy + (g->dual ? 0.34f : 0.3f) * r, g->unit, ink, 0.1f * styles[st_unit[i]].px);
+            if (g->hot) text_c(st_mark[i], g->cx, g->cy + 0.73f * r, "HOT", ink, 0.2f * styles[st_mark[i]].px);
+            if (g->src == S_LAVG && g->idx == 0) text_c(st_mark[i], g->cx, g->cy + 0.79f * r, "OVERLOAD", ink, 0.2f * styles[st_mark[i]].px);
+            if (g->src == S_NET) text_c(st_mark[i], g->cx, g->cy + 0.73f * r, "LINK", ink, 0.2f * styles[st_mark[i]].px);
+            if (g->dual) {
+                /* which needle is which */
+                const char *l1 = g->src == S_NET ? "RX" : "READ", *l2 = g->src == S_NET ? "TX" : "WRITE";
+                float y = g->cy + 0.19f * r + cap_h(st_unit[i]) * 0.5f, tr = 0.14f * styles[st_unit[i]].px;
+                text(st_unit[i], g->cx - 0.07f * r, y, 1, l1, ink, tr);
+                text(st_unit[i], g->cx + 0.07f * r, y, -1, l2, red, tr);
+            }
         }
     }
-    text_engraved(st_name, (plq[0] + plq[2]) / 2, plq[1] + 1.7f * kp + cap_h(st_name) / 2, 0, hn, 0.22f * styles[st_name].px);
-    rule_l[0] = plq[0] + 2.0f * kp; rule_l[2] = plq[2] - 2.0f * kp; rule_l[1] = plq[1] + 3.2f * kp;
-    rule_l[3] = fmaxf(0.6f, 0.06f * kp);
-    for (int w = 0; w < 2; w++)
-        text_engraved(st_lab, plq[0] + 2.0f * kp, (win_rect[w][1] + win_rect[w][3]) / 2 + cap_h(st_lab) / 2, -1,
-                      w ? "AWAY" : "UPTIME", 0.16f * styles[st_lab].px);
-    /* group captions over the first window: drums 0-1 seconds, 2-3 minutes, 4-5 hours, 6-8 days */
-    static const char *caps[4] = {"SEC", "MIN", "HRS", "DAYS"};
-    static const int cg[4][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 8}};
-    for (int c = 0; c < 4; c++) {
-        float x = (drum_rect[cg[c][0]][2] + drum_rect[cg[c][1]][0]) / 2;
-        text_engraved(st_cap, x, plq[1] + 4.25f * kp, 0, caps[c], 0.18f * styles[st_cap].px);
+    if (!pq_title) {
+        text_engraved(st_name, (plq[0] + plq[2]) / 2, plq[1] + 1.7f * kp + cap_h(st_name) / 2, 0, hn, 0.22f * styles[st_name].px);
+        rule_l[0] = plq[0] + 2.0f * kp; rule_l[2] = plq[2] - 2.0f * kp; rule_l[1] = plq[1] + 3.2f * kp;
+        rule_l[3] = fmaxf(0.6f, 0.06f * kp);
+        for (int w = 0; w < 2; w++)
+            text_engraved(st_lab, plq[0] + 2.0f * kp, (win_rect[w][1] + win_rect[w][3]) / 2 + cap_h(st_lab) / 2, -1,
+                          w ? "AWAY" : "UPTIME", 0.16f * styles[st_lab].px);
+        /* group captions over the first window: drums 0-1 seconds, 2-3 minutes, 4-5 hours, 6-8 days */
+        static const char *caps[4] = {"SEC", "MIN", "HRS", "DAYS"};
+        static const int cg[4][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 8}};
+        for (int c = 0; c < 4; c++) {
+            float x = (drum_rect[cg[c][0]][2] + drum_rect[cg[c][1]][0]) / 2;
+            text_engraved(st_cap, x, plq[1] + 4.25f * kp, 0, caps[c], 0.18f * styles[st_cap].px);
+        }
+    } else {
+        float tk = (plq[3] - plq[1]) / 10, cx = (plq[0] + plq[2]) / 2;
+        text_engraved(st_name, cx, plq[1] + 3.7f * tk + cap_h(st_name) / 2, 0, title, 0.22f * styles[st_name].px);
+        rule_l[0] = plq[0] + 1.6f * tk; rule_l[2] = plq[2] - 1.6f * tk; rule_l[1] = plq[1] + 6.2f * tk;
+        rule_l[3] = fmaxf(0.6f, 0.08f * tk);
+        text_engraved(st_sub, cx, plq[1] + 7.9f * tk + cap_h(st_sub) / 2, 0, sub, 0.18f * styles[st_sub].px);
     }
 }
 
@@ -809,11 +1361,12 @@ static const char *FS_STATIC = "#version 330 core\n" GLSL(
     uniform vec2 uRes;
     uniform float uSeed;
     uniform vec4 uPlate, uPq, uRule;
-    uniform vec4 uG[5];        /* cx cy r kind */
-    uniform vec4 uA[5];        /* a0 a1 nmaj nmin */
-    uniform vec4 uZ[5];        /* red0 red1 amb0 amb1 */
+    uniform vec4 uG[32];       /* cx cy r kind */
+    uniform vec4 uA[32];       /* a0 a1 nmaj nmin */
+    uniform vec4 uZ[32];       /* red0 red1 amb0 amb1 */
+    uniform int uNG;
     uniform vec4 uWin[2];
-    uniform vec4 uLs[2];       /* lamp sockets: x y r */
+    uniform vec4 uLs[4];       /* lamp sockets: x y r */
     uniform int uNL;
     uniform vec3 uRed, uAmber, uBrass;
     out vec4 o;
@@ -1011,6 +1564,78 @@ GLSL(
         return c;
     }
 
+    /* a thermometer: a brass mount, an ivory scale, a glass tube and bulb
+     * (the mercury is drawn every frame); r is the mount's half-height */
+    vec3 thermo(int i, vec2 q, float r, vec3 col) {
+        float hw = 0.26 * r, cr = 0.07 * r;
+        float dq = sdBox(q, vec2(hw, r), cr);
+        if (dq > 1.0) return col;
+        vec2 e = vec2(1.0, 0.0);
+        vec3 n = vec3(0.0, 0.0, 1.0);
+        float bw = 0.05 * r;
+        if (dq > -bw) {
+            vec2 g = normalize(vec2(sdBox(q + e.xy, vec2(hw, r), cr) - sdBox(q - e.xy, vec2(hw, r), cr),
+                                    sdBox(q + e.yx, vec2(hw, r), cr) - sdBox(q - e.yx, vec2(hw, r), cr)) + 1e-6);
+            float u = (dq + bw) / bw;
+            n = normalize(vec3(g * (0.25 + 1.4 * u * u), 1.0));
+        }
+        float br = 1.0 + 0.08 * (vnoise(vec2(q.x * 0.05, q.y * 0.6 + float(i) * 9.0)) - 0.5);
+        vec3 base = mix(uBrass, uBrass * vec3(0.72, 0.62, 0.5), 0.45 * smoothstep(0.45, 0.8, fbm(q / r * 2.0 + float(i) * 3.0 + uSeed)));
+        vec3 c = metal(n, base) * br;
+        /* the ivory scale plate, sunk into the mount */
+        vec2 ph = vec2(0.19 * r, 0.86 * r);
+        float dp = sdBox(q, ph, 0.03 * r);
+        c *= 1.0 - 0.5 * aa(abs(dp) - 1.2);
+        if (dp < 1.0) {
+            vec2 u = q / r;
+            vec3 f = vec3(0.90, 0.85, 0.76) * (1.0 - 0.08 * u.y * u.y);
+            f *= 0.95 + 0.08 * fbm(u * 3.0 + float(i) * 7.13 + uSeed);
+            f = mix(f, vec3(0.78, 0.66, 0.47), 0.3 * smoothstep(0.5, 0.78, fbm(u * 2.0 + 19.0 + float(i))));
+            f *= 0.985 + 0.03 * hash(floor(q));
+            /* inner shadow along the top and left edge */
+            f *= 1.0 - 0.35 * smoothstep(0.02 * r, 0.0, -dp) * smoothstep(-0.5, 0.5, -(q.x + q.y * 0.3) / r);
+            vec3 ink = vec3(0.11, 0.085, 0.065);
+            vec4 A = uA[i];
+            float y0 = 0.56 * r, y1 = -0.66 * r, tx = -0.035 * r;
+            float nt = A.z * A.w;
+            float k = clamp(floor((q.y - y0) / (y1 - y0) * nt + 0.5), 0.0, nt);
+            float ty = y0 + (y1 - y0) * k / nt;
+            bool major = mod(k, A.w) < 0.5;
+            float len = (major ? 0.075 : 0.045) * r;
+            float x0 = tx - 0.04 * r;
+            float lw = max(0.0045 * r, 0.8);
+            float dt = max(abs(q.y - ty) - (major ? lw * 1.3 : lw * 0.8), abs(q.x - (x0 - len * 0.5)) - len * 0.5);
+            /* and the scale's spine */
+            float ds = max(abs(q.x - (x0 - 0.002 * r)) - lw * 0.7, max(y1 - q.y, q.y - y0) - lw);
+            f = mix(f, ink, aa(min(dt, ds)) * 0.93);
+            /* the red zone, a thin strip outside the ticks */
+            vec4 Z = uZ[i];
+            if (Z.x >= 0.0) {
+                float za = y0 + (y1 - y0) * Z.x, zb = y0 + (y1 - y0) * Z.y;
+                float dz = max(abs(q.x - (x0 - 0.1 * r)) - 0.012 * r, max(zb - q.y, q.y - za));
+                f = mix(f, uRed, 0.9 * aa(dz));
+            }
+            /* the tube's glass channel and bulb, empty */
+            float tw = 0.022 * r, bc = 0.69 * r, brd = 0.062 * r;
+            float dtube = min(sdBox(q - vec2(tx, (y1 - 0.06 * r + bc) * 0.5), vec2(tw, (bc - y1 + 0.06 * r) * 0.5), tw), length(q - vec2(tx, bc)) - brd);
+            vec3 gl = mix(vec3(0.80, 0.80, 0.76), vec3(0.95, 0.95, 0.92), smoothstep(-tw, tw, -(q.x - tx)));
+            f = mix(f, f * 0.55, aa(dtube - 1.6));
+            f = mix(f, gl, aa(dtube));
+            c = mix(c, f, aa(dp));
+        }
+        /* a screw top and bottom */
+        float sr = 0.04 * r;
+        for (int s = 0; s < 2; s++) {
+            vec2 sc = vec2(0.0, s == 0 ? -0.93 * r : 0.93 * r);
+            float d = length(q - sc);
+            c *= mix(1.0, 0.55, smoothstep(sr * 1.4, sr * 0.6, length(q - sc - vec2(0.3, 0.45) * sr)));
+            if (d < sr + 1.0) c = screw((q - sc) / sr, hash(vec2(float(i), float(s) + 4.0) + uSeed) * 3.14, c, d - sr);
+        }
+        /* a dark gap where it meets the plate */
+        col *= 1.0 - 0.6 * aa(abs(dq) - 1.0);
+        return mix(col, c, aa(dq));
+    }
+
     vec3 plaque(vec2 p, vec3 col) {
         vec4 P = uPq;
         float h = P.w - P.y;
@@ -1063,15 +1688,25 @@ GLSL(
         vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
         vec3 col = panel(p);
         /* the instruments' shadows on the plate */
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < uNG; i++) {
             float rb = 1.22 * uG[i].z;
+            if (uG[i].w > 2.5) {
+                float r = uG[i].z;
+                float d = sdBox(p - uG[i].xy - vec2(0.035, 0.05) * 0.5 * r, vec2(0.26 * r, r), 0.07 * r);
+                col *= mix(1.0, 0.35, smoothstep(0.09 * r, -0.02 * r, d));
+                continue;
+            }
             float d = length(p - uG[i].xy - vec2(0.035, 0.05) * rb) - rb;
             col *= mix(1.0, 0.35, smoothstep(0.12 * rb, -0.03 * rb, d));
         }
         col = plaque(p, col);
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < uNG; i++) {
             vec2 q = p - uG[i].xy;
             float d = length(q), r = uG[i].z;
+            if (uG[i].w > 2.5) {
+                if (abs(q.x) < 0.3 * r && abs(q.y) < 1.05 * r) col = thermo(i, q, r, col);
+                continue;
+            }
             if (d > 1.22 * r + 1.0) continue;
             vec3 b = bezel(i, q, d, r);
             if (d < r + 1.0) b = mix(b, face(i, q, d, r), aa(d - r));
@@ -1080,7 +1715,7 @@ GLSL(
             col = mix(col, b, aa(d - 1.22 * r));
         }
         /* lamp sockets: a little domed brass ring round a dark jewel */
-        for (int l = 0; l < 2; l++) {
+        for (int l = 0; l < 4; l++) {
             if (l >= uNL) break;
             vec2 q = p - uLs[l].xy;
             float lr = uLs[l].z, d = length(q);
@@ -1118,14 +1753,15 @@ static const char *FS_TEXT = "#version 330 core\n" GLSL(
 static const char *FS_DYN = "#version 330 core\n" GLSL(
     uniform sampler2D uStatic, uAtlas;
     uniform vec2 uRes;
-    uniform vec4 uG[5];
-    uniform vec4 uN[5];          /* needle angle; the clock: hour, minute, second */
+    uniform vec4 uG[32];
+    uniform vec4 uN[32];         /* needle angle, second needle's, has a second; the clocks: hour, minute, second; a thermometer: its level */
+    uniform int uNG;
     uniform vec4 uWin[2];
     uniform vec4 uDp[17];        /* drum rects */
     uniform vec4 uDr[17];        /* digit, next digit, roll 0..1, radix (< 0: an ivory drum) */
     uniform vec4 uDig[10];       /* atlas rects of the digits */
-    uniform vec4 uLamp[2];       /* x y r on */
-    uniform vec3 uLampC[2];
+    uniform vec4 uLamp[4];       /* x y r on */
+    uniform vec3 uLampC[4];
     uniform int uNL;
     uniform vec3 uBrass, uRed;
     out vec4 o;
@@ -1213,6 +1849,14 @@ GLSL(
         vec3 dark = vec3(0.045, 0.04, 0.042);
         if (uG[i].w < 0.5) {
             float a = uN[i].x;
+            if (uN[i].z > 0.5) {
+                /* the second needle, red, under the first */
+                float a2 = uN[i].y;
+                float ds2 = needle(q - so * 0.03 * r, a2, r * 0.93);
+                col *= 1.0 - 0.34 * smoothstep(bl, -bl, ds2);
+                float d2 = needle(q, a2, r * 0.93);
+                col = mix(col, uRed * (0.75 + 0.6 * smoothstep(-0.012 * r, 0.0, d2)), aa(d2));
+            }
             float ds = needle(q - so * 0.035 * r, a, r);
             col *= 1.0 - 0.38 * smoothstep(bl, -bl, ds);
             float d = needle(q, a, r);
@@ -1236,6 +1880,24 @@ GLSL(
         if (dh < hr + 1.0) col = mix(col, dome(q / hr, uBrass), aa(dh - hr));
         if (uG[i].w > 0.5 && dh < 0.4 * hr + 1.0) col = mix(col, uRed * (1.1 - 0.5 * length(q / (0.4 * hr) + 0.4)), aa(dh - 0.4 * hr));
         return glass(q, r, col);
+    }
+
+    /* the mercury, and the tube's glass over it */
+    vec3 mercury(int i, vec2 q, float r, vec3 col) {
+        float tx = -0.035 * r, tw = 0.022 * r, bc = 0.69 * r, brd = 0.062 * r;
+        float y0 = 0.56 * r, y1 = -0.66 * r;
+        float top = y0 + (y1 - y0) * uN[i].x;
+        float iw = tw * 0.62;
+        float dm = min(sdBox(q - vec2(tx, (top + bc) * 0.5), vec2(iw, max((bc - top) * 0.5, 0.0)), iw * 0.5), length(q - vec2(tx, bc)) - brd * 0.8);
+        float lx = (q.x - tx) / iw;
+        vec3 m = uRed * (0.75 + 0.55 * exp(-pow(lx + 0.35, 2.0) * 4.0));
+        float bl = length(q - vec2(tx, bc) + vec2(0.3, 0.35) * brd) / brd;
+        m += vec3(1.0, 0.85, 0.75) * 0.5 * exp(-bl * bl * 20.0);
+        col = mix(col, m, aa(dm));
+        /* a highlight running down the glass */
+        float dg = sdBox(q - vec2(tx - 0.45 * tw, (y1 + bc) * 0.5 - 0.04 * r), vec2(0.18 * tw, (bc - y1) * 0.5 - 0.04 * r), 0.18 * tw);
+        col += vec3(1.0, 0.97, 0.9) * 0.28 * aa(dg + 0.3);
+        return col;
     }
 
     vec3 drum(int j, vec2 p, vec3 col) {
@@ -1274,9 +1936,13 @@ GLSL(
         vec2 fc = gl_FragCoord.xy;
         vec2 p = vec2(fc.x, uRes.y - fc.y);
         vec3 col = texelFetch(uStatic, ivec2(fc), 0).rgb;
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < uNG; i++) {
             vec2 q = p - uG[i].xy;
             float r = uG[i].z;
+            if (uG[i].w > 2.5) {
+                if (abs(q.x + 0.035 * r) < 0.03 * r && q.y > -0.75 * r && q.y < 0.76 * r) col = mercury(i, q, r, col);
+                continue;
+            }
             if (dot(q, q) < (r + 1.0) * (r + 1.0)) col = mix(col, instrument(i, q, r, col), aa(length(q) - r));
         }
         for (int w = 0; w < 2; w++) {
@@ -1292,7 +1958,7 @@ GLSL(
             col *= 1.0 - 0.5 * smoothstep(0.2, 0.0, t) - 0.35 * smoothstep(0.8, 1.0, t);
         }
         /* lamps: a jewel, glowing when lit, its light spilling round it */
-        for (int l = 0; l < 2; l++) {
+        for (int l = 0; l < 4; l++) {
             if (l >= uNL) break;
             vec2 q = p - uLamp[l].xy;
             float lr = uLamp[l].z, on = uLamp[l].w, d = length(q);
@@ -1401,7 +2067,7 @@ static void build_static(void) {
 
     GLuint p = prog_static;
     glUseProgram(p);
-    float gv[NG][4], av[NG][4], zv[NG][4], ls[2][4] = {{0}};
+    float gv[MAXG][4], av[MAXG][4], zv[MAXG][4], ls[4][4] = {{0}};
     for (int i = 0; i < NG; i++) {
         gv[i][0] = G[i].cx; gv[i][1] = G[i].cy; gv[i][2] = G[i].r; gv[i][3] = (float)G[i].kind;
         av[i][0] = G[i].a0; av[i][1] = G[i].a1; av[i][2] = (float)G[i].nmaj; av[i][3] = (float)G[i].nmin;
@@ -1409,7 +2075,9 @@ static void build_static(void) {
     }
     for (int l = 0; l < nlamp; l++) { ls[l][0] = lamp_pos[l][0]; ls[l][1] = lamp_pos[l][1]; ls[l][2] = lamp_pos[l][2]; }
     glUniform2f(U(p, "uRes"), (float)W, (float)H);
-    glUniform1f(U(p, "uSeed"), (opt_seed % 1000) * 0.137f);
+    /* each output its own stretch of wood and steel */
+    glUniform1f(U(p, "uSeed"), ((opt_seed + (span_me > 0 ? 131u * (uint32_t)span_me : 0)) % 1000) * 0.137f);
+    glUniform1i(U(p, "uNG"), NG);
     glUniform4fv(U(p, "uPlate"), 1, plate);
     glUniform4fv(U(p, "uPq"), 1, plq);
     glUniform4fv(U(p, "uRule"), 1, rule_l);
@@ -1417,7 +2085,7 @@ static void build_static(void) {
     glUniform4fv(U(p, "uA"), NG, &av[0][0]);
     glUniform4fv(U(p, "uZ"), NG, &zv[0][0]);
     glUniform4fv(U(p, "uWin"), 2, &win_rect[0][0]);
-    glUniform4fv(U(p, "uLs"), 2, &ls[0][0]);
+    glUniform4fv(U(p, "uLs"), 4, &ls[0][0]);
     glUniform1i(U(p, "uNL"), nlamp);
     glUniform3fv(U(p, "uRed"), 1, c_red);
     float amb[3];
@@ -1448,6 +2116,7 @@ static void build_static(void) {
     glUniform1i(U(p, "uStatic"), 0);
     glUniform1i(U(p, "uAtlas"), 1);
     glUniform4fv(U(p, "uG"), NG, &gv[0][0]);
+    glUniform1i(U(p, "uNG"), NG);
     glUniform4fv(U(p, "uWin"), 2, &win_rect[0][0]);
     glUniform4fv(U(p, "uDp"), NDRUM, &drum_rect[0][0]);
     float dig[10][4];
@@ -1470,22 +2139,37 @@ static void render(double t, double wt, GLuint target) {
     GLuint p = prog_dyn;
     glUseProgram(p);
 
-    float nv[NG][4] = {{0}};
-    for (int i = 0; i < G_CLOCK; i++) nv[i][0] = needle_angle(&G[i], t);
+    float nv[MAXG][4] = {{0}};
     time_t ts = (time_t)wt;
     struct tm tm;
     localtime_r(&ts, &tm);
     float secs = tm.tm_sec + (float)(wt - floor(wt));
     float mins = tm.tm_min + secs / 60;
-    nv[G_CLOCK][0] = ((tm.tm_hour % 12) + mins / 60) * 30 * DEG;
-    nv[G_CLOCK][1] = mins * 6 * DEG;
-    nv[G_CLOCK][2] = sec_angle * DEG;
+    double away = wt - (double)locked_at;
+    if (away < 0) away = 0;
+    for (int i = 0; i < NG; i++) {
+        Gauge *g = &G[i];
+        if (g->kind == K_CLOCK) {
+            nv[i][0] = ((tm.tm_hour % 12) + mins / 60) * 30 * DEG;
+            nv[i][1] = mins * 6 * DEG;
+            nv[i][2] = sec_angle * DEG;
+        } else if (g->kind == K_CHRONO) {
+            /* the time away: a sweeping seconds hand, minutes, and hours */
+            nv[i][0] = (float)fmod(away / 3600, 12) * 30 * DEG;
+            nv[i][1] = (float)fmod(away / 60, 60) * 6 * DEG;
+            nv[i][2] = (float)fmod(away, 60) * 6 * DEG;
+        } else if (g->kind == K_THERMO) {
+            nv[i][0] = g->x;
+        } else {
+            nv[i][0] = needle_angle(g, g->x, t);
+            nv[i][1] = needle_angle(g, g->x2, t + 3.7);
+            nv[i][2] = (float)g->dual;
+        }
+    }
     glUniform4fv(U(p, "uN"), NG, &nv[0][0]);
 
     /* drums: digit now, digit next, and the roll between over the last 0.3 s */
     double up = sens.uptime + (now() - sens.uptime_at);
-    double away = wt - (double)locked_at;
-    if (away < 0) away = 0;
     float dr[NDRUM][4];
     for (int j = 0; j < NDRUM; j++) {
         double v = j < 9 ? up : away;
@@ -1505,23 +2189,26 @@ static void render(double t, double wt, GLuint target) {
     glUniform4fv(U(p, "uDr"), NDRUM, &dr[0][0]);
 
     /* lamps: HOT when the temperature is in the red; MAINS on the battery */
-    float lv[2][4] = {{0}}, lc[2][3];
-    int l = 0;
-    float hot = G[G_TEMP].x >= G[G_TEMP].red0 ? 1.0f : 0.0f;
-    lv[l][0] = lamp_pos[l][0]; lv[l][1] = lamp_pos[l][1]; lv[l][2] = lamp_pos[l][2];
-    lv[l][3] = hot * (0.85f + 0.15f * sinf((float)t * 6.0f));
-    memcpy(lc[l], c_red, sizeof lc[l]);
-    for (int i = 0; i < 3; i++) lc[l][i] = c_red[i] * 1.5f;
-    l++;
-    if (aux_kind == AUX_BATT) {
+    /* (and OVERLOAD past one minute's load per CPU; LINK while a network is up) */
+    float lv[4][4] = {{0}}, lc[4][3] = {{0}};
+    for (int l = 0; l < nlamp; l++) {
+        Gauge *g = &G[lamp_g[l]];
         lv[l][0] = lamp_pos[l][0]; lv[l][1] = lamp_pos[l][1]; lv[l][2] = lamp_pos[l][2];
-        /* steady on mains; breathing slowly while charging */
-        lv[l][3] = sens.mains ? (sens.charging ? 0.7f + 0.3f * sinf((float)t * 2.0f) : 1.0f) : 0.0f;
-        memcpy(lc[l], c_sage, sizeof lc[l]);
-        l++;
+        if (lamp_kind[l] == L_HOT || lamp_kind[l] == L_OVER) {
+            float on = g->x >= g->red0 ? 1.0f : 0.0f;
+            lv[l][3] = on * (0.85f + 0.15f * sinf((float)t * 6.0f));
+            for (int i = 0; i < 3; i++) lc[l][i] = c_red[i] * 1.5f;
+        } else if (lamp_kind[l] == L_MAINS) {
+            /* steady on mains; breathing slowly while charging */
+            lv[l][3] = sens.mains ? (sens.charging ? 0.7f + 0.3f * sinf((float)t * 2.0f) : 1.0f) : 0.0f;
+            memcpy(lc[l], c_sage, sizeof lc[l]);
+        } else {
+            lv[l][3] = sens.link ? 1.0f : 0.0f;
+            memcpy(lc[l], c_sage, sizeof lc[l]);
+        }
     }
-    glUniform4fv(U(p, "uLamp"), 2, &lv[0][0]);
-    glUniform3fv(U(p, "uLampC"), 2, &lc[0][0]);
+    glUniform4fv(U(p, "uLamp"), 4, &lv[0][0]);
+    glUniform3fv(U(p, "uLampC"), 4, &lc[0][0]);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex_static);
@@ -1535,12 +2222,15 @@ static void render(double t, double wt, GLuint target) {
 /* advance the springs to time t (fixed sub-steps) and read the sensors once a second */
 static double sim_t, last_read;
 static void advance(double t, double wt) {
-    if (t - last_read >= 1.0) {
+    /* spanning, every instance reads on the same wall-clock second, so
+     * their needles move together */
+    if (span_me >= 0 ? floor(wt) != last_read : t - last_read >= 1.0) {
         read_sensors();
         set_targets();
-        last_read = t;
+        last_read = span_me >= 0 ? floor(wt) : t;
     }
     const float h = 1.0f / 240;
+    if (t - sim_t > 10) sim_t = t - 10;     /* long after the epoch: the springs have settled anyway */
     while (sim_t + h <= t) {
         sim_t += h;
         physics(wt - (t - sim_t), h, sim_t > 0.6);
@@ -1635,8 +2325,42 @@ static int wl_poll(void) {
 static void usage(void) {
     fprintf(stderr,
         "usage: gauges [--window | --root | --layer] [--seed N] [--fps N] [--font FAMILY]\n"
+        "              [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
         "              [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH]\n");
     exit(1);
+}
+
+/* "x,y,w,h;x,y,w,h;..." */
+static void parse_layout(const char *str) {
+    for (span_n = 0; span_n < MAX_OUT; span_n++) {
+        float *r = span[span_n];
+        int used = 0;
+        if (sscanf(str, "%f,%f,%f,%f%n", &r[0], &r[1], &r[2], &r[3], &used) != 4 || r[2] <= 0 || r[3] <= 0)
+            break;
+        str += used;
+        if (*str == ';') str++;
+    }
+}
+
+/* Spanning, the output under the middle of the layout is the front one and
+ * gets the main cluster; the rest, left to right, take the core bank and the
+ * auxiliaries in turn. */
+static int pick_role(void) {
+    if (span_me < 0) return R_FRONT;
+    float x0 = 1e9f, x1 = -1e9f;
+    for (int i = 0; i < span_n; i++) { x0 = fminf(x0, span[i][0]); x1 = fmaxf(x1, span[i][0] + span[i][2]); }
+    float mx = (x0 + x1) / 2;
+    int front = 0;
+    for (int i = 0; i < span_n; i++)
+        if (span[i][0] <= mx && mx < span[i][0] + span[i][2]) { front = i; break; }
+    if (span_me == front) return R_FRONT;
+    int rank = 0;
+    for (int i = 0; i < span_n; i++) {
+        if (i == front || i == span_me) continue;
+        if (span[i][0] < span[span_me][0] || (span[i][0] == span[span_me][0] && (span[i][1] < span[span_me][1] ||
+                                               (span[i][1] == span[span_me][1] && i < span_me)))) rank++;
+    }
+    return rank % 2 ? R_AUX : R_BANK;
 }
 
 static void save_ppm(const char *path) {
@@ -1665,8 +2389,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-bench") && i + 1 < argc) opt_bench = atoi(argv[++i]);
         else if (!strcmp(a, "-size") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &off_w, &off_h) != 2) usage(); }
         else if (!strcmp(a, "-at") && i + 1 < argc) opt_at = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-epoch") && i + 1 < argc) opt_epoch = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-layout") && i + 1 < argc) parse_layout(argv[++i]);
+        else if (!strcmp(a, "-output") && i + 1 < argc) span_me = atoi(argv[++i]);
         else usage();
     }
+    if (span_me >= span_n) span_me = -1;
+    role = pick_role();
     if (opt_fps < 1) opt_fps = 1;
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
     rng = opt_seed | 1;
@@ -1679,6 +2408,7 @@ int main(int argc, char **argv) {
     if (ncpu < 1) ncpu = 1;
     find_temp();
     find_aux();
+    if (role == R_AUX) { find_thermometers(); find_fans(); }
     read_sensors();
     {   /* a first CPU-load sample over a tenth of a second */
         struct timespec ts = {0, 100000000};
@@ -1689,8 +2419,10 @@ int main(int argc, char **argv) {
     set_targets();
     fonts_init();
 
-    double t_wall0 = wall();
-    if (opt_shot) t_wall0 -= opt_at;
+    /* --epoch: when the panel powered up, shared by every instance; a --shot
+     * then shows the moment --at seconds after it */
+    double t_wall0 = opt_epoch ? opt_epoch : wall();
+    if (opt_shot && !opt_epoch) t_wall0 -= opt_at;
     t_start_wall = t_wall0;
     locked_at = lock_start();
     if (!locked_at) locked_at = (time_t)t_wall0;
@@ -1739,7 +2471,7 @@ int main(int argc, char **argv) {
         last_read = 0;
         if (opt_shot) {
             /* let the springs run to --at (the readings held still) */
-            double wt = wall();
+            double wt = opt_epoch ? opt_epoch + opt_at : wall();
             const float h = 1.0f / 240;
             sec_angle = (float)(((time_t)wt % 60) * 6);
             for (sim_t = 0; sim_t < opt_at; sim_t += h) physics(wt - (opt_at - sim_t), h, sim_t > 0.6);
@@ -1786,7 +2518,7 @@ int main(int argc, char **argv) {
                 return 0;
             }
         }
-        double t = now(), el = t - t0, wt = wall();
+        double t = now(), wt = wall(), el = opt_epoch ? fmax(wt - opt_epoch, 0) : t - t0;
         advance(el, wt);
         render(el, wt, 0);
         if (opt_layer) eglSwapBuffers(wl.ed, wl.es);
