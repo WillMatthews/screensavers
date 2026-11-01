@@ -18,7 +18,7 @@
  *   - contours every --interval metres, index contours every fifth, as
  *     constant-width anti-aliased lines (distance to the nearest level =
  *     |fract(h / I) - 1/2| * I / |grad h|), thin ones fading where they crowd;
- *   - a soft hillshade from the north-west, the sun swaying a little;
+ *   - a soft hillshade from the sun, which swings across the north;
  *   - water below datum (which rises and falls a few metres, so the shores
  *     breathe), with engraved waterlines following the shore outwards;
  *   - rivers along their valleys, widening downstream; woodland stipple;
@@ -34,6 +34,17 @@
  * own), cream (sienna on paper; --light is an alias), slate (pale blue-grey
  * on deep slate), blueprint (cyan and white on Prussian blue) or survey (a
  * printed survey sheet: brown contours, blue water, a green-to-buff tint);
+ * It lives: the drift lingers and glides (pace()); the sun swings from
+ * west-south-west to north-east and back over ~16 minutes, low at the ends,
+ * and casts soft shadows that sweep across the country (FS_SHADE marches
+ * towards it through the height texture, at quarter resolution, every other
+ * frame; the ground is baked SH_REACH beyond the screen for it); cloud
+ * shadows drift over on the wind, changing shape; swash lines run in to the
+ * shores and glints twinkle out on the water; and a surveyor's pen walks
+ * the country, keeping to the contours where it can, leaving a dotted track
+ * that fades over a few minutes (build_walker()).
+ *
+ * --seed N picks the country and the drift, --light prints it on paper,
  * --interval sets the contour interval (metres, default 20), --speed scales
  * the drift (~6 px/s at 1080p) and --fps the frame rate (default 30: the
  * motion is slow, and one instance runs per monitor on the lock screen).
@@ -86,6 +97,7 @@ static float MPP = 8;                  /* metres per pixel */
 static float seed_x, seed_z;           /* where in the world this map is, metres */
 static int E0, N0;                     /* grid numbering offsets */
 static double ph[6];                   /* phases of the drift */
+static double ph2[8];                  /* phases of the pace, the light, the walker */
 
 static void die(const char *what) { fprintf(stderr, "contours: %s\n", what); exit(1); }
 
@@ -179,13 +191,32 @@ static void grad(double x, double y, double *gx, double *gy) {
 /* the drift: where the middle of the screen is at time t, world px. Three
  * circles of different sizes and periods summed (an epicycle wandering over
  * ~300 km), so the path turns gently, never stops and never repeats. */
+/* the pace: the drift lingers and glides rather than running steady.
+ * Drift time runs at 1 + 0.55 cos + 0.25 cos of real time: from a fifth of
+ * the speed (a few minutes lingering over one stretch of country) to nearly
+ * twice it, never stopping, never going back. */
+static double pace(double t) {
+    return t + 0.55 * 110 * sin(t / 110 + ph2[0]) + 0.25 * 41 * sin(t / 41 + ph2[1]);
+}
+
 static void view_at(double t, double *x, double *y) {
+    t = pace(t);
     double mx = 33000 * cos(t / 830 + ph[0]) + 6000 * cos(-t / 377 + ph[1]) + 90000 * cos(t / 5400 + ph[2]);
     double my = 33000 * sin(t / 830 + ph[0]) + 6000 * sin(-t / 377 + ph[1]) + 90000 * sin(t / 6950 + ph[3]);
     *x = mx / MPP; *y = my / MPP;
 }
 static float water_at(double t) { return 3.5f * (float)sin(t / 170 + ph[4]); }
 #define WATER_MAX 3.5f
+
+/* the sun: swinging back and forth across the north over ~16 minutes, from
+ * west-south-west to north-east (never from the south, where relief reads
+ * inside out), high at the middle of its swing and low at the ends, where
+ * the shadows run long. az is the screen angle towards the sun (y down). */
+static void sun_at(double t, float *az, float *el) {
+    double th = t / 150 + ph2[2];
+    *az = (float)(-0.6 * M_PI + 0.95 * sin(th));
+    *el = (float)((15 + 25 * (0.5 + 0.5 * cos(2 * th))) * M_PI / 180);
+}
 
 /* ---- glyph atlas: a few faces at their exact pixel sizes, plus drawn
  * sprites, shelf-packed into one R8 texture ---- */
@@ -296,6 +327,29 @@ static void make_sprites(void) {
     }
 }
 
+/* the walker's sprites: a dot of its track, and the ring of its pen, drawn
+ * a pixel larger all round than they need so they filter smoothly when blit
+ * at fractional positions */
+static Glyph wk_dot, wk_pen;
+static void make_walker_sprites(void) {
+    for (int k = 0; k < 2; k++) {
+        Glyph *g = k ? &wk_pen : &wk_dot;
+        float r = k ? 5.5f * S : 1.35f * S, lw = fmaxf(1.0f, 1.1f * S);
+        g->w = g->h = ((int)ceilf(r * 2) + 3) | 1;
+        atlas_place(g->w, g->h, &g->x, &g->y);
+        float c0 = g->w * 0.5f;
+        for (int y = 0; y < g->h; y++)
+            for (int x = 0; x < g->w; x++) {
+                int c = 0;
+                for (int j = 0; j < 16; j++) {
+                    float d = hypotf(x + (j % 4 + 0.5f) / 4 - c0, y + (j / 4 + 0.5f) / 4 - c0);
+                    c += k ? (fabsf(d - r + lw * 0.5f) < lw * 0.5f || d < 1.3f * S) : d < r;
+                }
+                atlas[(size_t)(g->y + y) * ATW + g->x + x] = (unsigned char)(c * 255 / 16);
+            }
+    }
+}
+
 static void build_atlas(void) {
     if (!FcInit()) die("fontconfig init failed");
     atlas = calloc((size_t)ATW * ATH, 1);
@@ -306,6 +360,7 @@ static void build_atlas(void) {
     load_font(&fonts[F_SUB], "EB Garamond 12,serif:italic", 15.5f * S);
     load_font(&fonts[F_SMALL], "Linux Libertine O,serif", 12 * S);
     make_sprites();
+    make_walker_sprites();
 }
 
 /* ---- overlay geometry: quads of x, y, u, v, r, g, b, a, mode ---- */
@@ -685,6 +740,8 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
     uniform float uMpp, uI, uWater, uSun, uS;
     uniform vec3 cPaper, cPaper2, cMargin, cHi, cLo, cThin, cIndex, cWater, cWaterInk, cWood, cGrid, cFrame, cRiver;
     uniform float aThin, aIndex, aGrid, aWood, kHi, kLo;
+    uniform sampler2D uShade;                 /* the light: sun lit, cloud shadow */
+    uniform float uT, kShadow, kCloud;
     out vec4 o;
 
     float Hh(vec2 w) { return texture(uH, (w + 0.5) / uN).r; }
@@ -771,6 +828,33 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
             col = mix(col, cWaterInk, wl * 0.5 * wet);
         }
 
+        /* the water moving: two swash lines at a time running in to the
+         * shore and fading as they go, and glints twinkling out on the open
+         * water where a slow band of breeze catches the sun */
+        if (wet > 0.0) {
+            float q = pow(max(uWater - h, 1e-3) / 9.0, 0.75);
+            float gq = max(0.75 * pow(max(uWater - h, 1e-3) / 9.0, -0.25) / 9.0 * gl, 1e-5);
+            float var = 0.5 * sin(6.2832 * (gm.x / 2000.0 + gm.y / 1000.0)) + 0.5 * sin(6.2832 * gm.y / 2000.0);
+            float sw = 0.0;
+            for (int k = 0; k < 2; k++) {
+                float p = fract(uT / 13.0 + 0.5 * float(k) + 0.08 * var);
+                float d = abs(q - (1.45 - 1.35 * p)) / gq;
+                sw = max(sw, cov(d, 0.75 * uS) * sin(3.14159 * p) * sin(3.14159 * p));
+            }
+            col = mix(col, cWaterInk, sw * 0.45 * wet * smoothstep(0.6, 2.0, 1.0 / gq));
+            float cs = 10.0 * uS;
+            vec2 ws = sp + uOrgS;
+            vec2 c = floor(ws / cs);
+            uvec2 uc = uvec2(ivec2(c) & 2047);
+            float band = smoothstep(0.35, 0.95, 0.5 + 0.5 * sin(6.2832 * (gm.x / 2000.0 - gm.y / 1000.0) - uT * 0.05));
+            if (r01(uc, 7u) < 0.2 * band && dsh < -6.0) {
+                vec2 ctr = (c + 0.2 + 0.6 * vec2(r01(uc, 8u), r01(uc, 9u))) * cs;
+                float tw = pow(max(sin(uT * (0.5 + 0.4 * r01(uc, 11u)) + 6.2832 * r01(uc, 10u)), 0.0), 10.0);
+                float dot_ = clamp(0.9 * uS + 0.5 - length(ws - ctr), 0.0, 1.0);
+                col = mix(col, cHi, dot_ * tw * 0.75 * smoothstep(-6.0, -14.0, dsh));
+            }
+        }
+
         /* contours */
         float lines = 1.0 - wet;
         float spc = uI / gl;                                 /* px between contours */
@@ -794,7 +878,40 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
 
         /* the shoreline itself */
         col = mix(col, cWaterInk, cov(abs(dsh), 1.1 * uS) * 0.8);
+
+        /* the light over everything: the moving sun's cast shadows and the
+         * drifting clouds' (from the quarter-resolution FS_SHADE pass) */
+        vec2 shd = texture(uShade, gl_FragCoord.xy / uRes).rg;
+        col = mix(col, cLo, min((1.0 - shd.r) * kShadow + shd.g * kCloud, 0.8));
         o = vec4(col, 1.0);
+    });
+
+/* the light, at quarter resolution (it is all soft): r = how lit by the sun,
+ * marching from each place towards the sun through the height texture and
+ * keeping the lowest clearance of the ray over the ground, as a soft
+ * penumbra, the far steps counting for less so long shadows fade out at
+ * their tips; g = cloud shadow, two layers of noise blown at different
+ * winds over the ground so the clouds change shape as they go */
+static const char *FS_SHADE = "#version 330 core\n" NOISE_GLSL GLSL(
+    uniform sampler2D uH;
+    uniform vec2 uRes, uN, uOrgT, uSunDir, uC1, uC2;
+    uniform float uMpp, uWater, uRise, uReach, uCover, uDiv;
+    out vec2 o;
+    float Hs(vec2 w) { return max(texture(uH, (w + 0.5) / uN).r, uWater); }
+    void main() {
+        vec2 sp = vec2(gl_FragCoord.x, uRes.y / uDiv - gl_FragCoord.y) * uDiv;
+        vec2 w = sp + uOrgT;
+        float h0 = Hs(w) + 1.5;
+        float lit = 1.0;
+        for (int i = 1; i <= 28; i++) {
+            float f = float(i) / 28.0, d = uReach * f * f;
+            float clear = h0 + d * uRise - Hs(w + uSunDir * d);     /* m the ray clears the ground by */
+            float l = clamp(0.5 + clear / (d * uMpp * 0.07 + 3.0), 0.0, 1.0);
+            lit = min(lit, mix(l, 1.0, smoothstep(0.2, 1.0, f * f)));
+        }
+        vec2 gm = sp * uMpp;
+        float n = 0.65 * fbm((gm + uC1) / 3000.0, 3, 501u) + 0.35 * fbm((gm + uC2) / 1300.0, 2, 502u);
+        o = vec2(lit, smoothstep(uCover, uCover + 0.18, 0.5 + 3.0 * (n - 0.5)));
     });
 
 static const char *VS_QUAD = "#version 330 core\n" GLSL(
@@ -830,6 +947,11 @@ static const char *FS_QUAD = "#version 330 core\n" GLSL(
 static GLuint prog_bake, prog_map, prog_quad, vao, vao_q, vbo_q, tex_atlas;
 static GLuint tex_h, tex_aux, fbo_h, tex_mask, fbo_mask;
 static int TN, TM, tex_w, tex_h_, baked, bake_x, bake_y;
+static GLuint prog_shade, tex_shade, fbo_shade;
+static int shade_ok;                   /* tex_shade holds a frame's light (it is redone every other frame) */
+static int BM = 8;                     /* ground baked beyond the screen each side: the shadow march's reach */
+#define SH_REACH 230                   /* px at S = 1: how far a shadow can run */
+#define SH_DIV 4                       /* the light pass's resolution divisor */
 
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
@@ -878,7 +1000,8 @@ static void targets(void) {
         glDeleteFramebuffers(2, f);
     }
     tex_w = W; tex_h_ = H;
-    TN = W + 16; TM = H + 16;
+    BM = (int)ceilf(SH_REACH * S) + 8;
+    TN = W + 2 * BM; TM = H + 2 * BM;
     tex_h = mk_tex(GL_R32F, TN, TM, GL_RED, GL_FLOAT, NULL, GL_LINEAR, GL_REPEAT);
     tex_aux = mk_tex(GL_RGBA16F, TN, TM, GL_RGBA, GL_FLOAT, NULL, GL_LINEAR, GL_REPEAT);
     glGenFramebuffers(1, &fbo_h);
@@ -892,6 +1015,12 @@ static void targets(void) {
     glGenFramebuffers(1, &fbo_mask);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_mask);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex_mask, 0);
+    if (tex_shade) { glDeleteTextures(1, &tex_shade); glDeleteFramebuffers(1, &fbo_shade); }
+    shade_ok = 0;
+    tex_shade = mk_tex(GL_RG8, (W + SH_DIV - 1) / SH_DIV, (H + SH_DIV - 1) / SH_DIV, GL_RG, GL_UNSIGNED_BYTE, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
+    glGenFramebuffers(1, &fbo_shade);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_shade);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex_shade, 0);
     baked = 0;
 }
 
@@ -899,6 +1028,7 @@ static void gl_init(void) {
     prog_bake = mk_prog(VS, FS_BAKE);
     prog_map = mk_prog(VS, FS_MAP);
     prog_quad = mk_prog(VS_QUAD, FS_QUAD);
+    prog_shade = mk_prog(VS, FS_SHADE);
     glGenVertexArrays(1, &vao);
     glGenVertexArrays(1, &vao_q);
     glGenBuffers(1, &vbo_q);
@@ -916,6 +1046,10 @@ static void gl_init(void) {
     glUniform1i(U(p, "uH"), 0);
     glUniform1i(U(p, "uAux"), 1);
     glUniform1i(U(p, "uMask"), 2);
+    glUniform1i(U(p, "uShade"), 3);
+    /* shadows and cloud shadows darken towards the hillshade's dark side */
+    glUniform1f(U(p, "kShadow"), 0.2f + 0.25f * P.lo_k);
+    glUniform1f(U(p, "kCloud"), 0.1f + 0.15f * P.lo_k);
     u3(p, "cPaper", P.paper); u3(p, "cPaper2", P.paper2); u3(p, "cMargin", P.margin);
     u3(p, "cHi", P.hi); u3(p, "cLo", P.lo); u3(p, "cThin", P.thin); u3(p, "cIndex", P.index);
     u3(p, "cWater", P.water); u3(p, "cWaterInk", P.waterink); u3(p, "cWood", P.wood);
@@ -1129,6 +1263,89 @@ static void build_cartouche(void) {
     text(&ov, fm, "km", roundf(tx + bar + 8 * S), ly, 0, 0, 0, 0, sc);
 }
 
+/* ---- the walker: a surveyor's pen crossing the country, leaving a dotted
+ * track ----
+ * It heads for a point that wanders about the middle of the view (so it
+ * stays in sight as the view drifts), but like a path it would rather keep
+ * to the contour than climb: the uphill part of its heading is mostly
+ * turned away, so it zigzags up slopes and swings round hills. It turns
+ * smoothly, and a dot is set down every few pixels it walks; dots are world
+ * points, so the track drifts with the map, and fade over a few minutes. */
+#define WK_N 2048
+#define WK_LIFE 300.0                  /* s a dot of the track lasts */
+static struct { double x, y, t; } wk[WK_N];
+static int wk_n, wk_i;                 /* dots held, the next slot */
+static double wk_t = -1e18, wk_x, wk_y, wk_hd, wk_s;    /* time, place, heading, px since the last dot */
+
+static void walker_goal(double t, double *x, double *y) {
+    double cx, cy;
+    view_at(t, &cx, &cy);
+    *x = cx + W * (0.27 * sin(t / 157 + ph2[5]) + 0.07 * sin(t / 61 + ph2[6]));
+    *y = cy + H * (0.24 * sin(t / 119 + ph2[7]) + 0.07 * cos(t / 53 + ph2[5]));
+}
+
+static void walker_step(double t, double dt) {
+    double gx, gy, ex, ey;
+    walker_goal(t, &gx, &gy);
+    ex = gx - wk_x; ey = gy - wk_y;
+    double dist = hypot(ex, ey) + 1e-9, dx = ex / dist, dy = ey / dist;
+    /* keep to the contour: take most of the climb out of the heading,
+     * unless it has fallen well behind */
+    double hx, hy;
+    grad(wk_x, wk_y, &hx, &hy);
+    double hl = hypot(hx, hy);
+    if (hl > 1e-6) {
+        double c = (dx * hx + dy * hy) / hl, k = 0.85 * smoothstep(0.02f, 0.12f, (float)(hl / MPP)) *
+                               (1 - smoothstep(80 * S, 300 * S, (float)dist));
+        dx -= k * c * hx / hl; dy -= k * c * hy / hl;
+    }
+    /* turn smoothly towards that */
+    double want = atan2(dy, dx), d = remainder(want - wk_hd, 2 * M_PI), turn = 0.35 * dt;
+    wk_hd += d > turn ? turn : d < -turn ? -turn : d;
+    double v = 3.5 * S + 0.07 * dist;                         /* px/s: hurrying if left behind */
+    double sx = cos(wk_hd) * v * dt, sy = sin(wk_hd) * v * dt;
+    wk_x += sx; wk_y += sy;
+    wk_s += hypot(sx, sy);
+    if (wk_s >= 6.5 * S) {
+        wk_s = 0;
+        wk[wk_i].x = wk_x; wk[wk_i].y = wk_y; wk[wk_i].t = t + dt;
+        wk_i = (wk_i + 1) % WK_N;
+        if (wk_n < WK_N) wk_n++;
+    }
+}
+
+/* walk on to time t (from a few minutes before it, the first time or after
+ * a jump), then draw the track and the pen */
+static void build_walker(double t, double ox, double oy) {
+    if (t < wk_t || t - wk_t > WK_LIFE) {
+        wk_t = t - WK_LIFE;
+        walker_goal(wk_t, &wk_x, &wk_y);
+        double gx, gy;
+        walker_goal(wk_t + 1, &gx, &gy);
+        wk_hd = atan2(gy - wk_y, gx - wk_x);
+        wk_n = wk_i = 0; wk_s = 0;
+    }
+    while (wk_t < t) {
+        double dt = fmin(0.25, t - wk_t);
+        walker_step(wk_t, dt);
+        wk_t += dt;
+    }
+    float c[4];
+    for (int k = 0; k < wk_n; k++) {
+        int i = ((wk_i - 1 - k) % WK_N + WK_N) % WK_N;
+        double age = t - wk[i].t;
+        if (age > WK_LIFE) { wk_n = k; break; }
+        float x = (float)(wk[i].x - ox), y = (float)(wk[i].y - oy);
+        if (x < mx0 - 8 || x > mx1 + 8 || y < my0 - 8 || y > my1 + 8) continue;
+        float a = 0.85f * (1 - smoothstep(0.35f * WK_LIFE, WK_LIFE, (float)age)) * smoothstep(0, 1.5f, (float)age);
+        rgba(c, P.label, a);
+        blit(&ov, &wk_dot, x, y, 1, 0, -wk_dot.w * 0.5f, -wk_dot.h * 0.5f, c);
+    }
+    float x = (float)(wk_x - ox), y = (float)(wk_y - oy);
+    rgba(c, P.label, 0.75f + 0.2f * (float)sin(t * 1.3));
+    blit(&ov, &wk_pen, x, y, 1, 0, -wk_pen.w * 0.5f, -wk_pen.h * 0.5f, c);
+}
+
 /* ---- a frame ---- */
 static void draw_quads(int from, int to) {
     if (to <= from) return;
@@ -1136,6 +1353,32 @@ static void draw_quads(int from, int to) {
     glUniform2f(U(prog_quad, "uRes"), (float)W, (float)H);
     glBindVertexArray(vao_q);
     glDrawArrays(GL_TRIANGLES, from / 9, (to - from) / 9);
+}
+
+/* the light pass: sun and cloud shadows into tex_shade, at 1 / SH_DIV resolution */
+static void shade(double t, double ox, double oy, float az, float el) {
+    GLuint p = prog_shade;
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_shade);
+    glViewport(0, 0, (W + SH_DIV - 1) / SH_DIV, (H + SH_DIV - 1) / SH_DIV);
+    glUseProgram(p);
+    glBindTexture(GL_TEXTURE_2D, tex_h);
+    glUniform1i(U(p, "uH"), 0);
+    glUniform2f(U(p, "uRes"), (float)W, (float)H);
+    glUniform2f(U(p, "uN"), (float)TN, (float)TM);
+    glUniform2f(U(p, "uOrgT"), (float)(ox - floor(ox / TN) * TN), (float)(oy - floor(oy / TM) * TM));
+    glUniform2f(U(p, "uSunDir"), cosf(az), sinf(az));
+    glUniform1f(U(p, "uMpp"), MPP);
+    glUniform1f(U(p, "uWater"), water_at(t));
+    glUniform1f(U(p, "uRise"), MPP * tanf(el) / 2.0f);          /* relief exaggerated twice, as the hillshade */
+    glUniform1f(U(p, "uReach"), SH_REACH * S);
+    glUniform1f(U(p, "uDiv"), SH_DIV);
+    /* clouds: two layers on steady winds (per seed), over the ground */
+    double gx = ox * MPP + seed_x, gy = oy * MPP + seed_z, wa = ph2[3];
+    glUniform2f(U(p, "uC1"), (float)(gx - 9 * cos(wa) * t), (float)(gy - 9 * sin(wa) * t));
+    glUniform2f(U(p, "uC2"), (float)(gx - 14 * cos(wa + 0.5) * t + 7000), (float)(gy - 14 * sin(wa + 0.5) * t - 3000));
+    glUniform1f(U(p, "uCover"), (float)(0.6 + 0.08 * sin(t / 700 + ph2[4])));
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
 /* t: drift time, seconds */
@@ -1147,10 +1390,17 @@ static void render(double t, GLuint target) {
     double cx, cy;
     view_at(t, &cx, &cy);
     double ox = cx - W * 0.5, oy = cy - H * 0.5;        /* world px of the screen's top-left */
-    bake((int)floor(ox) - 8, (int)floor(oy) - 8);
+    bake((int)floor(ox) - BM, (int)floor(oy) - BM);
+    float sun_az, sun_el;
+    sun_at(t, &sun_az, &sun_el);
+    /* the light changes slowly and is soft: a frame late is a fraction of a
+     * pixel, so it's redone every other frame */
+    if (!shade_ok || ++shade_ok % 2) shade(t, ox, oy, sun_az, sun_el);
+    if (!shade_ok) shade_ok = 1;
 
     /* the overlay and the knock-outs */
     ov.n = mk.n = 0;
+    build_walker(t, ox, oy);
     build_features(ox, oy);
     ov_split = ov.n;
     build_margin(ox, oy);
@@ -1178,6 +1428,7 @@ static void render(double t, GLuint target) {
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_h);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, tex_aux);
     glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, tex_mask);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, tex_shade);
     glActiveTexture(GL_TEXTURE0);
     GLuint p = prog_map;
     glUniform2f(U(p, "uRes"), (float)W, (float)H);
@@ -1191,7 +1442,8 @@ static void render(double t, GLuint target) {
     float b = roundf(5 * S);
     glUniform4f(U(p, "uFrame"), mx0 - b, my0 - b, mx1 + b, my1 + b);
     glUniform1f(U(p, "uWater"), water_at(t));
-    glUniform1f(U(p, "uSun"), (float)(-2.356 + 0.3 * sin(t / 230 + ph[5])));
+    glUniform1f(U(p, "uSun"), sun_az);
+    glUniform1f(U(p, "uT"), (float)fmod(t, 13.0 * 2000));
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
@@ -1349,6 +1601,7 @@ int main(int argc, char **argv) {
     seed_z = ((h >> 16) / 65536.0f - 0.5f) * 100000;
     for (int i = 0; i < 6; i++) ph[i] = (hash2((int32_t)opt_seed, i, 2) & 0xffff) / 65536.0 * 2 * M_PI;
     if (pal < 0) pal = (int)(hash2((int32_t)opt_seed, 5, 3) % NPAL);
+    for (int i = 0; i < 8; i++) ph2[i] = (hash2((int32_t)opt_seed, i, 9) & 0xffff) / 65536.0 * 2 * M_PI;
     E0 = (int)(hash2((int32_t)opt_seed, 3, 3) % 100); N0 = (int)(hash2((int32_t)opt_seed, 4, 3) % 100);
 
     Display *dpy = NULL;
