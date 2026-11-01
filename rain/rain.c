@@ -11,6 +11,13 @@
  * a dark rim and a glint. The glass between them is fogged, so the street
  * is blurrier there, and a running drop wipes a clear track through it.
  *
+ * Between the glass and the street, the weather itself: rain falling at
+ * several depths as streaks that catch the lamps (or snow drifting down),
+ * slanting with a wind that swells and gusts, sheets of it sweeping across,
+ * haze thickening with distance, mist and splashes on the road, low cloud
+ * over the rooftops. In a storm, rare lightning: a quick double or triple
+ * flash, often a dimmer flicker a beat later, sometimes a bolt.
+ *
  * The weather is real when it can be: with a location (--lat/--lon, or
  * "LAT LON" in ~/.config/wallpapers/location) it asks Open-Meteo for the
  * current conditions every 15 minutes, in the background, cached in
@@ -1010,6 +1017,8 @@ static const char *FS_COMP = "#version 330 core\n" GLSL(
     uniform vec2 uRes;
     uniform float uK, uBlur, uBokehGain, uFrost, uFlash, uExpo, uTime, uFogVeil;
     uniform vec3 uHaze;
+    uniform sampler2D uA;
+    uniform float uBloom;
     out vec4 o;
     float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
     void main() {
@@ -1033,6 +1042,9 @@ static const char *FS_COMP = "#version 330 core\n" GLSL(
         vec3 haze = uHaze + far * 1.3;
         vec3 col = mix(bg, haze, veil * 0.55);
         col = mix(col, haze * 1.4 + far * 0.6 + vec3(0.035, 0.032, 0.028), frost * 0.75);
+        /* the rain falling outside, behind the water on the glass */
+        vec4 air = texture(uA, uv) * (1.0 - 0.75 * veil);
+        col = col * (1.0 - air.a) + air.rgb;
 
         if (d.a > 0.002) {
             vec2 n = d.xy * 2.0 - 1.0;
@@ -1053,11 +1065,18 @@ static const char *FS_COMP = "#version 330 core\n" GLSL(
         vec3 ic = haze * 2.2 + bg * 0.6 + far * 1.2 + vec3(0.11, 0.10, 0.09);
         col = mix(col, ic, clamp(ice, 0.0, 1.0) * 0.9);
 
-        col += uFlash * vec3(0.28, 0.27, 0.25) * (0.25 + veil);
+        /* the grade: lightning lights the glass, cold; the brightest
+         * lights bloom through the wet glass; a filmic shoulder; shadows
+         * pulled a little towards blue so the night isn't all amber */
+        col += uFlash * vec3(0.20, 0.23, 0.29) * (0.25 + veil);
+        col += (textureLod(uB, uv, 4.5).rgb * 0.30 + textureLod(uBl, uv, 3.0).rgb * 0.22) * uBloom;
         col *= uExpo;
         vec2 q = (uv - 0.5) * vec2(asp, 1.0);
-        col *= mix(0.62, 1.0, smoothstep(1.25, 0.35, length(q)));
-        col = 1.0 - exp(-col * 1.08);
+        col *= mix(0.58, 1.0, smoothstep(1.3, 0.3, length(q)));
+        float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+        col = mix(vec3(lum), col, 0.86);
+        col *= mix(vec3(0.90, 0.98, 1.16), vec3(1.0), smoothstep(0.0, 0.25, lum));
+        col = 1.0 - exp(-col * 1.15);
         col += (hash(gl_FragCoord.xy + fract(uTime) * 91.7) - 0.5) * (2.0 / 255.0);
         o = vec4(col, 1.0);
     });
@@ -1237,22 +1256,342 @@ static void gl_init(void) {
 /* ---- weather-driven state per frame ---- */
 static double scene_t, dbg_sim, dbg_fog, dbg_ren;                 /* street time, s */
 static float flash, flash_next = 6;
-static float flash_pulses[3], flash_at;
+
+/* ---- the air between the glass and the street ----
+ * The wind breathes: a slow swell and sharper gusts on top of the weather's
+ * wind, slanting the falling rain and pushing sheets of it across the
+ * street. Lightning is rare and brief: a strike of two or three quick pulses,
+ * often a dimmer flicker a beat later; some strikes show a bolt over the
+ * rooftops, the rest are sheet lightning inside the cloud. The weather's
+ * own random numbers, so the drops on the glass don't depend on them. */
+static float air_wind, air_curtain, bolt, bolt_x;
+static float bolt_pts[18 * 2];
+static float flash_pulses[8], flash_amp[8], flash_at = 99;
+static int flash_n, flash_strike;
+static uint32_t arng = 0x2545f491u;
+static float afrand(void) {
+    arng ^= arng << 13; arng ^= arng >> 17; arng ^= arng << 5;
+    return (arng >> 8) * (1.0f / 16777216.0f);
+}
+
+/* a bolt from above the frame down to the rooftops, in the street shader's
+ * coordinates (x in 0..aspect, y down 0..1): a jagged main channel and one
+ * fork */
+static void make_bolt(void) {
+    float asp = (float)W / H;
+    float x = asp * (0.64f + (afrand() - 0.5f) * 0.3f), y = -0.03f, lean = (afrand() - 0.5f) * 0.12f;
+    float yend = 0.30f + 0.12f * afrand();
+    bolt_x = x;
+    for (int i = 0; i < 12; i++) {
+        bolt_pts[i * 2] = x; bolt_pts[i * 2 + 1] = y;
+        y += (yend + 0.03f) / 11 * (0.7f + 0.6f * afrand());
+        x += lean / 11 + (afrand() - 0.5f) * 0.045f;
+    }
+    int at = 3 + (int)(afrand() * 4);
+    x = bolt_pts[at * 2]; y = bolt_pts[at * 2 + 1];
+    float dir = afrand() < 0.5f ? -1 : 1;
+    for (int i = 12; i < 18; i++) {
+        bolt_pts[i * 2] = x; bolt_pts[i * 2 + 1] = y;
+        x += dir * (0.012f + 0.02f * afrand()); y += 0.012f + 0.025f * afrand();
+    }
+}
 
 static void lightning(float dt) {
     flash_next -= dt;
     if (wx_cur.storm > 0.5f && flash_next <= 0) {
         flash_at = 0;
-        for (int i = 0; i < 3; i++) flash_pulses[i] = i == 0 ? 0 : flash_pulses[i - 1] + 0.06f + 0.18f * frand();
-        flash_next = 7 + 20 * frand();
+        flash_strike = afrand() < 0.55f;
+        float a0 = flash_strike ? 1.0f : 0.3f + 0.25f * afrand(), t = 0;
+        int np = 2 + (int)(afrand() * 2.5f);
+        flash_n = 0;
+        for (int i = 0; i < np; i++, flash_n++) {
+            flash_pulses[flash_n] = t;
+            flash_amp[flash_n] = a0 * (i == 0 ? 1.0f : 0.4f + 0.5f * afrand());
+            t += 0.05f + 0.12f * afrand();
+        }
+        if (afrand() < 0.7f) {             /* the second, delayed flicker */
+            t += 0.4f + 0.9f * afrand();
+            for (int k = 1 + (afrand() < 0.5f); k > 0 && flash_n < 8; k--, flash_n++) {
+                flash_pulses[flash_n] = t;
+                flash_amp[flash_n] = a0 * (0.3f + 0.3f * afrand());
+                t += 0.06f + 0.1f * afrand();
+            }
+        }
+        if (flash_strike) make_bolt();
+        else bolt_x = (float)W / H * (0.3f + 0.6f * afrand());
+        flash_next = 22 + 45 * afrand();
+        if (getenv("RAIN_DEBUG")) fprintf(stderr, "rain: lightning at t=%.2f (%s)\n", scene_t, flash_strike ? "bolt" : "sheet");
     }
     flash_at += dt;
-    flash = 0;
-    for (int i = 0; i < 3; i++) {
+    flash = bolt = 0;
+    for (int i = 0; i < flash_n; i++) {
         float a = flash_at - flash_pulses[i];
-        if (a >= 0 && a < 1.5f) flash += (i == 0 ? 0.9f : 0.55f) * expf(-a / 0.07f);
+        if (a < 0 || a > 1.2f) continue;
+        flash += flash_amp[i] * expf(-a / 0.06f);
+        if (flash_strike) bolt += flash_amp[i] * expf(-a / 0.09f);
     }
-    flash = fminf(flash, 1.0f) * smooth(0.5f, 1.0f, wx_cur.storm);
+    float gate = smooth(0.5f, 1.0f, wx_cur.storm);
+    flash = fminf(flash, 1.0f) * gate;
+    bolt = fminf(bolt, 1.0f) * gate;
+}
+
+static void air_step(float dt) {
+    const Wx *w = &wx_cur;
+    double t = scene_t;
+    float swell = (vnoise(t / 11.0, 0xa1u) - 0.5f) * 2, flick = (vnoise(t / 2.7, 0xa2u) - 0.5f) * 2;
+    float gust = smooth(0.55f, 0.85f, vnoise(t / 17.0, 0xa3u));
+    air_wind = w->wind * (0.75f + 0.7f * gust) + (0.12f + 0.35f * fabsf(w->wind) + 0.3f * w->storm) * (0.6f * swell + 0.25f * flick);
+    air_curtain += (0.012f + 0.09f * air_wind) * dt;
+    if (air_curtain > 64) air_curtain -= 64;
+}
+
+/* One half-resolution pass after the street and its lights. Into the street
+ * (premultiplied, so it is blurred along with it and seen in the drops):
+ * haze thickening with distance and with the sheets of rain sweeping across,
+ * the lamps glowing in it, mist low over the road, low cloud over the
+ * rooftops, lightning. Into a layer of its own (tA, over the blurred street,
+ * under the drops): rain falling at several depths as streaks lit by
+ * whatever light is behind them, or snowflakes, and splashes on the road.
+ * The street's geometry (camera, facades, roof heights) is repeated from
+ * FS_STREET so the air knows how far away the street is at each pixel. */
+static const char *FS_AIR = "#version 330 core\n" GLSL(
+    uniform vec2 uRes;
+    uniform float uAsp, uT, uDay, uDusk, uRain, uSnow, uSize, uCloud, uWind, uCurtain, uFog, uFlash, uBolt, uBoltX;
+    uniform uint uSeed;
+    uniform sampler2D uB, uN;
+    uniform vec2 uBoltP[18];
+    layout(location = 0) out vec4 oS;
+    layout(location = 1) out vec4 oA;
+    const float CAMH = 6.0, FOC = 0.9, VPX = 0.64, VPY = 0.53, LL = 11.0, LR = 9.5;
+
+    uint hash3(uint a, uint b, uint c) {
+        uint h = a * 0x8da6b343u ^ b * 0xd8163841u ^ c * 0xcb1ab31fu ^ uSeed;
+        h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
+        return h;
+    }
+    float h01(uint a, uint b, uint c) { return float(hash3(a, b, c) >> 8) * (1.0 / 16777216.0); }
+    float bh(uint side, float z) { return 7.0 + 22.0 * h01(side, uint(max(floor(z / 14.0), 0.0)), 7u); }
+
+    /* how far away the street is through (X, Y): 1e9 for sky; the height
+     * there and, on the ground, how far across */
+    float depth(float X, float Y, out float hgt, out float lat) {
+        float dx = X - VPX * uAsp, dy = Y - VPY;
+        float zl = dx < -1e-4 ? FOC * LL / -dx : 1e9, zr = dx > 1e-4 ? FOC * LR / dx : 1e9;
+        float zf = min(zl, zr), zg = dy > 1e-4 ? FOC * CAMH / dy : 1e9;
+        lat = dx * zg / FOC;
+        hgt = 0.0;
+        if (zg < zf) return zg;
+        hgt = CAMH - dy * zf / FOC;
+        if (zf < 1e8 && hgt <= bh(zl < zr ? 0u : 1u, zf)) return zf;
+        hgt = 1e3;
+        return 1e9;
+    }
+
+    float seg(vec2 p, vec2 a, vec2 b) {
+        vec2 pa = p - a, ba = b - a;
+        return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0));
+    }
+
+    /* the rain at distance z: columns of streaks falling along (slant, 1),
+     * thicker (out of focus) and sparser near the glass; dens 0..1 */
+    float streaks(vec2 P, float z, float px, uint L, float slant, float dens) {
+        float k = FOC / z;
+        float len = (0.22 + 0.12 * uSize) * k, speed = 9.0 * k;
+        float w = px * (0.55 + 3.2 / z);
+        float cw = 0.0016 * (1.0 + 2.0 * z) * k * 6.0;
+        vec2 q = vec2(P.x - slant * (P.y - 0.5), P.y - speed * uT);
+        float cx = floor(q.x / cw);
+        uint ci = uint(int(cx) + 65536);
+        float ch = len * 2.4;
+        /* one hash for the column, one for the cell, a byte per number */
+        vec4 hc = vec4(uvec4(hash3(ci, L, 1u)) >> uvec4(0u, 8u, 16u, 24u) & 255u) / 255.0;
+        float v = q.y / ch + hc.x * 9.0;
+        float cy = floor(v);
+        vec4 hs = vec4(uvec4(hash3(ci, uint(int(cy) + 1048576), L + 8u)) >> uvec4(0u, 8u, 16u, 24u) & 255u) / 255.0;
+        if (hs.x > dens) return 0.0;
+        float ln = len * (0.55 + 0.7 * hs.y);
+        float y0 = hs.z * (ch - ln);
+        float a = (fract(v) * ch - y0) / ln;
+        float x = q.x - (cx + 0.15 + 0.7 * hc.y) * cw;
+        float b = 0.35 + 0.65 * hs.w;
+        return b * exp(-x * x / (w * w)) * smoothstep(0.0, 0.2, a) * (1.0 - smoothstep(0.55, 1.0, a));
+    }
+
+    /* snowflakes at distance z, drifting and swaying */
+    float flakes(vec2 P, float z, float px, uint L, float slant, float dens) {
+        float k = FOC / z;
+        float r = max(px * 0.9, 0.011 * k) + px * 7.0 / (z * z);
+        float cs = 0.10 * k + r * 6.0;
+        vec2 q = vec2(P.x - slant * (P.y - 0.5), P.y - 1.1 * k * uT) / cs;
+        vec2 c = floor(q);
+        uint hh = hash3(uint(int(c.x) + 65536), uint(int(c.y) + 1048576), L + 8u);
+        vec4 hs = vec4(uvec4(hh) >> uvec4(0u, 8u, 16u, 24u) & 255u) / 255.0;
+        if (hs.x > dens) return 0.0;
+        vec2 o = vec2(0.3 + 0.4 * hs.y + 0.13 * sin(uT * (0.8 + 0.6 * hs.w) + hs.z * 6.28), 0.25 + 0.5 * hs.w);
+        float d = length(q - c - o) * cs;
+        return (0.6 + 0.4 * hs.z) * (1.0 - smoothstep(r * 0.35, r, d));
+    }
+
+    void main() {
+        vec2 uv = gl_FragCoord.xy / uRes;
+        float X = uv.x * uAsp, Y = 1.0 - uv.y, px = 1.0 / uRes.y;
+        float hgt, lat;
+        float z = depth(X, Y, hgt, lat);
+        bool sky = z > 1e8;
+        vec2 P = vec2(X, Y);
+        float bolt = 0.0;
+
+        /* the light the air is lit by: the lamps, spread wide, and the
+         * night's own (cool) glow */
+        vec3 lampN = textureLod(uB, uv, 2.5).rgb, lampW = textureLod(uB, uv, 5.0).rgb;
+        vec3 amb = mix(vec3(0.026, 0.030, 0.038), vec3(0.46, 0.48, 0.51), uDay) + uDusk * vec3(0.07, 0.045, 0.04);
+        vec3 fl = uFlash * vec3(0.55, 0.62, 0.78) * (0.4 + 0.6 * exp(-abs(X - uBoltX) * 1.2));
+
+        /* sheets of rain sweeping across on the wind */
+        float slant = uWind * mix(0.5, 1.1, uSnow);
+        float sx = X - slant * (Y - 0.5);
+        float curtain = texture(uN, vec2(sx * 0.21 - uCurtain, 0.37)).r * 0.65 + texture(uN, vec2(sx * 0.55 - uCurtain * 2.1, 0.71)).r * 0.35;
+        curtain = smoothstep(0.32, 0.72, curtain);
+
+        /* haze with depth, thicker in the sheets; lamps glow in it */
+        float dens = uFog * (0.55 + 0.9 * curtain * smoothstep(0.05, 0.4, uRain));
+        float fogA = sky ? 0.0 : (1.0 - exp(-min(z, 300.0) * dens)) * 0.85;
+        /* mist low over the road, rain bouncing off it */
+        float mist = 0.0;
+        if (!sky) {
+            vec2 mp = vec2(lat * 0.11 - uT * 0.03 * (0.3 + uWind), z * 0.012 + uT * 0.004);
+            mist = uRain * (1.0 - uSnow) * 0.5 * exp(-hgt / 1.4) * smoothstep(2.0, 25.0, z) * (0.45 + 0.8 * texture(uN, mp).r);
+        }
+        float a = 1.0 - (1.0 - fogA) * (1.0 - mist);
+        vec3 c = a * (amb * 1.15 + lampW * 1.1 + lampN * 0.25 * mist + fl * 0.35);
+        /* the lamps' glow spreading in the wet air, brighter in the sheets */
+        c += (lampW * 0.9 + lampN * 0.25) * smoothstep(0.02, 0.6, uRain) * (0.35 + 0.9 * curtain) * (1.0 - 0.6 * uDay);
+
+        if (sky) {
+            /* low cloud, lit from below by the town, moving on the wind */
+            float t = max(VPY - Y, 0.004);
+            float zc = 140.0 / t;
+            vec2 cp = vec2((X - VPX * uAsp) * zc * 0.0016 + uCurtain * 0.35, zc * 0.0022 + uT * 0.0015);
+            float n = texture(uN, cp).r * 0.65 + texture(uN, cp * 2.3 + 0.37).r * 0.35;
+            float cl = smoothstep(0.62 - 0.45 * uCloud, 0.95 - 0.3 * uCloud, n) * (0.35 + 0.65 * uCloud);
+            vec3 under = mix(vec3(0.075, 0.078, 0.092), vec3(0.62, 0.63, 0.66), uDay) + exp(-t * 4.0) * mix(vec3(0.06, 0.045, 0.04), vec3(0.0), uDay);
+            vec3 cc = under * (0.7 + 0.6 * n) + lampW * 0.6 + fl * (0.6 + 1.4 * n);
+            float ca = cl * 0.8 * smoothstep(0.0, 0.08, t);
+            c = c * (1.0 - ca) + cc * ca;
+            a = 1.0 - (1.0 - a) * (1.0 - ca);
+            /* sheet lightning brightens the whole cloud; a bolt below it */
+            c += fl * 0.25;
+            if (uBolt > 0.001) {
+                float d = 1e9;
+                for (int i = 0; i < 11; i++) d = min(d, seg(P, uBoltP[i], uBoltP[i + 1]));
+                float db = 1e9;
+                for (int i = 12; i < 17; i++) db = min(db, seg(P, uBoltP[i], uBoltP[i + 1]));
+                float core = exp(-d * d / (px * px * 1.4)) + 0.5 * exp(-db * db / (px * px * 0.8));
+                float glow = exp(-min(d, db * 1.5) / 0.03);
+                c += uBolt * (core * 4.0 + glow * 0.5) * vec3(0.80, 0.86, 1.0);
+                bolt = uBolt * (core * 1.6 + glow * 0.15);
+            }
+        }
+        oS = vec4(c, a);
+
+        /* the falling rain (or snow), several depths; hidden behind whatever
+         * of the street is nearer */
+        float r = 0.0, sn = 0.0;
+        vec3 lit = lampN * 1.6 + lampW * 1.6 + amb * mix(2.2, 0.85, uDay) + fl * 2.0;
+        float dn = smoothstep(0.0, 0.3, uRain) * (0.25 + 0.75 * curtain);
+        if (uSnow < 0.99 && uRain > 0.01) {
+            float s = 0.0;
+            s += streaks(P, 2.5, px, 0u, slant, dn * 0.30) * 0.30;
+            if (z > 5.0) s += streaks(P, 5.0, px, 1u, slant, dn * 0.45) * 0.45;
+            if (z > 10.0) s += streaks(P, 10.0, px, 2u, slant, dn * 0.6) * 0.55;
+            if (z > 22.0) s += streaks(P, 22.0, px, 3u, slant, dn * 0.8) * 0.5;
+            r += s * (1.0 - uSnow) * (0.6 + 0.6 * uSize) * mix(1.7, 1.0, uDay);
+        }
+        if (uSnow > 0.01 && uRain > 0.01) {
+            float s = 0.0;
+            s += flakes(P, 2.0, px, 4u, slant, dn * 0.5) * 0.45;
+            if (z > 4.5) s += flakes(P, 4.5, px, 5u, slant, dn * 0.7) * 0.7;
+            if (z > 10.0) s += flakes(P, 10.0, px, 6u, slant, dn * 0.85) * 0.8;
+            if (z > 24.0) s += flakes(P, 24.0, px, 7u, slant, dn) * 0.7;
+            sn = s * uSnow * 1.3;
+        }
+        /* streaks: mostly light they catch, a little cover; flakes: cover */
+        vec3 ac = r * lit + sn * (lit * 2.0 + amb * 2.5);
+        float aa = clamp(r * mix(0.12, 0.45, uDay) + sn * 0.7, 0.0, 1.0);
+        /* splashes on the road, where there's light to catch them */
+        if (!sky && hgt == 0.0 && z < 30.0 && uRain > 0.05) {
+            vec2 g = vec2(lat, z) / 0.55;
+            vec2 gc = floor(g);
+            uint gx = uint(int(gc.x) + 65536), gz = uint(int(gc.y) + 65536);
+            vec4 hs = vec4(uvec4(hash3(gx, gz, 50u)) >> uvec4(0u, 8u, 16u, 24u) & 255u) / 255.0;
+            float ph = fract(uT * (0.9 + 0.8 * hs.x) + hs.y);
+            float life = ph / 0.1;
+            if (life < 1.0) {
+                vec2 sp = (gc + 0.2 + 0.6 * hs.zw) * 0.55;
+                vec2 dd = vec2(lat, z) - sp;
+                float d = length(dd * vec2(1.0, 0.5));
+                float rr = 0.03 + 0.12 * life;
+                float ring = exp(-(d - rr) * (d - rr) / 0.003) * (1.0 - life) * (1.0 - life);
+                ac += ring * smoothstep(0.05, 0.5, uRain) * (1.0 - uSnow) * (lampN * 2.0 + amb * 0.3) * smoothstep(30.0, 10.0, z);
+            }
+        }
+        ac += bolt * vec3(0.80, 0.86, 1.0);
+        oA = vec4(ac, aa);
+    });
+
+static GLuint p_air, tA, fAir;
+static int aw_, ah_;
+
+/* the air: blended over the street (tS) and drawn fresh into tA */
+static void air_pass(float t, float day) {
+    const Wx *w = &wx_cur;
+    if (!p_air) {
+        p_air = mk_prog(VS, FS_AIR);
+        glGenFramebuffers(1, &fAir);
+    }
+    if (aw_ != hw() || ah_ != hh()) {
+        if (tA) glDeleteTextures(1, &tA);
+        aw_ = hw(); ah_ = hh();
+        tA = mk_tex(aw_, ah_, GL_RGBA16F, GL_RGBA, GL_FLOAT, 0);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, fAir);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tS, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, tA, 0);
+    GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(2, bufs);
+    float zero[4] = {0, 0, 0, 0};
+    glClearBufferfv(GL_COLOR, 1, zero);
+    glViewport(0, 0, hw(), hh());
+    glBindVertexArray(vao_empty);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(p_air);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, tex_noise);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tB);
+    glUniform1i(U(p_air, "uB"), 0);
+    glUniform1i(U(p_air, "uN"), 1);
+    float rain = w->rain, snow = w->snow * smooth(0.05f, 0.2f, w->rain);
+    glUniform2f(U(p_air, "uRes"), (float)hw(), (float)hh());
+    glUniform1f(U(p_air, "uAsp"), (float)W / H);
+    glUniform1f(U(p_air, "uT"), (float)fmod(t, 900.0));
+    glUniform1f(U(p_air, "uDay"), day);
+    glUniform1f(U(p_air, "uDusk"), sky_dusk);
+    glUniform1f(U(p_air, "uRain"), rain);
+    glUniform1f(U(p_air, "uSnow"), snow);
+    glUniform1f(U(p_air, "uSize"), w->size);
+    glUniform1f(U(p_air, "uCloud"), w->cloud);
+    glUniform1f(U(p_air, "uWind"), air_wind);
+    glUniform1f(U(p_air, "uCurtain"), air_curtain);
+    glUniform1f(U(p_air, "uFog"), 0.0025f + 0.009f * smooth(0, 0.8f, rain) * (1 + 0.6f * w->storm) + 0.008f * snow * rain);
+    glUniform1f(U(p_air, "uFlash"), flash);
+    glUniform1f(U(p_air, "uBolt"), bolt);
+    glUniform1f(U(p_air, "uBoltX"), bolt_x);
+    glUniform2fv(U(p_air, "uBoltP"), 18, bolt_pts);
+    glUniform1ui(U(p_air, "uSeed"), scene_seed);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisable(GL_BLEND);
 }
 
 /* fog on the glass: regrow towards the weather's level, then let the
@@ -1299,6 +1638,7 @@ static void step(float dt) {
     }
     scene_t += dt;
     lightning(dt);
+    air_step(dt);
     sim_step(dt);
     fog_step(dt);
 }
@@ -1376,6 +1716,8 @@ static void render(GLuint target) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tB);
     glGenerateMipmap(GL_TEXTURE_2D);
+    air_pass(t, day);
+    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tS);
     glGenerateMipmap(GL_TEXTURE_2D);
 
@@ -1440,7 +1782,12 @@ static void render(GLuint target) {
     glUniform1f(U(p_comp, "uExpo"), mixf(1.1f, 1.0f, day));
     glUniform1f(U(p_comp, "uTime"), t);
     glUniform1f(U(p_comp, "uFogVeil"), 1.0f);
-    glUniform3f(U(p_comp, "uHaze"), mixf(0.04f, 0.08f, day), mixf(0.033f, 0.077f, day), mixf(0.027f, 0.072f, day));
+    glActiveTexture(GL_TEXTURE7);
+    glBindTexture(GL_TEXTURE_2D, tA);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(U(p_comp, "uA"), 7);
+    glUniform1f(U(p_comp, "uBloom"), mixf(1.0f, 0.4f, day));
+    glUniform3f(U(p_comp, "uHaze"), mixf(0.034f, 0.074f, day), mixf(0.034f, 0.076f, day), mixf(0.038f, 0.080f, day));
     glDrawArrays(GL_TRIANGLES, 0, 3);
     tq(5);
     tq(6);
