@@ -37,6 +37,18 @@
  * almanac. --seed N picks the mountains, clouds, meteors and the distant
  * town's glow; the stars are the same in every run.
  *
+ * Spanning: run one instance per monitor with the same --seed, --epoch and
+ * --layout (every output's logical rect), and --output = this one's index.
+ * Then the sky clock runs from the shared epoch and the view is one
+ * panorama across the wall: a cylinder round the eye, so the horizon is one
+ * straight line through every screen and the mountains and lake run on
+ * across the bezels, centred on --az (or the chosen bearing) in the middle
+ * of the "front" output, the one under the middle of the layout. --fov is
+ * then twice the angle from there to the far edge of the wall (default 280),
+
+ * and the horizon sits 80% of the way down the front output unless --pitch
+ * is given. Constellation lines are drawn on the front output only.
+ *
  * Same plumbing as stir: Xlib + GLX for --window / --root, a native
  * wlr-layer-shell surface over EGL for --layer (swaylock-plugin), --shot
  * FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen and
@@ -74,6 +86,13 @@ static int loc_given;
 static const char *opt_time;
 static double opt_timelapse = 1;
 static double opt_az = NAN, opt_pitch = 18, opt_fov = 90;
+static int opt_pitch_set, opt_fov_set;
+static double opt_epoch;                         /* CLOCK_REALTIME seconds the sky's clock starts at */
+
+/* ---- spanning ---- */
+#define MAX_OUT 8
+static float span[MAX_OUT][4];                   /* x, y, w, h of each output (logical) */
+static int span_n, span_me = -1, span_front;
 static float opt_clouds = 0.32f;                 /* how much of the sky they cover, about */
 static float opt_moon = 3;                       /* the Moon drawn this many times its size */
 static int opt_fps = 30;
@@ -626,16 +645,41 @@ static const char *COMMON = "#version 330 core\n" GLSL(
     uniform vec2 uRes;
     uniform vec3 uCF, uCR, uCU;     /* the camera, local east-north-up */
     uniform vec2 uTan;
+    uniform int uCyl;               /* spanning: a cylindrical panorama instead of the pinhole */
+    uniform vec4 uSpan;             /* uCyl: this window's bearing (from uAz0) at left, right, tan(alt) at bottom, top */
+    uniform float uAz0;
+    uniform float uShoreK;
     uniform sampler2D uRidge;       /* by azimuth: far, mid, near ridge tops; near shore (degrees) */
     uniform sampler2D uNoise;
     uniform float uCloudCov, uTime, uPxRad;
     uniform vec2 uWind;
     const float PI = 3.14159265;
     vec3 dirAt(vec2 frag) {
-        vec2 n = frag / uRes * 2.0 - 1.0;
+        vec2 n = frag / uRes;
+        if (uCyl == 1) {
+            float az = uAz0 + mix(uSpan.x, uSpan.y, n.x);
+            return normalize(vec3(sin(az), cos(az), mix(uSpan.z, uSpan.w, n.y)));
+        }
+        n = n * 2.0 - 1.0;
         return normalize(uCF + n.x * uTan.x * uCR + n.y * uTan.y * uCU);
     }
-    vec4 ridgeAt(vec3 d) { return textureLod(uRidge, vec2(atan(d.x, d.y) / (2.0 * PI), 0.5), 0.0); }
+    /* the other way: where direction d lands, 0..1 across the window; false
+     * if it's behind (nearer the eye than zmin, for the pinhole) */
+    bool toUV(vec3 d, float zmin, out vec2 uv) {
+        if (uCyl == 1) {
+            float u = mod(atan(d.x, d.y) - uAz0 + PI, 2.0 * PI) - PI, h = length(d.xy);
+            uv = vec2((u - uSpan.x) / (uSpan.y - uSpan.x), (d.z / max(h, 1e-6) - uSpan.z) / (uSpan.w - uSpan.z));
+            return h > 1e-4;
+        }
+        vec3 c = vec3(dot(d, uCR), dot(d, uCU), dot(d, uCF));
+        uv = c.xy / (max(c.z, 1e-3) * uTan) * 0.5 + 0.5;
+        return c.z > zmin;
+    }
+    vec4 ridgeAt(vec3 d) {
+        vec4 r = textureLod(uRidge, vec2(atan(d.x, d.y) / (2.0 * PI), 0.5), 0.0);
+        r.a *= uShoreK;
+        return r;
+    }
     float altDeg(vec3 d) { return degrees(asin(clamp(d.z, -1.0, 1.0))); }
     float airmass(float h) {
         h = max(h, 0.0);
@@ -665,6 +709,7 @@ static const char *FS_SKY = GLSL(
     uniform vec3 uZen, uHorS, uHorA, uSunGlow, uMoonGlow, uMoonCol, uEarthshine, uSunDisc;
     uniform vec3 uCloudAmb, uSunLit, uLand, uRimMoon, uRimSun, uTown, uWaterBody, uMWCol, uMWWarm;
     uniform int uPass;              /* 0: the sky alone, at half size; 1: everything, from it */
+    uniform float uExpo;            /* overall exposure */
     uniform sampler2D uBg;          /* pass 0's result */
     out vec4 o;
 
@@ -799,9 +844,8 @@ static const char *FS_SKY = GLSL(
 
     /* the sky from pass 0 where it's on screen (always, but at the edges) */
     vec3 bgAt(vec3 d) {
-        vec3 c = vec3(dot(d, uCR), dot(d, uCU), dot(d, uCF));
-        vec2 uv = c.xy / (max(c.z, 1e-3) * uTan) * 0.5 + 0.5;
-        if (c.z > 0.05 && all(greaterThan(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0))))
+        vec2 uv;
+        if (toUV(d, 0.05, uv) && all(greaterThan(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0))))
             return textureLod(uBg, uv, 0.0).rgb;
         return skyBg(d);
     }
@@ -861,7 +905,7 @@ static const char *FS_SKY = GLSL(
             vec3 bank = uLand * 0.55;
             c = mix(c, bank, aS);
         }
-        c += (hash12(gl_FragCoord.xy + uDither) - 0.5) / 255.0;
+        c = c * uExpo + (hash12(gl_FragCoord.xy + uDither) - 0.5) / 255.0;
         o = vec4(c, 1.0);
     });
 
@@ -912,9 +956,9 @@ static const char *VS_STAR = GLSL(
             vHalf *= 2.0;
             d.z = -d.z;
         }
-        vec3 c = vec3(dot(d, uCR), dot(d, uCU), dot(d, uCF));
-        if (c.z < 0.02) { cull(); return; }
-        gl_Position = vec4(c.xy / (c.z * uTan), 0.0, 1.0);
+        vec2 uv;
+        if (!toUV(d, 0.02, uv)) { cull(); return; }
+        gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
         gl_PointSize = min(2.0 * vHalf, 96.0);
         vHalf = gl_PointSize * 0.5;
     });
@@ -1089,20 +1133,93 @@ static void gl_init(void) {
 /* ================= the view ================= */
 static struct { v3 f, r, u; double tx, ty; } cam;
 static double view_az, hfov_deg;
+/* spanning: the panorama. This window's bearings left and right of view_az
+ * and tan(altitude) at its bottom and top; the whole wall's bearings; the
+ * front output's sides and top (radians, tan); and logical px -> window px */
+static double cyl_u0, cyl_u1, cyl_v0, cyl_v1, wall_u0, wall_u1, front_u, front_top, span_sc = 1, front_px = 1;
+static double shore_k = 1;         /* the near shore's depth below the horizon, x this */
+
+/* the output under the middle of the layout */
+static int front_output(void) {
+    float x0 = 1e9f, x1 = -1e9f;
+    for (int i = 0; i < span_n; i++) {
+        x0 = fminf(x0, span[i][0]); x1 = fmaxf(x1, span[i][0] + span[i][2]);
+    }
+    float mx = (x0 + x1) / 2;
+    for (int i = 0; i < span_n; i++)
+        if (span[i][0] <= mx && mx < span[i][0] + span[i][2]) return i;
+    return 0;
+}
+
+static void camera_span(void) {
+    double x0 = 1e9, x1 = -1e9;
+    for (int i = 0; i < span_n; i++) {
+        x0 = fmin(x0, span[i][0]); x1 = fmax(x1, span[i][0] + span[i][2]);
+    }
+    const float *f = span[span_front], *me = span[span_me];
+    double cx = f[0] + f[2] / 2.0, cy = f[1] + f[3] / 2.0;
+    double fov = opt_fov_set ? opt_fov : 280;
+    double fl = fmax(cx - x0, x1 - cx) / (fov / 2 * D2R);   /* logical px per radian */
+    if ((x1 - x0) / fl > 1.9 * PI) fl = (x1 - x0) / (1.9 * PI);
+    /* the front output's centre looks out at tan(alt) = tp */
+    double tp = opt_pitch_set ? tan(opt_pitch * D2R) : 0.30 * f[3] / fl;
+    cyl_u0 = (me[0] - cx) / fl; cyl_u1 = (me[0] + me[2] - cx) / fl;
+    cyl_v0 = tp - (me[1] + me[3] - cy) / fl; cyl_v1 = tp - (me[1] - cy) / fl;
+    wall_u0 = (x0 - cx) / fl; wall_u1 = (x1 - cx) / fl;
+    front_u = f[2] / 2.0 / fl; front_top = tp + f[3] / 2.0 / fl;
+    span_sc = W / me[2];
+    front_px = fmax(1.0, fmin(f[2] / 1920.0, f[3] / 1080.0));
+    hfov_deg = (wall_u1 - wall_u0) * R2D;
+    /* a tall output reaching well below the others would be mostly near
+     * bank: push the shore down so the lake comes to near its foot */
+    double low = 0;
+    for (int i = 0; i < span_n; i++) low = fmax(low, -(tp - (span[i][1] + span[i][3] - cy) / fl));
+    shore_k = fmax(1.0, 0.92 * atan(low) * R2D / 7.4);
+    /* the pinhole's vectors, for anything that still asks: facing the front */
+    double A = view_az * D2R;
+    cam.f = vec(sin(A), cos(A), 0); cam.r = vec(cos(A), -sin(A), 0); cam.u = vec(0, 0, 1);
+    cam.tx = cam.ty = 1;
+}
 
 static void camera(void) {
+    if (span_me >= 0) { camera_span(); return; }
     double A = view_az * D2R, p = opt_pitch * D2R;
     cam.f = vec(sin(A) * cos(p), cos(A) * cos(p), sin(p));
     cam.r = vec(cos(A), -sin(A), 0);
     cam.u = cross(cam.r, cam.f);
     double t = tan(opt_fov / 2 * D2R);
     if (W >= H) { cam.tx = t; cam.ty = t * H / W; }
-    else { cam.ty = t; cam.tx = t * W / H; }
+    else {
+        cam.ty = t; cam.tx = t * W / H;
+        /* portrait: tilt up more, so the sky fills the height (horizon a
+         * quarter of the way up rather than a third) */
+        if (!opt_pitch_set) {
+            p = atan(0.5 * cam.ty);
+            cam.f = vec(sin(A) * cos(p), cos(A) * cos(p), sin(p));
+            cam.u = cross(cam.r, cam.f);
+        }
+        /* and bring the lake down to near the foot, rather than a band of bank */
+        v3 foot = norm(sub(cam.f, scale(cam.u, cam.ty)));
+        shore_k = fmax(1.0, -0.92 * asin(foot.z) * R2D / 7.4);
+
+    }
     hfov_deg = 2 * atan(cam.tx) * R2D;
 }
 
+/* the view's pitch, as camera() has it */
+static double view_pitch(void) { return asin(cam.f.z) * R2D; }
+
 /* a local direction to pixels; 0 if behind */
 static int project(v3 d, double *x, double *y) {
+    if (span_me >= 0) {
+        double h = hypot(d.x, d.y);
+        if (h < 1e-6) return 0;
+        double u = fmod(atan2(d.x, d.y) - view_az * D2R + 3 * PI, 2 * PI) - PI;
+        if (fabs(u) > 0.97 * PI) return 0;
+        *x = (u - cyl_u0) / (cyl_u1 - cyl_u0) * W;
+        *y = (d.z / h - cyl_v0) / (cyl_v1 - cyl_v0) * H;
+        return 1;
+    }
     double cz = dot(d, cam.f);
     if (cz < 0.02) return 0;
     *x = (dot(d, cam.r) / cz / cam.tx + 1) * 0.5 * W;
@@ -1158,6 +1275,7 @@ static struct meteor meteor_k(int k) {
     m.len = (9 + 18 * frand()) * D2R;
     m.bright = 0.7 + 1.1 * frand() * frand();
     double az = view_az + (frand() - 0.5) * hfov_deg * 0.95, alt = 16 + 50 * frand();
+    if (span_me >= 0) az = view_az + (wall_u0 + (wall_u1 - wall_u0) * (0.025 + 0.95 * frand())) * R2D;
     m.p0 = vec(sin(az * D2R) * cos(alt * D2R), cos(az * D2R) * cos(alt * D2R), sin(alt * D2R));
     v3 te = norm(cross(vec(0, 0, 1), m.p0)), tn = cross(m.p0, te);
     double ang = (200 + 140 * frand()) * D2R;
@@ -1198,8 +1316,8 @@ static void render(double el, GLuint target) {
     sky_compute(t);
     camera();
     double s = sky.sun_alt;
-    double px = fmax(1.0, fmin(W / 1920.0, H / 1080.0));
-    double pxrad = 2 * cam.ty / H;
+    double px = span_me >= 0 ? front_px * span_sc : fmax(1.0, fmin(W / 1920.0, H / 1080.0));
+    double pxrad = span_me >= 0 ? (cyl_v1 - cyl_v0) / H : 2 * cam.ty / H;
     double night = 1 - smoothd(-10, 1, s);
     double moon_up = smoothd(-2, 8, sky.moon_alt);
     double moon_amt = pow(sky.moon_k, 1.4) * moon_up;
@@ -1237,6 +1355,10 @@ static void render(double el, GLuint target) {
         u2f(p, "uRes", W, H);
         u3v(p, "uCF", cam.f); u3v(p, "uCR", cam.r); u3v(p, "uCU", cam.u);
         u2f(p, "uTan", cam.tx, cam.ty);
+        glUniform1i(U(p, "uCyl"), span_me >= 0);
+        glUniform4f(U(p, "uSpan"), (float)cyl_u0, (float)cyl_u1, (float)cyl_v0, (float)cyl_v1);
+        u1f(p, "uAz0", view_az * D2R);
+        u1f(p, "uShoreK", shore_k);
         u1f(p, "uCloudCov", opt_clouds);
         u1f(p, "uTime", el);
         u1f(p, "uPxRad", pxrad);
@@ -1268,7 +1390,9 @@ static void render(double el, GLuint target) {
         glUniform2fv(U(p, "uMoonEA"), 1, ea);
     }
     u1f(p, "uSunR", 0.00465 * 2);
-    u1f(p, "uMWAmt", 0.42 * (1 - smoothd(-18, -12, s)) * (1 - 0.8 * moon_amt));
+    u1f(p, "uMWAmt", 0.50 * (1 - smoothd(-18, -12, s)) * (1 - 0.8 * moon_amt));
+    /* a lock screen is seen in a lit room: lift the night a little */
+    u1f(p, "uExpo", 1.0 + 0.6 * night);
     u1f(p, "uTownAz", (hash32(opt_seed, 9) % 360) * D2R);
     u1f(p, "uDither", fmod(el * 61.7, 97.0));
     u3c(p, "uZen", zen); u3c(p, "uHorS", hs); u3c(p, "uHorA", ha);
@@ -1317,6 +1441,7 @@ static void render(double el, GLuint target) {
 
     /* ---- constellation figures ---- */
     double la = opt_lines ? 0.20 * smoothd(-3, -10, s) * (1 - 0.4 * moon_amt) : 0;
+    if (span_me >= 0 && span_me != span_front) la = 0;   /* spanning: once, on the front output */
     nstrip = 0;
     if (la > 0) {
         double lw = 0.75 * px + 0.6, gap = 6 * px;
@@ -1350,8 +1475,8 @@ static void render(double el, GLuint target) {
     double moon_wash = 0.85 * moon_amt * night;
     glUseProgram(prog_star);
     umat(prog_star, "uEq2Hor", sky.eq2hor);
-    u1f(prog_star, "uLim", limit_mag(s) - 1.1 * moon_amt * night);
-    u1f(prog_star, "uGain", 2.2 * (1 - 0.8 * day));
+    u1f(prog_star, "uLim", limit_mag(s) + 0.4 * night - 1.1 * moon_amt * night);
+    u1f(prog_star, "uGain", (2.2 + 1.5 * night) * (1 - 0.8 * day));
     u1f(prog_star, "uMaxI", 30 - 28 * day);          /* by day Venus is a pale point at most */
     u1f(prog_star, "uPx", px);
     u1f(prog_star, "uMoonR", sky.moon_sd * opt_moon * 1.05);
@@ -1543,7 +1668,9 @@ static void usage(void) {
     fprintf(stderr,
         "usage: nightsky [--window | --root | --layer] [--lat LAT --lon LON] [--time \"YYYY-MM-DD HH:MM\"]\n"
         "                [--timelapse X] [--az DEG] [--pitch DEG] [--fov DEG] [--lines] [--clouds X | --no-clouds]\n"
-        "                [--moon SCALE] [--fps N] [--seed N]\n"
+        "                [--moon SCALE] [--fps N] [--seed N] [--epoch UNIXTIME]\n"
+        "                [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+
         "                [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--info]\n"
         "Location: --lat/--lon, else ~/.config/wallpapers/location (\"LAT LON\", north and east positive),\n"
         "else Greenwich. Times are local (set TZ=UTC for UT).\n");
@@ -1586,12 +1713,32 @@ static void choose_view(void) {
     view_az = opt_lat >= 0 ? 180 : 0;
     sky_compute(t_base);
     camera();
-    double top = opt_pitch + atan(cam.ty) * R2D;
+    double top = span_me >= 0 ? atan(front_top) * R2D : view_pitch() + atan(cam.ty) * R2D;
     v3 m = sky.moon;
     double malt = sky.moon_alt, maz = atan2(m.x, m.y) * R2D;
     if (malt > 3 && malt < top - 4 && sky.moon_k > 0.08) {
         double diff = fmod(maz - view_az + 540, 360) - 180, half = hfov_deg / 2 - 22;
+        /* spanning: anywhere on the front output will do */
+        if (span_me >= 0) half = fmax(front_u * R2D - 12, 0);
         if (fabs(diff) > half && fabs(diff) < 115) view_az += diff - copysign(half, diff);
+    }
+}
+
+static double wallclock(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+/* "x,y,w,h;x,y,w,h;..." */
+static void parse_layout(const char *str) {
+    for (span_n = 0; span_n < MAX_OUT; span_n++) {
+        float *r = span[span_n];
+        int used = 0;
+        if (sscanf(str, "%f,%f,%f,%f%n", &r[0], &r[1], &r[2], &r[3], &used) != 4 || r[2] <= 0 || r[3] <= 0)
+            break;
+        str += used;
+        if (*str == ';') str++;
     }
 }
 
@@ -1635,8 +1782,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-time") && i + 1 < argc) opt_time = argv[++i];
         else if (!strcmp(a, "-timelapse") && i + 1 < argc) opt_timelapse = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-az") && i + 1 < argc) opt_az = strtod(argv[++i], NULL);
-        else if (!strcmp(a, "-pitch") && i + 1 < argc) opt_pitch = strtod(argv[++i], NULL);
-        else if (!strcmp(a, "-fov") && i + 1 < argc) opt_fov = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-pitch") && i + 1 < argc) { opt_pitch = strtod(argv[++i], NULL); opt_pitch_set = 1; }
+        else if (!strcmp(a, "-fov") && i + 1 < argc) { opt_fov = strtod(argv[++i], NULL); opt_fov_set = 1; }
+        else if (!strcmp(a, "-epoch") && i + 1 < argc) opt_epoch = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-layout") && i + 1 < argc) parse_layout(argv[++i]);
+        else if (!strcmp(a, "-output") && i + 1 < argc) span_me = atoi(argv[++i]);
         else if (!strcmp(a, "-lines")) opt_lines = 1;
         else if (!strcmp(a, "-clouds") && i + 1 < argc) opt_clouds = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-no-clouds")) opt_clouds = 0;
@@ -1650,18 +1800,18 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-info")) opt_info = 1;
         else usage();
     }
-    if (fabs(opt_lat) > 90 || opt_fov < 1 || opt_fov > 170 || opt_fps < 1 || opt_moon <= 0) usage();
+    if (span_me >= span_n) span_me = -1;
+    if (span_me >= 0) span_front = front_output();
+    if (fabs(opt_lat) > 90 || opt_fov < 1 || opt_fov > (span_me >= 0 ? 340 : 170) || opt_fps < 1 || opt_moon <= 0) usage();
     if (opt_clouds < 0) opt_clouds = 0;
     if (opt_clouds > 1) opt_clouds = 1;
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
     rng = opt_seed | 1;
     load_location();
-    if (opt_time) t_base = parse_time(opt_time);
-    else {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        t_base = ts.tv_sec + ts.tv_nsec * 1e-9;
-    }
+    /* spanning: every instance's sky clock starts at the shared epoch */
+    double start = wallclock();
+    if (span_me >= 0 && opt_epoch) start = opt_epoch;
+    t_base = opt_time ? parse_time(opt_time) : start;
     if (opt_info) { info(); return 0; }
     int offscr = opt_shot || opt_bench;
 
@@ -1755,6 +1905,7 @@ int main(int argc, char **argv) {
     }
 
     double t0 = now();
+    if (span_me >= 0) t0 -= wallclock() - start;   /* el counts from the epoch */
     for (;;) {
         if (opt_layer && !wl_poll()) return 0;
         while (dpy && XPending(dpy)) {
