@@ -22,6 +22,10 @@
  * it starts at half that (--speed 1 for theirs) and swings between winding one way and the other
  * (--twist MAX radians), so the page comes back to readable now and then.
  *
+ * On top: glowing type, warming to gold towards the fast-spinning middle
+ * and sinking into the dark at the edges, phosphor trails, and a curved
+ * monitor face with scanlines (--plain for none of that).
+ *
  * Over the middle, not twisted, a big HH:MM made of its own digits (like an
  * old banner printout) fades in a few seconds after start, its letters
  * rolling into place, with the date and host beneath.
@@ -62,7 +66,7 @@
 #include "proto-layer-shell.h"
 
 static int W = 1280, H = 800;
-static int opt_root, opt_layer, opt_clock = 1;
+static int opt_root, opt_layer, opt_clock = 1, opt_plain;
 static float opt_cell;                 /* row height in px; 0 = from the screen height */
 static float opt_speed = 0.5f;          /* x Midjourney's 0.1 rad/s: half as fast, calmer for a lock screen */
 static float opt_twist = 5.0f;         /* the twist swings between +-this (radians at r = 1) */
@@ -545,7 +549,7 @@ static const char *FS = "#version 330 core\n" GLSL(
     uniform sampler2D uClock;   /* cols x rows: the clock overlay, see clock_build() */
     uniform vec2 uRes, uCell, uOrigin;
     uniform ivec2 uGrid;
-    uniform float uTwist, uClockA;
+    uniform float uTwist, uClockA, uDepth;
     uniform vec3 uBg, uFg, uGold, uClockCol, uCaption;
     out vec4 o;
 
@@ -575,7 +579,14 @@ static const char *FS = "#version 330 core\n" GLSL(
             int v = int(texelFetch(uPage, ivec2(pcol, prow), 0).r * 255.0 + 0.5);
             float a = glyph(v & 127, l);
             if (ov != 0) a *= 1.0 - uClockA;                 /* make way for the clock */
-            col = mix(col, v >= 128 ? uGold : uFg, a);
+            /* depth: towards the fast-spinning middle the type warms to
+             * gold and brightens, out at the edges it sinks into the dark */
+            float rr = length(vec2(p, c));
+            float lift = uDepth * (1.0 - smoothstep(0.0, 0.8, rr));
+            float fade = mix(1.0, 0.42, uDepth * smoothstep(0.3, 1.35, rr));
+            vec3 fg = mix(uFg, uGold, 0.5 * lift) * (1.0 + 0.3 * lift) * fade;
+            vec3 gd = uGold * (1.0 + 0.2 * lift) * fade;
+            col = mix(col, v >= 128 ? gd : fg, a);
         }
 
         /* the clock, its letters rolling through the alphabet into place */
@@ -589,7 +600,47 @@ static const char *FS = "#version 330 core\n" GLSL(
         o = vec4(col, 1.0);
     });
 
-static GLuint prog, tex_atlas, tex_page, tex_clock, vao;
+/* phosphor: what's lit stays lit a moment, fading */
+static const char *FS_TRAIL = "#version 330 core\n" GLSL(
+    uniform sampler2D uScene, uPrev;
+    uniform float uDecay;
+    out vec4 o;
+    void main() {
+        ivec2 p = ivec2(gl_FragCoord.xy);
+        o = max(texelFetch(uScene, p, 0), texelFetch(uPrev, p, 0) * uDecay);
+    });
+
+/* the monitor: Midjourney's screen curve (easing in over 3 s), a touch of
+ * colour fringing towards the edges, glow, scanlines and a vignette */
+static const char *FS_CRT = "#version 330 core\n" GLSL(
+    uniform sampler2D uAcc;     /* the phosphor, with mips for the glow */
+    uniform vec2 uRes;
+    uniform float uCurve;
+    uniform vec3 uBg;
+    out vec4 o;
+    void main() {
+        vec2 q = gl_FragCoord.xy / uRes * 2.0 - 1.0;
+        q *= 1.0 + 0.1 * uCurve;
+        q *= 1.0 - 0.085 * uCurve + 0.05 * uCurve * pow(abs(q.yx), vec2(2.0));
+        vec2 uv = q * 0.5 + 0.5;
+        vec2 px = 1.5 / uRes;                              /* soft glass edge */
+        vec2 e = smoothstep(vec2(0.0), px, uv) * smoothstep(vec2(0.0), px, 1.0 - uv);
+        if (e.x * e.y <= 0.0) { o = vec4(0.0, 0.0, 0.0, 1.0); return; }
+
+        vec2 d = (uv - 0.5) * 0.0025 * dot(q, q);
+        vec3 col = vec3(texture(uAcc, uv + d).r, texture(uAcc, uv).g, texture(uAcc, uv - d).b);
+        vec3 glow = textureLod(uAcc, uv, 2.5).rgb * 0.45 + textureLod(uAcc, uv, 4.0).rgb * 0.35 +
+                    textureLod(uAcc, uv, 5.5).rgb * 0.3;
+        col += max(glow - uBg, 0.0) * 0.55;
+        float line = 0.5 + 0.5 * cos(uv.y * uRes.y * 6.2831853 / 3.0);
+        col *= 0.84 + 0.16 * line;
+        col *= mix(0.5, 1.0, smoothstep(1.75, 0.55, length(q * vec2(0.85, 1.0))));
+        o = vec4(col * e.x * e.y, 1.0);
+    });
+
+static GLuint prog, prog_trail, prog_crt, tex_atlas, tex_page, tex_clock, vao;
+static GLuint tex_scene, fbo_scene, tex_acc[2], fbo_acc[2];
+static int post_w, post_h, acc_cur;
 
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
@@ -632,11 +683,48 @@ static GLuint mk_tex(int w, int h, const void *data) {
     return t;
 }
 
+static GLuint mk_prog(const char *fs) {
+    GLuint pr = glCreateProgram();
+    glAttachShader(pr, compile(GL_VERTEX_SHADER, VS));
+    glAttachShader(pr, compile(GL_FRAGMENT_SHADER, fs));
+    glLinkProgram(pr);
+    return pr;
+}
+
+static GLuint mk_target(GLuint *tex, int mips) {
+    GLuint f;
+    glGenTextures(1, tex);
+    glBindTexture(GL_TEXTURE_2D, *tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mips ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (mips) glGenerateMipmap(GL_TEXTURE_2D);
+    glGenFramebuffers(1, &f);
+    glBindFramebuffer(GL_FRAMEBUFFER, f);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *tex, 0);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    return f;
+}
+
+/* (re)make the offscreen buffers at the window's size */
+static void post_size(void) {
+    if (post_w == W && post_h == H) return;
+    if (post_w) {
+        glDeleteTextures(1, &tex_scene); glDeleteFramebuffers(1, &fbo_scene);
+        glDeleteTextures(2, tex_acc); glDeleteFramebuffers(2, fbo_acc);
+    }
+    post_w = W; post_h = H;
+    fbo_scene = mk_target(&tex_scene, 0);
+    for (int i = 0; i < 2; i++) fbo_acc[i] = mk_target(&tex_acc[i], 1);
+}
+
 static void gl_init(void) {
-    prog = glCreateProgram();
-    glAttachShader(prog, compile(GL_VERTEX_SHADER, VS));
-    glAttachShader(prog, compile(GL_FRAGMENT_SHADER, FS));
-    glLinkProgram(prog);
+    prog = mk_prog(FS);
+    prog_trail = mk_prog(FS_TRAIL);
+    prog_crt = mk_prog(FS_CRT);
     glGenVertexArrays(1, &vao);
 
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -658,6 +746,12 @@ static void gl_init(void) {
     glUniform1i(glGetUniformLocation(prog, "uAtlas"), 0);
     glUniform1i(glGetUniformLocation(prog, "uPage"), 1);
     glUniform1i(glGetUniformLocation(prog, "uClock"), 2);
+    glUseProgram(prog_trail);
+    glUniform1i(glGetUniformLocation(prog_trail, "uScene"), 0);
+    glUniform1i(glGetUniformLocation(prog_trail, "uPrev"), 1);
+    glUseProgram(prog_crt);
+    glUniform1i(glGetUniformLocation(prog_crt, "uAcc"), 0);
+    glUniform3fv(glGetUniformLocation(prog_crt, "uBg"), 1, bg);
 }
 
 /* rebuild the page and clock when the minute turns */
@@ -674,9 +768,12 @@ static void refresh(time_t t) {
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, cols, rows, GL_RED, GL_UNSIGNED_BYTE, clockov);
 }
 
-/* tw: twist time (scaled by --speed); el: real seconds since start */
-static void render(double tw, double el) {
+/* tw: twist time (scaled by --speed); el: real seconds since start; dt:
+ * since the last frame; target: the framebuffer to end up in */
+static void render(double tw, double el, double dt, GLuint target) {
     refresh(time(NULL));
+    if (!opt_plain) post_size();
+    glBindFramebuffer(GL_FRAMEBUFFER, opt_plain ? target : fbo_scene);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex_atlas);
     glActiveTexture(GL_TEXTURE1);
@@ -695,7 +792,32 @@ static void render(double tw, double el) {
     double a = (el - 2.0) / 3.0;
     a = a < 0 ? 0 : a > 1 ? 1 : a;
     glUniform1f(glGetUniformLocation(prog, "uClockA"), (float)(a * a * (3 - 2 * a)));
+    glUniform1f(glGetUniformLocation(prog, "uDepth"), opt_plain ? 0.0f : 1.0f);
     glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    if (opt_plain) return;
+
+    /* phosphor trails: a ghost at half strength, gone in ~0.15 s */
+    int prev = acc_cur;
+    acc_cur ^= 1;
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_acc[acc_cur]);
+    glUseProgram(prog_trail);
+    glUniform1f(glGetUniformLocation(prog_trail, "uDecay"), 0.5f * (float)exp(-dt / 0.15));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex_scene);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, tex_acc[prev]);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex_acc[acc_cur]);
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    /* onto the glass */
+    glBindFramebuffer(GL_FRAMEBUFFER, target);
+    glUseProgram(prog_crt);
+    glUniform2f(glGetUniformLocation(prog_crt, "uRes"), (float)W, (float)H);
+    double cu = el / 3.0 > 1 ? 1 : el / 3.0;
+    glUniform1f(glGetUniformLocation(prog_crt, "uCurve"), (float)(cu * (2 - cu)));
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
@@ -787,7 +909,7 @@ static int wl_poll(void) {
 static void usage(void) {
     fprintf(stderr,
         "usage: stir [--window | --root | --layer] [--cell PX] [--speed X] [--twist RAD] [--seed N]\n"
-        "            [--name NAME] [--text FILE] [--no-clock] [--font FONTCONFIG-PATTERN]\n"
+        "            [--name NAME] [--text FILE] [--no-clock] [--plain] [--font FONTCONFIG-PATTERN]\n"
         "            [--shot FILE.ppm [--size WxH] [--at SECONDS]]\n");
     exit(1);
 }
@@ -819,6 +941,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-text") && i + 1 < argc) opt_text = argv[++i];
         else if (!strcmp(a, "-name") && i + 1 < argc) opt_name = argv[++i];
         else if (!strcmp(a, "-no-clock")) opt_clock = 0;
+        else if (!strcmp(a, "-plain")) opt_plain = 1;
         else if (!strcmp(a, "-shot") && i + 1 < argc) opt_shot = argv[++i];
         else if (!strcmp(a, "-size") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &off_w, &off_h) != 2) usage(); }
         else if (!strcmp(a, "-at") && i + 1 < argc) opt_at = strtod(argv[++i], NULL);
@@ -881,13 +1004,16 @@ int main(int argc, char **argv) {
         glGenFramebuffers(1, &fbo);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
-        render(opt_at * opt_speed, opt_at);
+        for (int i = 60; i >= 0; i--) {                 /* the last second, so the trails are real */
+            double t = opt_at - i / 60.0;
+            render(t * opt_speed, t, 1.0 / 60, fbo);
+        }
         glFinish();
         save_ppm(opt_shot);
         return 0;
     }
 
-    double t0 = now();
+    double t0 = now(), last = t0;
     for (;;) {
         if (opt_layer && !wl_poll()) return 0;
         while (dpy && XPending(dpy)) {
@@ -904,7 +1030,8 @@ int main(int argc, char **argv) {
             }
         }
         double t = now(), el = t - t0;
-        render(el * opt_speed, el);
+        render(el * opt_speed, el, t - last, 0);
+        last = t;
         if (opt_layer) eglSwapBuffers(wl.ed, wl.es);
         else glXSwapBuffers(dpy, win);
         double spare = 1.0 / 60 - (now() - t);
