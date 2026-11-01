@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Lock-screen background for swaylock-plugin --command-each (one instance per
-# output). flightsim and stir draw their own layer surfaces; pipes and maze run on the
+# output). Most savers draw their own layer surfaces; pipes and maze run on the
 # root window of a private Xwayland, which windowtolayer turns into a layer
 # surface behind the password ring.
-# Usage: lock-bg.sh [pipes|maze|flightsim|stir] [seed] [epoch]   (default: random)
+# Usage: lock-bg.sh [SAVER] [seed] [epoch]   (default: random; SAVERS in savers.sh)
 # With no args it reads "saver seed epoch" from $XDG_RUNTIME_DIR/lock-bg.cur,
 # which lock.sh and lock-next.sh write; swaylock-plugin re-runs this same
 # command whenever the saver dies, so that file is how a skip takes effect.
@@ -17,7 +17,7 @@ cur=${XDG_RUNTIME_DIR:-/tmp}/lock-bg.cur
 (($# == 0)) && [[ -r $cur ]] && read -r -a args < "$cur" && set -- "${args[@]}"
 mapfile -t avail < <(built_savers "$dir")
 if ((${#avail[@]} == 0)); then
-  echo "lock-bg.sh: no screensaver is built here (make -C flightsim, make -C stir)" >&2
+  echo "lock-bg.sh: no screensaver is built here (e.g. make -C stir)" >&2
   exit 1
 fi
 pick=${1:-}
@@ -28,8 +28,6 @@ fi
 case $pick in
   pipes)     cmd=("$dir/pipes/bin/pipes" --root --delay 5000) ;;
   maze)      cmd=("$dir/maze3d/bin/maze3d" --root) ;;
-  stir)      cmd=("$dir/stir/stir" --layer)
-             [[ -n ${2:-} ]] && cmd+=(--seed "$2") ;;
   flightsim)
     cmd=("$dir/flightsim/flightsim" --layer)
     [[ -n ${2:-} ]] && cmd+=(--seed "$2")
@@ -42,11 +40,14 @@ case $pick in
          + ([$o[].name] | index($me) // -1 | tostring)') && ((idx >= 0)); then
       cmd+=(--layout "$layout" --output "$idx")
     fi ;;
-  *) echo "lock-bg.sh: unknown screensaver '$pick'" >&2; exit 1 ;;
+  *)  # native layer-shell savers; one seed for every output, so a multi-monitor
+      # lock shows the same scene (same street, mountains, map) on each
+      cmd=("$(saver_bin "$dir" "$pick")" --layer)
+      [[ -n ${2:-} ]] && cmd+=(--seed "$2") ;;
 esac
-# flightsim and stir are native Wayland layer-shell clients; the others are X11
-# hacks, run on the root window of a private Xwayland that windowtolayer turns
-# into a layer surface (that path tears under load, hence flightsim's own)
-if [[ $pick == flightsim || $pick == stir ]]; then exec "${cmd[@]}"; fi
+# pipes and maze are X11 hacks, run on the root window of a private Xwayland
+# that windowtolayer turns into a layer surface (that path tears under load,
+# hence everything else being native Wayland layer-shell clients)
+if [[ $pick != pipes && $pick != maze ]]; then exec "${cmd[@]}"; fi
 exec "$dir/build/windowtolayer/target/release/windowtolayer" \
   "$dir/build/swaylock-plugin/example_xwayland_wrapper.py" "${cmd[@]}"

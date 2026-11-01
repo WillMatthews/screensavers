@@ -3,15 +3,14 @@
 # in git, so a saver nobody has built here yet must never be picked: a pick
 # that can't start leaves swaylock-plugin re-running it over a blank screen.
 
-SAVERS=(pipes maze flightsim stir)
+SAVERS=(pipes maze flightsim stir splitflap coral gauges marbling contours plotter rain clockwork nightsky)
 
 # the executable for a saver
 saver_bin() {
     case $2 in
         pipes)     echo "$1/pipes/bin/pipes" ;;
         maze)      echo "$1/maze3d/bin/maze3d" ;;
-        flightsim) echo "$1/flightsim/flightsim" ;;
-        stir)      echo "$1/stir/stir" ;;
+        *)         echo "$1/$2/$2" ;;  # the native ones: <name>/<name>
     esac
 }
 
