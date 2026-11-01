@@ -1,7 +1,7 @@
 /*
  * splitflap — a lock-screen away message on an old railway departure board.
  *
- * Rows of split-flap modules: dark flaps on hinges, cream letters cut through
+ * Rows of split-flap modules: dark flaps on hinges, letters cut through
  * the middle by the split, an axle pin either side. Every 10-15 s the board
  * changes: the top departure leaves and the rows below move up, or a row or
  * two are replaced, and each module turns its flaps over one at a time until
@@ -19,13 +19,18 @@
  * notice under the board rotates through NOTICES. A big flap clock sits in
  * the header. Live details (the time, how long the screen has been locked —
  * from swaylock's start time —, battery, uptime) come from stir's engine and
- * refresh every minute. $N, $H, $S, $D and *starred* words are set in gold.
+ * refresh every minute. $N, $H, $S, $D and *starred* words are set in the keyword colour (gold, in brass).
  *
  * Each module is two instanced quads: the module at rest (top half of the
  * letter coming, bottom half of the letter going) and, while it turns, the
  * flap falling over the hinge, in perspective, front face lit from above,
  * back face (the bottom of the new letter) landing over the old one. Nothing
  * moving, nothing drawn: between changes the board sleeps.
+ *
+ * Palettes: brass (Aged Brass: cream on brown-black, gold keywords), classic
+ * (white on charcoal, yellow keywords, orange-red trouble), blue (white on
+ * navy, warm yellow keywords), led (amber on black). One is picked from the
+ * seed, so each lock looks different; --palette NAME picks it outright.
  *
  * Same plumbing as stir: Xlib + GLX for --window / --root, a native
  * wlr-layer-shell surface over EGL for --layer (swaylock-plugin),
@@ -848,6 +853,8 @@ static const char *FS = "#version 330 core\n" GLSL(
     uniform vec2 uAtlasSize;
     uniform vec4 uSlot[4];          /* x, y, cw, ch */
     uniform vec3 uInk[7];
+    uniform vec3 uFlap[4];          /* card: top outer, top at the split, bottom outer, bottom at the split */
+    uniform vec3 uPin[2];           /* axle pin: shaded, lit */
     in vec2 vL;
     flat in vec4 vRect, vWhat, vMore;
     out vec4 o;
@@ -870,8 +877,7 @@ static const char *FS = "#version 330 core\n" GLSL(
         float d = box(l - c, vec2(sz.x * 0.5, hl * 0.5), outer ? sz.x * 0.085 : 1.0);
         float a = clamp(0.5 - d, 0.0, 1.0);
         float e = top ? l.y / hl : (sz.y - l.y) / hl;       /* 0 at the outer edge, 1 at the split */
-        vec3 col = top ? mix(vec3(0.200, 0.163, 0.135), vec3(0.158, 0.128, 0.106), e)
-                       : mix(vec3(0.170, 0.138, 0.114), vec3(0.112, 0.090, 0.075), e * e);
+        vec3 col = top ? mix(uFlap[0], uFlap[1], e) : mix(uFlap[2], uFlap[3], e * e);
         /* no two flaps quite alike: a little wear and tint each */
         float wear = fract(sin(dot(vRect.xy, vec2(12.9898, 78.233))) * 43758.5453);
         col *= 0.94 + 0.12 * wear;
@@ -923,7 +929,7 @@ static const char *FS = "#version 330 core\n" GLSL(
         float pw = sz.x * 0.045, ph = max(2.0, sz.y * 0.045);
         float dp = box(vec2(abs(l.x - sz.x * 0.5) - sz.x * 0.5, l.y - hh), vec2(pw, ph * 0.5), ph * 0.5);
         float pa = clamp(0.5 - dp, 0.0, 1.0);
-        vec3 pin = mix(vec3(0.10, 0.085, 0.07), vec3(0.30, 0.25, 0.19), smoothstep(ph * 0.5, -ph * 0.5, l.y - hh));
+        vec3 pin = mix(uPin[0], uPin[1], smoothstep(ph * 0.5, -ph * 0.5, l.y - hh));
         res = over(vec4(pin * pa, pa), res);
         bool top = l.y < hh;
         float sh = 1.0;
@@ -988,6 +994,36 @@ static void hex(const char *h, float *rgb) {
     for (int i = 0; i < 3; i++) rgb[i] = ((v >> (16 - 8 * i)) & 255) / 255.0f;
 }
 
+/* the board's colours: inks (letters, keywords, bad news, good news, labels,
+ * rules, trays), the face behind, the flap cards, the axle pins */
+typedef struct {
+    const char *name;
+    const char *ink[INK_N];
+    float age;                  /* letters dimmed a touch */
+    const char *bg;
+    float flap[4][3], pin[2][3];
+} Palette;
+static const Palette PALETTES[] = {
+    /* Aged Brass: cream letters on near-black flaps, gold for the keywords */
+    {"brass", {"#EFE3CE", "#FFC332", "#E9994A", "#8FA672", "#A89880", "#D6A12A", "#0D0A08"}, 0.95f, "#1B1511",
+     {{0.200f, 0.163f, 0.135f}, {0.158f, 0.128f, 0.106f}, {0.170f, 0.138f, 0.114f}, {0.112f, 0.090f, 0.075f}},
+     {{0.10f, 0.085f, 0.07f}, {0.30f, 0.25f, 0.19f}}},
+    /* the classic station board: white on charcoal, yellow keywords, orange-red trouble */
+    {"classic", {"#F4F4F0", "#FFD400", "#FF5A2C", "#7FD36E", "#8E8E8C", "#5C5C5A", "#060606"}, 1.0f, "#121212",
+     {{0.185f, 0.185f, 0.185f}, {0.145f, 0.145f, 0.145f}, {0.155f, 0.155f, 0.155f}, {0.098f, 0.098f, 0.098f}},
+     {{0.07f, 0.07f, 0.07f}, {0.32f, 0.32f, 0.32f}}},
+    /* white on deep navy, warm yellow-orange keywords */
+    {"blue", {"#F2F5FA", "#FFB627", "#FF6B5A", "#7FD8B0", "#8EA2C8", "#3E5E9E", "#030817"}, 1.0f, "#0B1631",
+     {{0.085f, 0.130f, 0.255f}, {0.066f, 0.103f, 0.205f}, {0.074f, 0.113f, 0.222f}, {0.046f, 0.072f, 0.148f}},
+     {{0.04f, 0.06f, 0.12f}, {0.22f, 0.28f, 0.42f}}},
+    /* amber LED: one colour on black, keywords burning brighter */
+    {"led", {"#C8601A", "#FFC45C", "#FF4A12", "#E8862A", "#7A4718", "#4A2A0C", "#000000"}, 1.0f, "#050403",
+     {{0.075f, 0.070f, 0.066f}, {0.058f, 0.054f, 0.051f}, {0.062f, 0.058f, 0.055f}, {0.036f, 0.034f, 0.032f}},
+     {{0.03f, 0.028f, 0.026f}, {0.16f, 0.14f, 0.12f}}},
+};
+enum { NPAL = sizeof PALETTES / sizeof *PALETTES };
+static int opt_pal = -1;        /* -1: chosen from the seed */
+
 static void gl_init(void) {
     prog = mk_prog(VS, FS);
     prog_bg = mk_prog(VS_BG, FS_BG);
@@ -1007,15 +1043,16 @@ static void gl_init(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    /* Aged Brass: cream letters on near-black flaps, gold for the keywords */
-    static const char *inks[INK_N] = {"#EFE3CE", "#FFC332", "#E9994A", "#8FA672", "#A89880", "#D6A12A", "#0D0A08"};
+    const Palette *pl = &PALETTES[opt_pal];
     float ink[INK_N * 3], bg[3];
-    for (int i = 0; i < INK_N; i++) hex(inks[i], ink + 3 * i);
-    for (int i = 0; i < 3; i++) ink[i] *= 0.95f;     /* cream, a little aged */
+    for (int i = 0; i < INK_N; i++) hex(pl->ink[i], ink + 3 * i);
+    for (int i = 0; i < 3; i++) ink[i] *= pl->age;
     glUseProgram(prog);
     glUniform3fv(glGetUniformLocation(prog, "uInk"), INK_N, ink);
+    glUniform3fv(glGetUniformLocation(prog, "uFlap"), 4, &pl->flap[0][0]);
+    glUniform3fv(glGetUniformLocation(prog, "uPin"), 2, &pl->pin[0][0]);
     glUniform1i(glGetUniformLocation(prog, "uAtlas"), 0);
-    hex("#1B1511", bg);
+    hex(pl->bg, bg);
     glUseProgram(prog_bg);
     glUniform3fv(glGetUniformLocation(prog_bg, "uBg"), 1, bg);
 }
@@ -1184,6 +1221,7 @@ static int wl_poll(int timeout_ms) {
 static void usage(void) {
     fprintf(stderr,
         "usage: splitflap [--window | --root | --layer] [--seed N] [--name NAME] [--font FONTCONFIG-PATTERN]\n"
+        "                 [--palette brass|classic|blue|led]\n"
         "                 [--shot FILE.ppm | --bench FRAMES] [--size WxH] [--at SECONDS]\n");
     exit(1);
 }
@@ -1214,10 +1252,18 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-bench") && i + 1 < argc) opt_bench = atoi(argv[++i]);
         else if (!strcmp(a, "-size") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &off_w, &off_h) != 2 || off_w < 64 || off_h < 64) usage(); }
         else if (!strcmp(a, "-at") && i + 1 < argc) opt_at = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-palette") && i + 1 < argc) {
+            const char *n = argv[++i];
+            for (opt_pal = 0; opt_pal < NPAL && strcmp(n, PALETTES[opt_pal].name); opt_pal++) {}
+            if (opt_pal == NPAL) usage();
+        }
         else usage();
     }
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
     rng = opt_seed | 1;
+    /* the palette: from the seed (its own hash, so the timetable is the same
+     * whichever palette it's drawn in) unless asked for */
+    if (opt_pal < 0) opt_pal = (int)(((opt_seed * 0x9E3779B1u) >> 16) % NPAL);
     int offscreen = opt_shot || opt_bench > 0;
     /* a shot: well into the board's life; a bench: the opening, when every
      * module is turning */
