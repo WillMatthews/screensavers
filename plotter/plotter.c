@@ -1,5 +1,5 @@
 /*
- * plotter — a pen plotter slowly drawing generative line art on cream paper.
+ * plotter — a pen plotter drawing generative line art, sheet after sheet.
  *
  * Seen from above: a sheet of paper on the plotter's bed, a gantry beam riding
  * on two rails, and a carriage on the beam holding the pen. The pen lowers,
@@ -8,13 +8,20 @@
  * then it signs the sheet in the corner with the host and the time in its own
  * single-stroke script, parks, and the sheet slides away for a fresh one.
  *
- * Each sheet is one of a handful of classic pen-plotter pieces, picked at
- * random: a flow field of evenly spaced streamlines, a topographic map with
- * hatched hillshading and coastal ripple lines, a ridgeline landscape with
- * hidden lines removed (and a hatched sun behind it), a harmonograph, a
- * spirograph rosette, warped concentric rings, and a multi-strand Truchet
- * weave. Mostly one ink, with an accent pen swapped in for part of it: the
- * carriage parks for each pen change.
+ * Each sheet is one of a dozen classic pen-plotter pieces, picked at
+ * random and filling most of the sheet with ~20 m of line: a flow field of
+ * evenly spaced streamlines, a topographic map with hatched hillshading and
+ * coastal ripple lines, a ridgeline landscape with hidden lines removed (and
+ * a hatched sun behind it), a harmonograph, a spirograph rosette, warped
+ * concentric rings, a multi-strand Truchet weave, an Unknown Pleasures stack
+ * of pulses, packed circles each filled its own way, a recursive subdivision
+ * of hatched cells, moire line systems laid over each other, layered rose
+ * curves, and a city skyline in three rows. Mostly one ink, with one or two
+ * accent pens for parts of it: the carriage parks at the pen rack beside the
+ * sheet for each change, and the rack shows which pen is in the carriage.
+ * The pen darts between strokes; a light on the carriage shows green while
+ * it draws, amber with the pen up. The whole bed sits in a desk lamp's pool
+ * of light that falls off towards the screen's edges.
  *
  * Pen sets: each run picks one from the seed (--palette NAME to choose),
  * with paper, mat and machine to match. sepia: sepia ink with brass gold,
@@ -148,24 +155,24 @@ enum { INK, ACC1, ACC2, ACC3, NPEN };
  * from all four, the accent from the other three. */
 typedef struct {
     const char *name, *pen[NPEN], *paper, *bed, *bedline;
-    float dark[3], mid[3], hi[3], metal[3];
+    float dark[3], mid[3], hi[3], metal[3], tint[3];
     int shuffle;
 } Pal;
 static const Pal PALS[] = {
     /* sepia ink, brass gold / terracotta / sage, on cream; a brown machine with brass */
     {"sepia", {"#2A211B", "#C99529", "#A53C2C", "#5A7548"}, "#F4EFE3", "#D6CDB7", "#EAE3D2",
-     {0.165f, 0.13f, 0.106f}, {0.25f, 0.205f, 0.17f}, {0.42f, 0.355f, 0.29f}, {0.79f, 0.585f, 0.16f}, 0},
+     {0.165f, 0.13f, 0.106f}, {0.25f, 0.205f, 0.17f}, {0.42f, 0.355f, 0.29f}, {0.79f, 0.585f, 0.16f}, {1.0f, 0.97f, 0.9f}, 0},
     /* blue-black fountain-pen ink, a royal blue or a red, on white; an
      * aluminium machine with steel fittings on a slate mat */
     {"blue", {"#1E2740", "#2A5BC8", "#C23A30", "#2A5BC8"}, "#F3F3EF", "#26292D", "#33373C",
-     {0.25f, 0.265f, 0.285f}, {0.44f, 0.46f, 0.485f}, {0.63f, 0.65f, 0.675f}, {0.74f, 0.76f, 0.79f}, 0},
+     {0.25f, 0.265f, 0.285f}, {0.44f, 0.46f, 0.485f}, {0.63f, 0.65f, 0.675f}, {0.74f, 0.76f, 0.79f}, {0.97f, 0.98f, 1.0f}, 0},
     /* black technical pen, red (or a fine grey), on bright white; a black machine */
     {"technical", {"#131313", "#C9282A", "#C9282A", "#77787A"}, "#F8F8F6", "#18191B", "#26282B",
-     {0.045f, 0.045f, 0.05f}, {0.10f, 0.10f, 0.11f}, {0.21f, 0.215f, 0.225f}, {0.55f, 0.57f, 0.60f}, 0},
+     {0.045f, 0.045f, 0.05f}, {0.10f, 0.10f, 0.11f}, {0.21f, 0.215f, 0.225f}, {0.55f, 0.57f, 0.60f}, {1.0f, 0.99f, 0.97f}, 0},
     /* felt tips: teal, magenta, orange, ultramarine, on white; a graphite
      * machine on a green cutting mat */
     {"colour", {"#0B8378", "#C8246E", "#E8730E", "#2B3BB0"}, "#F6F5F1", "#1D3529", "#2C4D3B",
-     {0.11f, 0.115f, 0.12f}, {0.20f, 0.21f, 0.22f}, {0.36f, 0.37f, 0.385f}, {0.70f, 0.71f, 0.73f}, 1},
+     {0.11f, 0.115f, 0.12f}, {0.20f, 0.21f, 0.22f}, {0.36f, 0.37f, 0.385f}, {0.70f, 0.71f, 0.73f}, {1.0f, 0.98f, 0.95f}, 1},
 };
 #define NPAL ((int)(sizeof PALS / sizeof PALS[0]))
 static int opt_pal = -1;
@@ -321,11 +328,12 @@ static float art_cx(void) { return PW * 0.5f; }
 static float art_cy(void) { return PH * 0.47f; }
 
 /* ===================================================================== */
-/* generators: each fills P with ~8-10 m of line                         */
+/* generators: each fills most of the sheet with ~20 m of line           */
 /* ===================================================================== */
 
 #define NIB 0.5f                        /* fineliner, mm */
-#define BUDGET 8500.0f                  /* mm of ink a sheet aims for */
+#define BUDGET 19000.0f                 /* mm of ink a sheet aims for */
+static int accent2;                     /* a second accent pen this sheet, or 0 */
 
 /* -- flow field: evenly spaced streamlines (after Jobard & Lefer) -- */
 typedef struct {
@@ -375,11 +383,11 @@ static void gen_flow(Rng *R, Paths *P, int accent) {
     Flow F = {0};
     F.circ = rnd(R) < 0.5f;
     F.cx = art_cx(); F.cy = art_cy();
-    F.rad = 0.36f * fminf(PW, PH);
-    F.hx = PW * 0.31f; F.hy = PH * 0.33f;
-    if (PW < PH) { F.hx = PW * 0.36f; F.hy = PH * 0.28f; }
+    F.rad = 0.43f * fminf(PW, PH);
+    F.hx = PW * 0.41f; F.hy = PH * 0.39f;
+    if (PW < PH) { F.hx = PW * 0.41f; F.hy = PH * 0.37f; }
     float area = F.circ ? 3.14159f * F.rad * F.rad : 4 * F.hx * F.hy;
-    float dsep = clampf(area / BUDGET * 0.92f, 2.6f, 5.0f), dtest = dsep * 0.55f, step = 0.5f;
+    float dsep = clampf(area / BUDGET * 0.92f, 1.9f, 5.0f), dtest = dsep * 0.55f, step = 0.5f;
     F.sc = rr(R, 85, 160); F.turns = rr(R, 0.7f, 1.3f);
     F.ox = rr(R, 0, 100); F.oy = rr(R, 0, 100); F.salt = (uint32_t)ri(R, 1 << 20);
     F.cell = dtest;
@@ -391,6 +399,7 @@ static void gen_flow(Rng *R, Paths *P, int accent) {
     float maxlen = rr(R, 140, 280);
     uint32_t csalt = F.salt + 77;
     float cthresh = rr(R, 0.56f, 0.62f), csc = rr(R, 40, 80);
+    uint32_t csalt2 = F.salt + 191;
 
     /* seeds: a jittered grid in shuffled order */
     int sx = (int)(PW / dsep), sy = (int)(PH / dsep), ns = sx * sy;
@@ -433,6 +442,7 @@ static void gen_flow(Rng *R, Paths *P, int accent) {
         if ((nf + nb) * step < 6) { F.dead[line++] = 1; continue; }
         int pen = INK;
         if (accent && fbm(x / csc + 9.1f, y / csc + 3.7f, 2, csalt) > cthresh) pen = accent;
+        else if (accent2 && fbm(x / csc + 2.3f, y / csc + 5.9f, 2, csalt2) > cthresh) pen = accent2;
         path_begin(P, pen, NIB);
         for (int i = nb - 1; i >= 0; i--) path_pt(P, bw[2 * i], bw[2 * i + 1]);
         for (int i = 0; i < nf; i++) path_pt(P, fw[2 * i], fw[2 * i + 1]);
@@ -497,8 +507,8 @@ static void contour(const Topo *T, float L, Paths *seg, int pen, float w) {
 
 static void gen_topo(Rng *R, Paths *P, int accent) {
     Topo T;
-    float bw = PW * 0.54f, bh = PH * 0.58f;
-    if (PW < PH) { bw = PW * 0.72f; bh = PH * 0.5f; }
+    float bw = PW * 0.74f, bh = PH * 0.74f;
+    if (PW < PH) { bw = PW * 0.8f; bh = PH * 0.66f; }
     T.step = 1.0f;
     T.nx = (int)(bw / T.step) + 1; T.ny = (int)(bh / T.step) + 1;
     bw = (T.nx - 1) * T.step; bh = (T.ny - 1) * T.step;
@@ -551,12 +561,12 @@ static void gen_topo(Rng *R, Paths *P, int accent) {
         }
     free(sm);
     T.wl = rr(R, 0.22f, 0.34f);
-    int nlev = 9;
+    int nlev = 14;
     float dl = (1 - T.wl) / (nlev + 0.5f);
     int wpen = accent ? accent : INK;
     Paths seg = {0};
     contour(&T, T.wl, &seg, INK, 0.5f);                                      /* the coast */
-    for (int k = 1; k <= nlev; k++) contour(&T, T.wl + k * dl, &seg, INK, k % 4 == 0 ? 0.5f : 0.3f);
+    for (int k = 1; k <= nlev; k++) contour(&T, T.wl + k * dl, &seg, k % 4 == 0 && accent2 ? accent2 : INK, k % 4 == 0 ? 0.5f : 0.3f);
     for (int k = 1; k <= 4; k++) contour(&T, T.wl - k * dl * 0.42f * (1 + 0.25f * k), &seg, wpen, 0.3f);  /* ripples */
     chain(&seg, P, 0.01f);
     paths_free(&seg);
@@ -596,13 +606,13 @@ static int sun_in(void *c, float x, float y) {
 }
 
 static void gen_ridges(Rng *R, Paths *P, int accent) {
-    float bw = PW * (PW > PH ? 0.58f : 0.74f);
+    float bw = PW * (PW > PH ? 0.76f : 0.8f);
     float x0 = art_cx() - bw / 2, dx = 0.5f;
     int n = (int)(bw / dx) + 1;
-    int nl = 42 + ri(R, 12);
-    float dy = (PW > PH ? PH * 0.40f : PH * 0.32f) / nl;
-    float yb = art_cy() + PH * (PW > PH ? 0.25f : 0.2f);
-    float amp = PH * rr(R, 0.13f, 0.19f);
+    int nl = 64 + ri(R, 16);
+    float dy = (PW > PH ? PH * 0.48f : PH * 0.38f) / nl;
+    float yb = art_cy() + PH * (PW > PH ? 0.33f : 0.26f);
+    float amp = PH * rr(R, 0.17f, 0.24f);
     float sc = rr(R, 28, 48), ox = rr(R, 0, 100);
     uint32_t salt = (uint32_t)ri(R, 1 << 20);
     float pk = rr(R, -0.35f, 0.35f), pk2 = rr(R, -0.8f, 0.8f);
@@ -620,7 +630,7 @@ static void gen_ridges(Rng *R, Paths *P, int accent) {
             float h = amp * env * edge * powf(f, 1.7f) * 2.2f * (0.55f + 0.45f * depth);
             float y = yb - l * dy - h;
             int vis = y < hz[i] - 0.12f;
-            if (vis && !run) { path_begin(P, INK, 0.38f); if (i) path_pt(P, lxv, fminf(lyv, hz[i - 1])); run = 1; }
+            if (vis && !run) { path_begin(P, accent2 && l % 8 == 5 ? accent2 : INK, 0.38f); if (i) path_pt(P, lxv, fminf(lyv, hz[i - 1])); run = 1; }
             if (vis) path_pt(P, x, y);
             if (!vis && run) { path_end(P); run = 0; }
             lxv = x; lyv = y;
@@ -639,7 +649,7 @@ static void gen_ridges(Rng *R, Paths *P, int accent) {
 static void gen_harmono(Rng *R, Paths *P, int accent) {
     static const int ratios[][2] = {{1, 2}, {2, 3}, {3, 4}, {3, 5}, {1, 3}, {2, 5}, {4, 5}};
     int k = ri(R, 7);
-    float base = 1.0f, A = 0.34f * fminf(PW, PH);
+    float base = 1.0f, A = 0.42f * fminf(PW, PH);
     float f1 = ratios[k][0] * base + rr(R, -0.006f, 0.006f), f2 = ratios[k][1] * base + rr(R, -0.006f, 0.006f);
     float f3 = f1 + rr(R, -0.02f, 0.02f), f4 = f2 + rr(R, -0.02f, 0.02f);
     float p1 = rr(R, 0, TAU), p2 = rr(R, 0, TAU), p3 = rr(R, 0, TAU), p4 = rr(R, 0, TAU);
@@ -700,7 +710,7 @@ static float hypo(Paths *P, int pen, float cx, float cy, float Rm, int Ri, int r
 }
 
 static void gen_spiro(Rng *R, Paths *P, int accent) {
-    float Rm = 0.37f * fminf(PW, PH), cx = art_cx(), cy = art_cy();
+    float Rm = 0.43f * fminf(PW, PH), cx = art_cx(), cy = art_cy();
     int bR = 7, br = 3;
     float bd = 0.8f, L = 0;
     for (int tries = 0; tries < 400; tries++) {
@@ -714,29 +724,31 @@ static void gen_spiro(Rng *R, Paths *P, int accent) {
     float rot = rr(R, 0, TAU), twist = rr(R, -0.12f, 0.12f), shrink = rr(R, 0.07f, 0.12f);
     int every = 2 + ri(R, 2);
     float used = 0;
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < 16; i++) {
         float s = 1 - i * shrink;
         if (s < 0.25f || used + L * s > BUDGET * 1.05f) break;
-        used += hypo(P, accent && i % every == every - 1 ? accent : INK, cx, cy, Rm * s, bR, br, bd, rot + i * twist, 0);
+        int pen = accent && i % every == every - 1 ? (accent2 && (i / every) % 2 ? accent2 : accent) : INK;
+        used += hypo(P, pen, cx, cy, Rm * s, bR, br, bd, rot + i * twist, 0);
     }
 }
 
 static void gen_rings(Rng *R, Paths *P, int accent) {
     float cx = art_cx(), cy = art_cy();
-    float rmax = 0.38f * fminf(PW, PH), r0 = rr(R, 3, 12);
+    float rmax = 0.44f * fminf(PW, PH), r0 = rr(R, 3, 12);
     /* sum of 2 pi r ~ budget */
     int N = (int)(BUDGET / (3.14159f * (rmax + r0)));
     float gap = (rmax - r0) / N;
     float fq = rr(R, 0.8f, 1.6f), amp = rr(R, 0.18f, 0.3f) * rmax;
     float drx = rr(R, -0.12f, 0.12f) * rmax, dry = rr(R, -0.12f, 0.12f) * rmax;
     uint32_t salt = (uint32_t)ri(R, 1 << 20);
-    int a0 = accent ? N / 3 + ri(R, N / 3) : -1, a1 = a0 + 3 + ri(R, 4);
+    int a0 = accent ? N / 3 + ri(R, N / 3) : -1, a1 = a0 + 3 + ri(R, 6);
+    int b0 = accent2 ? N / 8 + ri(R, N / 5) : -1, b1 = b0 + 2 + ri(R, 4);
     float ox = rr(R, 0, 50), oy = rr(R, 0, 50);
     for (int i = 0; i < N; i++) {
         float r = r0 + i * gap, grow = powf((float)i / N, 1.3f);
         int n = (int)(TAU * r / 0.6f) + 12;
         float start = rr(R, 0, TAU);
-        path_begin(P, i >= a0 && i < a1 ? accent : INK, NIB);
+        path_begin(P, i >= a0 && i < a1 ? accent : i >= b0 && i < b1 ? accent2 : INK, NIB);
         for (int k = 0; k <= n; k++) {
             float a = start + TAU * k / n;
             float nx = cosf(a) * fq + ox, ny = sinf(a) * fq + oy;
@@ -750,11 +762,11 @@ static void gen_rings(Rng *R, Paths *P, int accent) {
 /* -- truchet: quarter arcs, several strands, woven into long curves -- */
 static void gen_truchet(Rng *R, Paths *P, int accent) {
     int k = rnd(R) < 0.6f ? 3 : 2;
-    float c = rr(R, 20, 27);
-    float per_tile = 2 * k * (TAU / 4) * (c / 2);
-    int tiles = (int)(BUDGET * 0.95f / per_tile);
-    float aspect = PW > PH ? 1.35f : 0.75f;
-    int nx = (int)roundf(sqrtf(tiles * aspect)), ny = tiles / (nx ? nx : 1);
+    /* tiles small enough that the budget fills most of the sheet */
+    float aw = PW * 0.8f, ah = PH * 0.78f;
+    float c = aw * ah * k * (TAU / 4) / (BUDGET * 0.95f);    /* k quarter arcs of radius ~c/2, twice, per c^2 */
+    c = clampf(c * rr(R, 0.95f, 1.15f), 12, 30);
+    int nx = (int)(aw / c), ny = (int)(ah / c);
     nx = nx < 2 ? 2 : nx; ny = ny < 2 ? 2 : ny;
     float x0 = art_cx() - nx * c / 2, y0 = art_cy() - ny * c / 2;
     Paths seg = {0};
@@ -770,7 +782,7 @@ static void gen_truchet(Rng *R, Paths *P, int accent) {
                 float a0 = corner == 0 ? 0 : corner == 1 ? TAU / 4 : corner == 2 ? TAU / 2 : 3 * TAU / 4;
                 for (int s = 0; s < k; s++) {
                     float r = c / 2 + (s - (k - 1) * 0.5f) * g;
-                    int pen = (k == 3 && s == 1 && accent) ? accent : INK;
+                    int pen = (k == 3 && s == 1 && accent) ? accent : (k == 3 && s == 2 && accent2) ? accent2 : INK;
                     path_begin(&seg, pen, NIB);
                     for (int m = 0; m <= 10; m++) {
                         float an = a0 + TAU / 4 * m / 10;
@@ -789,9 +801,296 @@ static void gen_truchet(Rng *R, Paths *P, int accent) {
     path_rect(P, INK, 0.5f, x0, y0, x0 + nx * c, y0 + ny * c);
 }
 
-enum { K_FLOW, K_TOPO, K_RIDGES, K_HARMONO, K_SPIRO, K_RINGS, K_TRUCHET, NKIND };
-static const char *KIND_NAME[NKIND] = {"flow", "topo", "ridges", "harmonograph", "spirograph", "rings", "truchet"};
-static void (*const GEN[NKIND])(Rng *, Paths *, int) = {gen_flow, gen_topo, gen_ridges, gen_harmono, gen_spiro, gen_rings, gen_truchet};
+/* ---- clipped polylines: emit the runs of a sampled curve that inside() keeps ---- */
+typedef struct { Paths *P; int pen; float w; Inside in; void *ctx; int run; } Clip;
+static void clip_pt(Clip *c, float x, float y) {
+    int in = c->in(c->ctx, x, y);
+    if (in && !c->run) { path_begin(c->P, c->pen, c->w); c->run = 1; }
+    if (in) path_pt(c->P, x, y);
+    else if (c->run) { path_end(c->P); c->run = 0; }
+}
+static void clip_end(Clip *c) { if (c->run) path_end(c->P); c->run = 0; }
+static void clip_line(Paths *P, int pen, float w, float x0, float y0, float x1, float y1, Inside in, void *ctx) {
+    Clip c = {P, pen, w, in, ctx, 0};
+    int n = (int)(hypotf(x1 - x0, y1 - y0) / 0.5f) + 1;
+    for (int i = 0; i <= n; i++) clip_pt(&c, x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n);
+    clip_end(&c);
+}
+static void clip_circle(Paths *P, int pen, float w, float cx, float cy, float r, float a0, Inside in, void *ctx) {
+    Clip c = {P, pen, w, in, ctx, 0};
+    int n = (int)(TAU * r / 0.6f) + 12;
+    for (int i = 0; i <= n; i++) clip_pt(&c, cx + r * cosf(a0 + TAU * i / n), cy + r * sinf(a0 + TAU * i / n));
+    clip_end(&c);
+}
+static int in_all(void *c, float x, float y) { (void)c; (void)x; (void)y; return 1; }
+typedef struct { float cx, cy, r; } Disc;
+static int disc_in(void *c, float x, float y) { Disc *d = c; return (x - d->cx) * (x - d->cx) + (y - d->cy) * (y - d->cy) < d->r * d->r; }
+
+/* the pen for a part that may take an accent: mostly ink */
+static int some_pen(Rng *R, int accent, float pa) {
+    float u = rnd(R);
+    if (accent && u < pa) return accent2 && u < pa * 0.45f ? accent2 : accent;
+    return INK;
+}
+
+/* -- unknown pleasures: a stack of jagged pulses, hidden lines removed -- */
+static void gen_joy(Rng *R, Paths *P, int accent) {
+    float bw = PW * (PW > PH ? 0.5f : 0.74f), dx = 0.5f, x0 = art_cx() - bw / 2;
+    int n = (int)(bw / dx) + 1;
+    int nl = 72 + ri(R, 20);
+    float top = PH * 0.2f, bot = PH * 0.85f, dy = (bot - top) / nl;
+    float amp = dy * rr(R, 9, 13);
+    uint32_t salt = (uint32_t)ri(R, 1 << 20);
+    int band = accent ? ri(R, nl * 2 / 3) : -1, bandn = 4 + ri(R, 6);
+    float *hz = malloc(sizeof(float) * n);
+    for (int i = 0; i < n; i++) hz[i] = 1e9f;
+    for (int l = 0; l < nl; l++) {                          /* front (bottom) to back */
+        float yb = bot - l * dy;
+        float c[5], wd[5], a[5];
+        int nb = 2 + ri(R, 4);
+        for (int k = 0; k < nb; k++) { c[k] = rr(R, -0.4f, 0.4f); wd[k] = rr(R, 0.04f, 0.16f); a[k] = rr(R, 0.2f, 1.0f); }
+        int pen = l >= band && l < band + bandn ? accent : accent2 && l % 11 == 7 ? accent2 : INK;
+        int run = 0;
+        float lyv = 0, lxv = 0;
+        for (int i = 0; i < n; i++) {
+            float x = x0 + i * dx, u = (x - x0) / bw * 2 - 1;
+            float env = smoothstepf(0.82f, 0.2f, fabsf(u));
+            float h = 0;
+            for (int k = 0; k < nb; k++) h += a[k] * expf(-(u - c[k]) * (u - c[k]) / (wd[k] * wd[k]));
+            float jag = fbm(x / 2.2f, l * 3.1f, 3, salt) - 0.5f;
+            h = amp * env * (0.55f * h + 0.9f * jag * (0.4f + h)) + dy * 0.3f * (fbm(x / 9.0f, l * 1.3f, 2, salt + 9) - 0.5f);
+            float y = yb - fmaxf(h, -dy * 0.4f);
+            int vis = y < hz[i] - 0.15f;
+            if (vis && !run) { path_begin(P, pen, 0.42f); if (i) path_pt(P, lxv, fminf(lyv, hz[i - 1])); run = 1; }
+            if (vis) path_pt(P, x, y);
+            if (!vis && run) { path_end(P); run = 0; }
+            lxv = x; lyv = y;
+            if (y < hz[i]) hz[i] = y;
+        }
+        if (run) path_end(P);
+    }
+    free(hz);
+}
+
+/* -- packed circles, each filled its own way -- */
+static void gen_circles(Rng *R, Paths *P, int accent) {
+    float hx = PW * 0.42f, hy = PH * 0.38f, cx = art_cx(), cy = art_cy();
+    if (PW < PH) { hx = PW * 0.42f; hy = PH * 0.36f; }
+    float rmax = fminf(hx, hy) * rr(R, 0.35f, 0.5f), rmin = 2.5f, gap = rr(R, 1.2f, 2.5f);
+    int cap = 900, nc = 0;
+    float *C = malloc(sizeof(float) * 3 * cap);
+    for (int it = 0; it < 20000 && nc < cap; it++) {
+        float f = (float)it / 20000;
+        float r = rmin + (rmax - rmin) * powf(1 - f, 3.0f) * rr(R, 0.8f, 1.0f);
+        float x = cx + rr(R, -hx + r, hx - r), y = cy + rr(R, -hy + r, hy - r);
+        int ok = 1;
+        for (int j = 0; j < nc && ok; j++)
+            if (hypotf(x - C[3 * j], y - C[3 * j + 1]) < r + C[3 * j + 2] + gap) ok = 0;
+        if (ok) { C[3 * nc] = x; C[3 * nc + 1] = y; C[3 * nc + 2] = r; nc++; }
+    }
+    float sp = rr(R, 1.1f, 1.6f);
+    for (int i = 0; i < nc; i++) {
+        float x = C[3 * i], y = C[3 * i + 1], r = C[3 * i + 2];
+        int pen = some_pen(R, accent, 0.35f);
+        int style = ri(R, 5);
+        if (paths_length(P) > BUDGET * 1.3f) style = 4;
+        Disc d = {x, y, r - 0.2f};
+        if (style == 0 || r < 5) for (float q = r; q > 0.6f; q -= sp) clip_circle(P, pen, NIB, x, y, q, rr(R, 0, TAU), in_all, NULL);
+        else if (style == 1 || style == 2) {
+            float a = rr(R, 0, TAU);
+            clip_circle(P, pen, NIB, x, y, r, 0, in_all, NULL);
+            hatch(P, pen, NIB, a, sp * 1.1f, x - r, y - r, x + r, y + r, disc_in, &d, 0);
+            if (style == 2) hatch(P, pen == INK ? some_pen(R, accent, 0.8f) : INK, NIB, a + TAU / 4, sp * 1.6f, x - r, y - r, x + r, y + r, disc_in, &d, 0);
+        } else if (style == 3) {                       /* a spiral */
+            path_begin(P, pen, NIB);
+            float a0 = rr(R, 0, TAU), turns = r / sp;
+            int m = (int)(turns * TAU * r / 1.2f) + 20;
+            for (int k = 0; k <= m; k++) {
+                float t = (float)k / m, a = a0 + t * turns * TAU, q = r * (1 - t);
+                path_pt(P, x + q * cosf(a), y + q * sinf(a));
+            }
+            path_end(P);
+        } else {                                       /* an outline, a dot in it */
+            clip_circle(P, pen, NIB, x, y, r, 0, in_all, NULL);
+            if (r > 6) clip_circle(P, pen, NIB, x, y, r * 0.18f, 0, in_all, NULL);
+        }
+    }
+    free(C);
+}
+
+/* -- recursive subdivision: cells split and split again, filled in different pens -- */
+typedef struct { float x0, y0, x1, y1; } Box;
+static int box_in(void *c, float x, float y) { Box *b = c; return x > b->x0 && x < b->x1 && y > b->y0 && y < b->y1; }
+static void subdiv(Rng *R, Paths *P, int accent, float x0, float y0, float x1, float y1, int depth) {
+    float w = x1 - x0, h = y1 - y0, g = 1.6f;
+    if (depth < 7 && (w > 26 || h > 26) && (depth < 2 || rnd(R) < 0.82f)) {
+        int vert = w > h * rr(R, 0.7f, 1.4f);
+        float f = rr(R, 0.3f, 0.7f);
+        if (rnd(R) < 0.3f) f = rnd(R) < 0.5f ? 1.0f / 3 : 2.0f / 3;
+        if (vert) { float m = x0 + w * f; subdiv(R, P, accent, x0, y0, m, y1, depth + 1); subdiv(R, P, accent, m, y0, x1, y1, depth + 1); }
+        else { float m = y0 + h * f; subdiv(R, P, accent, x0, y0, x1, m, depth + 1); subdiv(R, P, accent, x0, m, x1, y1, depth + 1); }
+        return;
+    }
+    Box b = {x0 + g, y0 + g, x1 - g, y1 - g};
+    if (b.x1 - b.x0 < 2 || b.y1 - b.y0 < 2) return;
+    int pen = some_pen(R, accent, 0.4f), style = ri(R, 7);
+    float sp = rr(R, 1.4f, 2.8f);
+    static const float ANG[] = {0, 0.785f, 1.5708f, -0.785f};
+    path_rect(P, style == 6 ? pen : INK, NIB, b.x0, b.y0, b.x1, b.y1);
+    Box in = {b.x0 + 0.3f, b.y0 + 0.3f, b.x1 - 0.3f, b.y1 - 0.3f};
+    if (style <= 2) hatch(P, pen, NIB, ANG[ri(R, 4)], sp, b.x0, b.y0, b.x1, b.y1, box_in, &in, rnd(R) * sp);
+    if (style == 2) hatch(P, pen, NIB, ANG[ri(R, 4)] + 0.4f, sp * 1.4f, b.x0, b.y0, b.x1, b.y1, box_in, &in, 0);
+    if (style == 3)                                    /* nested squares */
+        for (float q = sp * 1.5f; b.x0 + q < b.x1 - q && b.y0 + q < b.y1 - q; q += sp * 1.5f)
+            path_rect(P, pen, NIB, b.x0 + q, b.y0 + q, b.x1 - q, b.y1 - q);
+    if (style == 4) {                                  /* a circle, ringed */
+        float cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2, r = fminf(b.x1 - b.x0, b.y1 - b.y0) * 0.42f;
+        for (float q = r; q > 0.6f; q -= sp) clip_circle(P, pen, NIB, cx, cy, q, rr(R, 0, TAU), in_all, NULL);
+    }
+    if (style == 5) {                                  /* a quarter-arc fan from a corner */
+        float cx = rnd(R) < 0.5f ? b.x0 : b.x1, cy = rnd(R) < 0.5f ? b.y0 : b.y1;
+        float rm = hypotf(b.x1 - b.x0, b.y1 - b.y0);
+        for (float q = sp * 1.3f; q < rm; q += sp * 1.3f) clip_circle(P, pen, NIB, cx, cy, q, 0, box_in, &in);
+    }
+}
+static void gen_subdiv(Rng *R, Paths *P, int accent) {
+    float hx = PW * 0.42f, hy = PH * 0.39f;
+    subdiv(R, P, accent, art_cx() - hx, art_cy() - hy, art_cx() + hx, art_cy() + hy, 0);
+}
+
+/* -- moire: two or three fine line systems laid over each other -- */
+static void moire_layer(Rng *R, Paths *P, int pen, int type, Disc *d, float g) {
+    float r = d->r;
+    if (type == 0) hatch(P, pen, NIB, rr(R, 0, TAU), g, d->cx - r, d->cy - r, d->cx + r, d->cy + r, disc_in, d, rnd(R) * g);
+    else if (type == 1) {                              /* rings round a point off centre */
+        float ox = d->cx + rr(R, -0.5f, 0.5f) * r, oy = d->cy + rr(R, -0.5f, 0.5f) * r;
+        float far = r + hypotf(ox - d->cx, oy - d->cy);
+        for (float q = g; q < far; q += g) clip_circle(P, pen, NIB, ox, oy, q, rr(R, 0, TAU), disc_in, d);
+    } else {                                           /* rays from a point outside */
+        float a = rr(R, 0, TAU), D = r * rr(R, 1.3f, 2.2f);
+        float ox = d->cx + D * cosf(a), oy = d->cy + D * sinf(a);
+        float half = asinf(fminf(r / D, 1.0f)), da = g / D;
+        int k = 0;
+        for (float t = -half; t <= half; t += da, k++) {
+            float b = a + 3.14159f + t, L = D + r;
+            if (k & 1) clip_line(P, pen, NIB, ox + L * cosf(b), oy + L * sinf(b), ox, oy, disc_in, d);
+            else clip_line(P, pen, NIB, ox, oy, ox + L * cosf(b), oy + L * sinf(b), disc_in, d);
+        }
+    }
+}
+static void gen_moire(Rng *R, Paths *P, int accent) {
+    Disc d = {art_cx(), art_cy(), 0.43f * fminf(PW, PH)};
+    float g = rr(R, 2.5f, 3.2f);
+    int t0 = ri(R, 3), t1 = (t0 + 1 + ri(R, 2)) % 3;
+    moire_layer(R, P, INK, t0, &d, g);
+    moire_layer(R, P, accent ? accent : INK, t1, &d, g * rr(R, 0.95f, 1.1f));
+    if (accent2) {                                     /* a smaller third disc, off centre */
+        Disc e = {d.cx + rr(R, -0.35f, 0.35f) * d.r, d.cy + rr(R, -0.35f, 0.35f) * d.r, d.r * rr(R, 0.35f, 0.55f)};
+        moire_layer(R, P, accent2, ri(R, 3), &e, g * 1.05f);
+    }
+    clip_circle(P, INK, NIB, d.cx, d.cy, d.r + 2.5f, 0, in_all, NULL);
+}
+
+/* -- roses: layered rose curves, each turned a little, in several pens -- */
+static void gen_rose(Rng *R, Paths *P, int accent) {
+    static const int KS[][2] = {{2, 1}, {3, 1}, {5, 2}, {7, 3}, {4, 1}, {5, 3}, {7, 2}, {6, 5}, {8, 3}};
+    float A = 0.43f * fminf(PW, PH), cx = art_cx(), cy = art_cy();
+    int layers = 2 + ri(R, 2);
+    for (int l = 0; l < layers; l++) {
+        float used = 0;
+        int k = ri(R, 9), nn = KS[k][0], dd = KS[k][1];
+        float scale = 1 - l * rr(R, 0.18f, 0.28f), lift = rr(R, 0, 0.35f);
+        int copies = 5 + ri(R, 10);
+        float twist = rr(R, 0.02f, 0.08f) * (rnd(R) < 0.5f ? -1 : 1), a0 = rr(R, 0, TAU);
+        int pen = l == 0 ? INK : l == 1 ? (accent ? accent : INK) : (accent2 ? accent2 : INK);
+        float T = TAU * dd * ((nn * dd) % 2 ? 1 : 2);
+        for (int c = 0; c < copies && used < BUDGET * 1.2f / layers; c++) {
+            float rot = a0 + c * twist, s = scale * (1 - 0.012f * c);
+            int m = (int)(T * A * s / 0.5f) + 40;
+            path_begin(P, pen, NIB);
+            float px = 0, py = 0;
+            for (int i = 0; i <= m; i++) {
+                float t = T * i / m, r = A * s * (lift + (1 - lift) * fabsf(cosf((float)nn / dd * t)));
+                float x = cx + r * cosf(t + rot), y = cy + r * sinf(t + rot);
+                if (i) used += hypotf(x - px, y - py);
+                path_pt(P, x, y);
+                px = x; py = y;
+            }
+            path_end(P);
+        }
+    }
+}
+
+/* -- a city: three rows of buildings in elevation, near ones hiding far -- */
+typedef struct { float *hz, x0, dx; int n; Box b; } City;
+static int city_vis(void *c, float x, float y) {
+    City *C = c;
+    int i = (int)((x - C->x0) / C->dx + 0.5f);
+    if (i < 0 || i >= C->n) return 0;
+    return y < C->hz[i] - 0.25f;
+}
+static int city_in(void *c, float x, float y) { City *C = c; return box_in(&C->b, x, y) && city_vis(c, x, y); }
+static void city_rect(Paths *P, int pen, City *C, float x0, float y0, float x1, float y1) {
+    clip_line(P, pen, NIB, x0, y1, x0, y0, city_vis, C);
+    clip_line(P, pen, NIB, x0, y0, x1, y0, city_vis, C);
+    clip_line(P, pen, NIB, x1, y0, x1, y1, city_vis, C);
+}
+static void gen_city(Rng *R, Paths *P, int accent) {
+    float bw = PW * 0.84f, x0 = art_cx() - bw / 2, ground = PH * 0.84f, dx = 0.5f;
+    City C = {0};
+    C.n = (int)(bw / dx) + 1; C.x0 = x0; C.dx = dx;
+    C.hz = malloc(sizeof(float) * C.n);
+    path_line(P, INK, 0.6f, x0 - 4, ground, x0 + bw + 4, ground);
+    for (int i = 0; i < C.n; i++) C.hz[i] = ground;
+    for (int row = 0; row < 3; row++) {                /* near to far */
+        float hmin = PH * (0.08f + 0.1f * row), hmax = PH * (0.28f + 0.17f * row);
+        float x = x0 + rr(R, 0, 8);
+        while (x < x0 + bw - 8) {
+            float w = rr(R, 10, row == 2 ? 30 : 38), h = rr(R, hmin, hmax);
+            if (x + w > x0 + bw) w = x0 + bw - x;
+            float top = ground - h;
+            int pen = row == 0 ? INK : some_pen(R, accent, row == 2 ? 0.7f : 0.3f);
+            city_rect(P, pen, &C, x, top, x + w, ground);
+            C.b = (Box){x + 0.4f, top + 0.4f, x + w - 0.4f, ground};
+            if (row == 0 || rnd(R) < 0.3f) {           /* windows, a few lit (filled) */
+                float ww = rr(R, 2.0f, 3.2f), wh = rr(R, 2.5f, 4.0f), gx = ww * rr(R, 0.6f, 1.0f), gy = wh * 0.7f;
+                int nx = (int)((w - 3) / (ww + gx)), ny = (int)((h - 6) / (wh + gy));
+                float mx = x + (w - nx * (ww + gx) + gx) / 2;
+                for (int j = 0; j < ny; j++)
+                    for (int i = 0; i < nx; i++) {
+                        float wx = mx + i * (ww + gx), wy = top + 4 + j * (wh + gy);
+                        if (rnd(R) < 0.62f && city_vis(&C, wx, wy) && city_vis(&C, wx + ww, wy + wh)) {
+                            Box wb = {wx, wy, wx + ww, wy + wh};
+                            path_rect(P, pen, 0.35f, wb.x0, wb.y0, wb.x1, wb.y1);
+                            if (rnd(R) < 0.14f) hatch(P, accent ? accent : INK, 0.35f, 0, 0.7f, wb.x0, wb.y0, wb.x1, wb.y1, box_in, &wb, 0.35f);
+                        }
+                    }
+            } else {                                   /* a hatched face */
+                static const float ANG[] = {1.5708f, 0.785f, -0.785f, 0};
+                hatch(P, pen, NIB, ANG[ri(R, 4)], rr(R, 1.4f, 2.8f), C.b.x0, C.b.y0, C.b.x1, C.b.y1, city_in, &C, 0);
+            }
+            if (rnd(R) < 0.25f) {                      /* a mast, or a stepped top */
+                if (rnd(R) < 0.5f) clip_line(P, pen, NIB, x + w / 2, top, x + w / 2, top - rr(R, 6, 18), city_vis, &C);
+                else city_rect(P, pen, &C, x + w * 0.2f, top - rr(R, 4, 10), x + w * 0.8f, top);
+            }
+            /* it hides everything further back */
+            for (int i = (int)((x - x0) / dx); i <= (int)((x + w - x0) / dx) && i < C.n; i++) if (i >= 0) C.hz[i] = fminf(C.hz[i], top);
+            x += w + rr(R, 0, row == 0 ? 6 : 3);
+        }
+    }
+    /* the sun, low behind it all */
+    if (accent) {
+        Disc s = {x0 + bw * rr(R, 0.2f, 0.8f), ground - PH * rr(R, 0.5f, 0.62f), PH * rr(R, 0.07f, 0.1f)};
+        for (float q = s.r; q > 0.6f; q -= 1.3f) clip_circle(P, accent, NIB, s.cx, s.cy, q, 0, city_vis, &C);
+    }
+    free(C.hz);
+}
+
+enum { K_FLOW, K_TOPO, K_RIDGES, K_HARMONO, K_SPIRO, K_RINGS, K_TRUCHET, K_JOY, K_CIRCLES, K_SUBDIV, K_MOIRE, K_ROSE, K_CITY, NKIND };
+static const char *KIND_NAME[NKIND] = {"flow", "topo", "ridges", "harmonograph", "spirograph", "rings", "truchet",
+                                       "joy", "circles", "subdiv", "moire", "rose", "city"};
+static void (*const GEN[NKIND])(Rng *, Paths *, int) = {gen_flow, gen_topo, gen_ridges, gen_harmono, gen_spiro, gen_rings, gen_truchet,
+                                                       gen_joy, gen_circles, gen_subdiv, gen_moire, gen_rose, gen_city};
 
 /* ===================================================================== */
 /* the caption: a single-stroke script                                   */
@@ -943,13 +1242,13 @@ static void text_paths(Rng *R, Paths *P, const char *s, float x, float y, float 
 /* ===================================================================== */
 typedef struct { float x, y, ix, iy, t, v, w, k, z; unsigned char pen; } Smp;
 
-#define VMAX 42.0f       /* pen down, mm/s */
-#define ACC 320.0f       /* mm/s^2 */
-#define VTRAV 120.0f     /* pen up */
-#define ATRAV 600.0f
+#define VMAX 70.0f       /* pen down, mm/s */
+#define ACC 700.0f       /* mm/s^2 */
+#define VTRAV 320.0f     /* pen up: it darts between strokes */
+#define ATRAV 2400.0f
 #define T_LOWER 0.11f
 #define T_RAISE 0.09f
-#define TARGET 200.0f    /* seconds a drawing aims to take */
+#define TARGET 280.0f    /* seconds a drawing aims to take */
 
 typedef struct {
     Smp *s; int n, cap;
@@ -1128,6 +1427,10 @@ static void pick_pens(int k) {
     if (pal->shuffle) {
         Rng Q = {mix32(opt_seed * 0x2545f491u + (uint32_t)k * 0x9e3779b9u + 7) | 1};
         for (int i = NPEN - 1; i > 0; i--) { int j = ri(&Q, i + 1), t = sheet_pen[i]; sheet_pen[i] = sheet_pen[j]; sheet_pen[j] = t; }
+        /* a pale colour (the orange) is too faint for the main ink */
+        float c[3];
+        hex(pal->pen[sheet_pen[0]], c);
+        if (0.3f * c[0] + 0.59f * c[1] + 0.11f * c[2] > 0.4f) { int t = sheet_pen[0]; sheet_pen[0] = sheet_pen[1]; sheet_pen[1] = t; }
     }
     hex(pal->paper, paper_rgb);
     for (int p = 0; p < NPEN; p++) {
@@ -1142,7 +1445,8 @@ static void make_sheet(int k) {
     int kind = opt_kind >= 0 ? opt_kind : ri(&R, NKIND);
     if (opt_kind < 0 && kind == prev_kind) kind = (kind + 1 + ri(&R, NKIND - 1)) % NKIND;
     prev_kind = kind;
-    int accent = rnd(&R) < 0.85f ? 1 + ri(&R, 3) : 0;
+    int accent = rnd(&R) < 0.9f ? 1 + ri(&R, 3) : 0;
+    accent2 = accent && rnd(&R) < 0.65f ? 1 + (accent + ri(&R, 2)) % 3 : 0;
 
     Paths art = {0};
     GEN[kind](&R, &art, accent);
@@ -1156,7 +1460,7 @@ static void make_sheet(int k) {
     push(park_x, park_y, 0, 0, 0, 0, 0, 1);
     plot_paths(&art, &R, 0);
     /* a plotter speed setting, so the piece takes a few minutes */
-    float f = clampf(pl_t / TARGET, 0.8f, 2.6f);
+    float f = clampf(pl_t / TARGET, 0.8f, 3.5f);
     for (int i = 0; i < plan.n; i++) plan.s[i].t /= f;
     pl_t /= f;
     float art_len = paths_length(&art);
@@ -1180,8 +1484,8 @@ static void make_sheet(int k) {
     plan.t_end = pl_t;
     sheet_cycle = 2 * T_SLIDE + T_SETTLE + plan.t_end + T_REST;
     if (getenv("PLOTTER_DEBUG"))
-        fprintf(stderr, "sheet %d: %s, accent %d, %.1f m of ink, %d samples, speed x%.2f, %.0f s\n", k, KIND_NAME[kind],
-                accent, art_len / 1000, plan.n, f, plan.t_end);
+        fprintf(stderr, "sheet %d: %s, accents %d %d, %.1f m of ink, %d samples, speed x%.2f, %.0f s\n", k, KIND_NAME[kind],
+                accent, accent2, art_len / 1000, plan.n, f, plan.t_end);
 }
 
 /* ===================================================================== */
@@ -1318,7 +1622,19 @@ static const char *FS_COMP = GLSL(
     uniform vec3 uPenCol;
     uniform vec2 uRails;        /* x of the two rails */
     uniform float uU;           /* a size unit: min(W, H) / 1000 */
+    uniform vec3 uLamp;         /* the desk lamp's pool: centre (px, y down), radius */
+    uniform vec3 uTint;         /* its light */
+    uniform vec2 uRack;         /* the pen rack's top slot, px */
+    uniform vec3 uPens[4];      /* the pens in it */
+    uniform int uCur;           /* the one in the carriage */
     out vec4 o;
+
+    /* everything sits in a desk lamp's pool of light, falling off to the
+     * edges of the screen, so the sheet is the brightest thing there */
+    vec3 lit(vec3 col, vec2 p) {
+        vec2 q = (p - uLamp.xy) / uLamp.z;
+        return col * uTint * mix(0.4, 1.0, exp(-dot(q, q)));
+    }
 
     void main() {
         vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
@@ -1337,6 +1653,26 @@ static const char *FS_COMP = GLSL(
             col = mix(col, sh.rgb * ink, clamp(0.5 - dp, 0.0, 1.0));
         }
 
+        /* the pen rack beside the sheet: a bar with a cap in each hole but
+         * the one whose pen is in the carriage */
+        vec2 rc = uRack + vec2(0.0, 1.5 * 30.0 * u);
+        if (abs(p.x - rc.x) < 34.0 * u && abs(p.y - rc.y) < 90.0 * u) {
+            col *= shade(box(p - vec2(4.0, 7.0) * u, rc, vec2(15.0 * u, 62.0 * u), 6.0 * u), 0.35, 10.0 * u);
+            float db = box(p, rc, vec2(15.0 * u, 62.0 * u), 6.0 * u);
+            col = over(col, mix(HI, MID, smoothstep(-15.0 * u, 15.0 * u, p.x - rc.x)), db);
+            for (int i = 0; i < 4; i++) {
+                vec2 c = uRack + vec2(0.0, float(i) * 30.0 * u);
+                float r = length(p - c);
+                col = over(col, DARK * 0.6, r - 10.5 * u);
+                if (i != uCur) {
+                    col *= shade(length(p - c - vec2(1.5, 2.5) * u) - 9.0 * u, 0.4, 3.0 * u);
+                    vec3 cap = uPens[i] * (0.75 + 0.45 * smoothstep(8.0 * u, -8.0 * u, (p.x - c.x) + (p.y - c.y)));
+                    col = over(col, cap, r - 8.5 * u);
+                    col = over(col, mix(cap, vec3(1.0), 0.35), length(p - c + vec2(3.0, 3.0) * u) - 2.0 * u);
+                }
+            }
+        }
+
         /* the rails, standing over the sheet as it slides past: a dark
          * extrusion with a slot, on its shadow */
         float rw = 10.0 * u, rx = p.x < uRes.x * 0.5 ? uRails.x : uRails.y;
@@ -1350,7 +1686,7 @@ static const char *FS_COMP = GLSL(
 
         /* the machine; most of the screen is clear of it */
         float by = uPen.y - 58.0 * u, bh = 15.0 * u;           /* beam centre, half height */
-        if (p.y < by - bh - 12.0 * u || p.y > uPen.y + 50.0 * u) { o = vec4(col, 1.0); return; }
+        if (p.y < by - bh - 12.0 * u || p.y > uPen.y + 50.0 * u) { o = vec4(lit(col, p), 1.0); return; }
         float bx0 = uRails.x, bx1 = uRails.y;
         vec2 sv = vec2(9.0, 14.0) * u;                          /* light from the upper left */
         float near = abs(p.x - uPen.x) - 60.0 * u;              /* > 0: clear of the carriage */
@@ -1373,8 +1709,17 @@ static const char *FS_COMP = GLSL(
             col = over(col, mix(MID, DARK, smoothstep(-bh, bh + 9.0 * u, p.y - by)), de);
             vec2 sc = vec2(rx, by + sign(p.y - by) * (bh + 1.0 * u));
             col = over(col, mix(METAL, METAL * 0.6, smoothstep(-3.0 * u, 3.0 * u, p.y - sc.y)), length(p - sc) - 3.2 * u);
+            if (rx == uRails.x) {                               /* the stepper that drives it */
+                vec2 mc = vec2(rx, by);
+                float dm = box(p, mc, vec2(15.0 * u), 2.5 * u);
+                col = over(col, mix(MID, DARK, smoothstep(-15.0 * u, 15.0 * u, p.y - mc.y + p.x - mc.x)), dm);
+                col = over(col, mix(METAL * 0.9, METAL * 0.5, smoothstep(-7.0 * u, 7.0 * u, p.y - mc.y)), length(p - mc) - 7.0 * u);
+                col = over(col, DARK, length(p - mc) - 2.2 * u);
+                vec2 sq = abs(p - mc) - vec2(10.5 * u);
+                col = over(col, METAL * 0.75, length(sq) - 1.6 * u);
+            }
         }
-        if (near > 0.0) { o = vec4(col, 1.0); return; }
+        if (near > 0.0) { o = vec4(lit(col, p), 1.0); return; }
 
         /* the carriage */
         vec2 cc = vec2(uPen.x, (cy0 + cy1) * 0.5), ch = vec2(27.0 * u, (cy1 - cy0) * 0.5);
@@ -1389,6 +1734,11 @@ static const char *FS_COMP = GLSL(
         /* a brass plate across it */
         float dpl = box(p, vec2(uPen.x, by), vec2(21.0 * u, 4.0 * u), 2.0 * u);
         col = over(col, mix(METAL * 1.1, METAL * 0.65, smoothstep(by - 4.0 * u, by + 4.0 * u, p.y)), dpl);
+        /* a status light: green drawing, amber with the pen up */
+        vec2 lc = vec2(uPen.x + 19.0 * u, cy0 + 8.0 * u);
+        vec3 led = mix(vec3(0.3, 1.0, 0.45), vec3(1.0, 0.68, 0.2), smoothstep(0.1, 0.6, uLift));
+        col += led * 0.35 * exp(-dot(p - lc, p - lc) / (25.0 * u * u));
+        col = over(col, led, length(p - lc) - 2.2 * u);
         /* the pen in its clamp: seen from above, its cap in the ink's colour */
         float s = 1.0 + 0.08 * uLift;
         vec2 pp = uPen - vec2(1.0, 1.5) * u * uLift;
@@ -1398,7 +1748,7 @@ static const char *FS_COMP = GLSL(
         vec3 pcap = uPenCol * (0.75 + 0.45 * smoothstep(9.0 * u, -9.0 * u, (p.x - pp.x) + (p.y - pp.y)));
         col = over(col, pcap, rr - 10.5 * s * u);
         col = over(col, mix(pcap, vec3(1.0), 0.35), length(p - pp + vec2(3.5, 3.5) * u) - 2.5 * u);
-        o = vec4(col, 1.0);
+        o = vec4(lit(col, p), 1.0);
     });
 
 static GLuint prog_seg, prog_paper, prog_bed, prog_comp, vao_seg, vbo_seg, vao_empty;
@@ -1638,6 +1988,11 @@ static void render(GLuint target) {
     glUniform1f(glGetUniformLocation(prog_comp, "uLift"), lift);
     glUniform3fv(glGetUniformLocation(prog_comp, "uPenCol"), 1, pen_rgb[pen]);
     glUniform2f(glGetUniformLocation(prog_comp, "uRails"), rails_x(), W - rails_x());
+    glUniform3f(glGetUniformLocation(prog_comp, "uLamp"), pap_x + ink_w * 0.38f, pap_y + ink_h * 0.4f, hypotf(W, H) * 0.42f);
+    glUniform3fv(glGetUniformLocation(prog_comp, "uTint"), 1, pal->tint);
+    glUniform2f(glGetUniformLocation(prog_comp, "uRack"), pap_x + park_x * px_mm, pap_y + 0.1f * ink_h);
+    glUniform3fv(glGetUniformLocation(prog_comp, "uPens"), NPEN, pen_rgb[0]);
+    glUniform1i(glGetUniformLocation(prog_comp, "uCur"), pen);
     glUniform1f(glGetUniformLocation(prog_comp, "uU"), U);
     glBindVertexArray(vao_empty);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -1732,7 +2087,8 @@ static void usage(void) {
         "usage: plotter [--window | --root | --layer] [--seed N] [--speed X] [--kind NAME]\n"
         "               [--palette NAME]\n"
         "               [--shot FILE.ppm] [--bench N] [--size WxH] [--at SECONDS]\n"
-        "kinds: flow topo ridges harmonograph spirograph rings truchet\n"
+        "kinds: flow topo ridges harmonograph spirograph rings truchet joy circles subdiv\n"
+        "       moire rose city\n"
         "palettes: sepia blue technical colour (default: picked from the seed)\n");
     exit(1);
 }
