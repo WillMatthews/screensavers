@@ -29,7 +29,11 @@
  * a margin with a zebra border and grid numbers, and a title cartouche (the
  * host and the time, the contour interval, north arrow and scale bar).
  *
- * --seed N picks the country and the drift, --light prints it on paper,
+ * --seed N picks the country, the drift and the palette; --palette NAME
+ * fixes the palette: brass (gold and amber on near-black brown, the theme's
+ * own), cream (sienna on paper; --light is an alias), slate (pale blue-grey
+ * on deep slate), blueprint (cyan and white on Prussian blue) or survey (a
+ * printed survey sheet: brown contours, blue water, a green-to-buff tint);
  * --interval sets the contour interval (metres, default 20), --speed scales
  * the drift (~6 px/s at 1080p) and --fps the frame rate (default 30: the
  * motion is slow, and one instance runs per monitor on the lock screen).
@@ -69,7 +73,7 @@
 #include "proto-layer-shell.h"
 
 static int W = 1280, H = 800;
-static int opt_root, opt_layer, opt_light, opt_bench, opt_fps = 30;
+static int opt_root, opt_layer, opt_bench, opt_fps = 30;
 static float opt_interval = 20;        /* metres between contours */
 static float opt_speed = 1;
 static uint32_t opt_seed;
@@ -512,14 +516,20 @@ static struct {
     float a_thin, a_index, a_grid, a_wood, hi_k, lo_k;
 } P;
 
+/* the palettes: brass is the theme's own; the others are other kinds of map
+ * sheet, so that the lock screen isn't the same gold every time */
+static const char *pal_names[] = {"brass", "cream", "slate", "blueprint", "survey"};
+enum { NPAL = sizeof pal_names / sizeof *pal_names };
+static int pal = -1;                   /* -1: from the seed */
+
 static void palette(void) {
     /* Aged Brass: bg pushed darker for a full screen, bg_alt, cream, fg_dim,
      * gold, dim gold, sage, amber; and for water a muted grey-green, not blue */
     Rgb bgd = rgb("#17120E"), bga = rgb("#3A2E25"), cream = rgb("#EFE3CE"), dim = rgb("#A89880");
     Rgb gold = rgb("#FFC332"), goldd = rgb("#D6A12A"), sage = rgb("#8FA672"), amber = rgb("#E9994A");
     Rgb slate = rgb("#7E9C9A");
-    if (!opt_light) {
-        /* gold and amber lines on near-black brown */
+    if (pal == 0) {
+        /* brass: gold and amber lines on near-black brown */
         P.paper = bgd; P.paper2 = mixc(bgd, bga, 0.75f); P.margin = rgb("#100C09");
         P.hi = cream; P.lo = rgb("#000000"); P.hi_k = 0.14f; P.lo_k = 0.5f;
         P.thin = amber; P.a_thin = 0.5f;
@@ -529,8 +539,8 @@ static void palette(void) {
         P.grid = cream; P.a_grid = 0.09f;
         P.frame = dim; P.river = mixc(slate, cream, 0.15f);
         P.label = gold; P.spot = cream; P.tri = gold; P.title = gold; P.sub = dim; P.panel = rgb("#120E0B");
-    } else {
-        /* --light, a paper map: ink (the theme's bg) on paper, contours in
+    } else if (pal == 1) {
+        /* cream, a paper map: ink (the theme's bg) on paper, contours in
          * amber darkened towards burnt sienna */
         Rgb paper = rgb("#F4EFE3"), ink = rgb("#2A211B");
         P.paper = paper; P.paper2 = mixc(paper, rgb("#E6D9BF"), 0.9f); P.margin = rgb("#EAE3D3");
@@ -542,6 +552,47 @@ static void palette(void) {
         P.grid = ink; P.a_grid = 0.09f;
         P.frame = ink; P.river = rgb("#4F7480");
         P.label = mixc(amber, ink, 0.6f); P.spot = ink; P.tri = ink; P.title = ink; P.sub = mixc(ink, paper, 0.35f);
+        P.panel = paper;
+    } else if (pal == 2) {
+        /* slate: pale blue-grey and white lines on deep slate, darker water */
+        Rgb bg = rgb("#171B21"), bg2 = rgb("#2C333D"), pale = rgb("#C9D4E0"), white = rgb("#F2F5F8");
+        Rgb mid = rgb("#8796A8"), sea = rgb("#6E9CC4");
+        P.paper = bg; P.paper2 = mixc(bg, bg2, 0.8f); P.margin = rgb("#111419");
+        P.hi = white; P.lo = rgb("#000000"); P.hi_k = 0.12f; P.lo_k = 0.5f;
+        P.thin = mixc(pale, bg, 0.1f); P.a_thin = 0.42f;
+        P.index = white; P.a_index = 0.72f;
+        P.water = rgb("#0D1624"); P.waterink = sea;
+        P.wood = rgb("#7FA39A"); P.a_wood = 0.36f;
+        P.grid = pale; P.a_grid = 0.08f;
+        P.frame = mid; P.river = mixc(sea, white, 0.2f);
+        P.label = white; P.spot = pale; P.tri = white; P.title = white; P.sub = mid; P.panel = rgb("#13171C");
+    } else if (pal == 3) {
+        /* blueprint: cyan and white lines on Prussian blue, like a cyanotype */
+        Rgb bg = rgb("#0F2A4A"), bg2 = rgb("#16375E"), cyan = rgb("#8FD8F0"), white = rgb("#EAF6FC");
+        Rgb mid = rgb("#7FA8C8");
+        P.paper = bg; P.paper2 = mixc(bg, bg2, 0.9f); P.margin = rgb("#0B2240");
+        P.hi = white; P.lo = rgb("#04101F"); P.hi_k = 0.08f; P.lo_k = 0.45f;
+        P.thin = cyan; P.a_thin = 0.45f;
+        P.index = white; P.a_index = 0.8f;
+        P.water = rgb("#0A1F3A"); P.waterink = cyan;
+        P.wood = rgb("#9FE0E8"); P.a_wood = 0.3f;
+        P.grid = white; P.a_grid = 0.1f;
+        P.frame = mid; P.river = cyan;
+        P.label = white; P.spot = white; P.tri = cyan; P.title = white; P.sub = mid; P.panel = rgb("#0C2544");
+    } else {
+        /* survey: a printed survey sheet, brown contours, blue water, a faint
+         * green-to-buff layer tint, black lettering */
+        Rgb paper = rgb("#F3F2E8"), low = rgb("#E3EBD2"), high = rgb("#EEDDBE"), ink = rgb("#1E1E1E");
+        Rgb brown = rgb("#9A5B2A"), blue = rgb("#2F7BBF");
+        P.paper = mixc(paper, low, 0.9f); P.paper2 = high; P.margin = paper;
+        P.hi = rgb("#FFFFFF"); P.lo = rgb("#5A5A50"); P.hi_k = 0.3f; P.lo_k = 0.2f;
+        P.thin = brown; P.a_thin = 0.6f;
+        P.index = mixc(brown, ink, 0.2f); P.a_index = 0.9f;
+        P.water = rgb("#C6DFF0"); P.waterink = blue;
+        P.wood = rgb("#4E8A3E"); P.a_wood = 0.5f;
+        P.grid = blue; P.a_grid = 0.14f;
+        P.frame = ink; P.river = blue;
+        P.label = brown; P.spot = ink; P.tri = ink; P.title = ink; P.sub = mixc(ink, paper, 0.4f);
         P.panel = paper;
     }
 }
@@ -1241,8 +1292,8 @@ static int wl_poll(void) {
 
 static void usage(void) {
     fprintf(stderr,
-        "usage: contours [--window | --root | --layer] [--seed N] [--light] [--interval METRES]\n"
-        "                [--speed X] [--fps N]\n"
+        "usage: contours [--window | --root | --layer] [--seed N] [--interval METRES]\n"
+        "                [--palette brass|cream|slate|blueprint|survey | --light] [--speed X] [--fps N]\n"
         "                [--shot FILE.ppm [--size WxH] [--at SECONDS]] [--bench N [--size WxH]]\n");
     exit(1);
 }
@@ -1266,7 +1317,13 @@ int main(int argc, char **argv) {
         if (!strcmp(a, "-root")) opt_root = 1;
         else if (!strcmp(a, "-window")) opt_root = 0;
         else if (!strcmp(a, "-layer")) opt_layer = 1;
-        else if (!strcmp(a, "-light")) opt_light = 1;
+        else if (!strcmp(a, "-light")) pal = 1;
+        else if (!strcmp(a, "-palette") && i + 1 < argc) {
+            const char *n = argv[++i];
+            pal = -2;
+            for (int k = 0; k < NPAL; k++) if (!strcmp(n, pal_names[k])) pal = k;
+            if (pal == -2) usage();
+        }
         else if (!strcmp(a, "-interval") && i + 1 < argc) opt_interval = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-speed") && i + 1 < argc) opt_speed = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = atoi(argv[++i]);
@@ -1291,6 +1348,7 @@ int main(int argc, char **argv) {
     seed_x = ((h & 0xffff) / 65536.0f - 0.5f) * 100000;
     seed_z = ((h >> 16) / 65536.0f - 0.5f) * 100000;
     for (int i = 0; i < 6; i++) ph[i] = (hash2((int32_t)opt_seed, i, 2) & 0xffff) / 65536.0 * 2 * M_PI;
+    if (pal < 0) pal = (int)(hash2((int32_t)opt_seed, 5, 3) % NPAL);
     E0 = (int)(hash2((int32_t)opt_seed, 3, 3) % 100); N0 = (int)(hash2((int32_t)opt_seed, 4, 3) % 100);
 
     Display *dpy = NULL;

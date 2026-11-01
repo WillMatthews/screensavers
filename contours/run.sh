@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch the topographic-map screensaver fullscreen. Extra args go to the hack
-# (e.g. --seed 42 --light --interval 25 --speed 2).
+# (e.g. --seed 42 --palette survey --interval 25 --speed 2).
 # Built from contours.c (make).
 # Press q to quit.
 dir="$(cd "$(dirname "$0")" && pwd)"
