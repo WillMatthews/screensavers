@@ -2,12 +2,22 @@
 # Print the next lock screensaver from a shuffle bag: every saver once per
 # cycle in random order, and a new cycle never opens with the one just shown
 # (plain shuf streaked badly). Logs each pick to lock-saver.log.
+# Only savers built on this host go in the bag (savers.sh).
+dir="$(cd "$(dirname "$0")" && pwd)"
+. "$dir/savers.sh"
+mapfile -t avail < <(built_savers "$dir")
+if ((${#avail[@]} == 0)); then
+    echo "pick-saver.sh: no screensaver is built here" >&2
+    exit 1
+fi
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}
 BAG=$STATE/lock-saver-bag
-read -r -a bag 2>/dev/null < "$BAG" || bag=()
+read -r -a held 2>/dev/null < "$BAG" || held=()
+bag=()
+for s in "${held[@]}"; do [[ " ${avail[*]} " == *" $s "* ]] && bag+=("$s"); done
 if ((${#bag[@]} == 0)); then
     last=$(tail -n1 "$STATE/lock-saver.log" 2>/dev/null | awk '{print $NF}')
-    mapfile -t bag < <(shuf -e pipes maze flightsim stir)
+    mapfile -t bag < <(shuf -e "${avail[@]}")
     [[ ${bag[0]} == "$last" ]] && bag=("${bag[@]:1}" "${bag[0]}")
 fi
 echo "${bag[@]:1}" > "$BAG"

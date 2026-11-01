@@ -9,10 +9,22 @@
 # command whenever the saver dies, so that file is how a skip takes effect.
 # flightsim spans all outputs as one scene: every instance needs the same seed
 # and epoch, plus the sway layout and which output it's on.
+# Only savers built on this host are run (savers.sh): asked for one that
+# isn't, it runs a random built one instead.
 dir="$(cd "$(dirname "$0")" && pwd)"
+. "$dir/savers.sh"
 cur=${XDG_RUNTIME_DIR:-/tmp}/lock-bg.cur
 (($# == 0)) && [[ -r $cur ]] && read -r -a args < "$cur" && set -- "${args[@]}"
-pick=${1:-$(shuf -n1 -e pipes maze flightsim stir)}
+mapfile -t avail < <(built_savers "$dir")
+if ((${#avail[@]} == 0)); then
+  echo "lock-bg.sh: no screensaver is built here (make -C flightsim, make -C stir)" >&2
+  exit 1
+fi
+pick=${1:-}
+if [[ " ${avail[*]} " != *" $pick "* ]]; then
+  [[ -n $pick ]] && echo "lock-bg.sh: '$pick' isn't built here, running another" >&2
+  pick=$(shuf -n1 -e "${avail[@]}")
+fi
 case $pick in
   pipes)     cmd=("$dir/pipes/bin/pipes" --root --delay 5000) ;;
   maze)      cmd=("$dir/maze3d/bin/maze3d" --root) ;;
