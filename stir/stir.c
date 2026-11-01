@@ -35,6 +35,15 @@
  * old banner printout) fades in a few seconds after start, its letters
  * rolling into place, with the date and host beneath.
  *
+ * Spanning (like flightsim): run one instance per monitor with the same
+ * --seed, --epoch and --layout (every output's logical rect), and --output =
+ * this one's index. The page is then laid out over the whole layout's bounding
+ * box in one shared grid of cells (the cell size comes from the "front"
+ * output, the one under the middle of the layout), the twist turns about the
+ * front output's centre, and each instance draws just its own slice, so words
+ * run on across the bezels. The clock and caption sit on the front output;
+ * the monitor glass is per output.
+ *
  * Same plumbing as flightsim: Xlib + GLX for --window / --root, a native
  * wlr-layer-shell surface over EGL for --layer (swaylock-plugin), and
  * --shot FILE.ppm [--at SECONDS] to render one frame offscreen.
@@ -83,6 +92,20 @@ static uint32_t opt_seed;
 static const char *opt_shot;
 static double opt_at = 25;             /* --shot: the frame this many seconds in */
 static int off_w = 1920, off_h = 1080;
+static double opt_epoch;               /* CLOCK_REALTIME seconds the twist starts at */
+
+/* ---- spanning ---- */
+#define MAX_OUT 8
+static float span[MAX_OUT][4];         /* x, y, w, h of each output (logical) */
+static int span_n, span_me = -1, span_front;
+
+/* The grid in this window: its top-left corner in px, the front output's
+ * centre and half size in cells (what the twist turns about and normalises
+ * by), the half extent the depth fade normalises by, and the front output's
+ * cell rect (where the clock goes). Without --layout all of it is just the
+ * window's own grid. */
+static float org_x, org_y, cen_x, cen_y, half_x, half_y, far_x, far_y;
+static int fr_c0, fr_r0, fr_cols, fr_rows;
 
 /* Away messages. Tokens: $N name, $H host, $U login, $T time now, $S locked
  * since, $D how long locked, $DATE today, $B battery, $UP uptime. $N, $H,
@@ -479,19 +502,34 @@ static void clock_build(void) {
     if (!opt_clock) return;
     const char *hm = d_now;                             /* "HH:MM" */
     /* scale: digits ~18% of the rows tall, square-ish "pixels" */
-    int sy = (int)lroundf(rows * 0.18f / 9);
+    /* on one line if it fits the (front) screen's width; on a narrow,
+     * portrait one HH over MM instead, which can stay big */
+    int fit = fr_cols - 8;
+    int sy = (int)lroundf(fr_rows * 0.18f / 9);
     if (sy < 1) sy = 1;
-    int sx, width;
+    int sx, width, stack = 0;
     for (;; sy--) {
         sx = (int)lroundf(sy * (float)ch / cw);
         if (sx < 1) sx = 1;
         width = (4 * 5 + 1 + 4) * sx;                   /* 4 digits, a colon, 4 one-pixel gaps */
-        if (width <= cols - 8 || sy == 1) break;
+        if (width <= fit || sy == 1) break;
     }
-    int height = 9 * sy;
-    int x0 = (cols - width) / 2, y0 = (rows - height) / 2 - 1;
-    int x = x0;
+    if (width > fit) {
+        stack = 1;
+        for (sy = (int)lroundf(fr_rows * 0.12f / 9); ; sy--) {
+            if (sy < 1) sy = 1;
+            sx = (int)lroundf(sy * (float)ch / cw);
+            if (sx < 1) sx = 1;
+            width = (2 * 5 + 1) * sx;                   /* 2 digits, a one-pixel gap */
+            if (width <= fit || sy == 1) break;
+        }
+        while (width > fit && sx > 1) width = (2 * 5 + 1) * --sx;
+    }
+    int height = stack ? (2 * 9 + 2) * sy : 9 * sy;     /* stacked: a two-pixel gap */
+    int x0 = fr_c0 + (fr_cols - width) / 2, y0 = fr_r0 + (fr_rows - height) / 2 - 1;
+    int x = x0, yl = y0;
     for (const char *p = hm; *p; p++) {
+        if (stack && *p == ':') { x = x0; yl = y0 + 11 * sy; continue; }
         int d = *p == ':' ? 10 : *p - '0';
         if (d < 0 || d > 10) continue;
         int w = (int)strlen(DIGITS[d][0]);
@@ -500,20 +538,27 @@ static void clock_build(void) {
                 if (DIGITS[d][r][c] != '#') continue;
                 for (int yy = 0; yy < sy; yy++)
                     for (int xx = 0; xx < sx; xx++) {
-                        int cx = x + c * sx + xx, cy = y0 + r * sy + yy;
+                        int cx = x + c * sx + xx, cy = yl + r * sy + yy;
                         if (cx >= 0 && cy >= 0 && cx < cols && cy < rows) clockov[cy * cols + cx] = (unsigned char)(2 + *p - 32);
                     }
             }
         x += (w + 1) * sx;
     }
-    /* caption, a blank row under the digits */
-    char cap[160];
-    snprintf(cap, sizeof cap, "%s  -  %s  -  locked %s", host, d_date, d_since);
-    int cl = (int)strlen(cap), cy = y0 + height + 1, cx0 = (cols - cl) / 2;
-    if (cy < rows)
-        for (int i = 0; i < cl; i++)
-            if (cx0 + i >= 0 && cx0 + i < cols && cap[i] != ' ')
-                clockov[cy * cols + cx0 + i] = (unsigned char)(0x80 | (2 + cap[i] - 32));
+    /* caption, a blank row under the digits; on two lines if one's too wide */
+    char cap[2][160];
+    snprintf(cap[0], sizeof cap[0], "%s  -  %s  -  locked %s", host, d_date, d_since);
+    cap[1][0] = 0;
+    if ((int)strlen(cap[0]) > fr_cols - 4) {
+        snprintf(cap[0], sizeof cap[0], "%s  -  %s", host, d_date);
+        snprintf(cap[1], sizeof cap[1], "locked %s", d_since);
+    }
+    for (int k = 0; k < 2; k++) {
+        int cl = (int)strlen(cap[k]), cy = y0 + height + 1 + k, cx0 = fr_c0 + (fr_cols - cl) / 2;
+        if (cy < rows)
+            for (int i = 0; i < cl; i++)
+                if (cx0 + i >= 0 && cx0 + i < cols && cap[k][i] != ' ')
+                    clockov[cy * cols + cx0 + i] = (unsigned char)(0x80 | (2 + cap[k][i] - 32));
+    }
     /* clear a panel round it all, corners rounded off, so it reads */
     int bx0 = cols, by0 = rows, bx1 = -1, by1 = -1;
     for (int r = 0; r < rows; r++)
@@ -554,8 +599,10 @@ static const char *FS = "#version 330 core\n" GLSL(
     uniform sampler2D uPage;    /* cols x rows: glyph index | 128 for gold, / 255 */
     uniform sampler2D uClock;   /* cols x rows: the clock overlay, see clock_build() */
     uniform vec2 uRes, uCell, uOrigin;
+    uniform vec2 uCentre, uHalf, uFar;   /* in cells: the twist's centre and scale, the fade's */
     uniform ivec2 uGrid;
     uniform float uTwist, uClockA, uDepth;
+    uniform bool uWrap;         /* spanning: the lines wrap round too, no blank wedges */
     uniform vec3 uBg, uFg, uGold, uClockCol, uCaption;
     out vec4 o;
 
@@ -571,15 +618,15 @@ static const char *FS = "#version 330 core\n" GLSL(
         vec3 col = uBg;
 
         /* the swirl: this cell in [-1, 1] (y up), turned by twist / r */
-        vec2 g = vec2(uGrid);
-        float p = (float(cell.x) + 0.5) * 2.0 / g.x - 1.0;   /* cell centres, so the */
-        float c = 1.0 - (float(cell.y) + 0.5) * 2.0 / g.y;   /* untwisted page maps 1:1 */
+        vec2 cc = vec2(cell) + 0.5 - uCentre;               /* cell centres, so the */
+        float p = cc.x / uHalf.x, c = -cc.y / uHalf.y;       /* untwisted page maps 1:1 */
         float f = uTwist / max(0.1, length(vec2(p, c)));
         float s = sin(f), k = cos(f);
         float w = p * k + c * s, b = p * s - c * k;
-        int pcol = int(floor((w + 1.0) * 0.5 * g.x));
-        int prow = int(floor((b + 1.0) * 0.5 * g.y));
+        int pcol = int(floor(uCentre.x + w * uHalf.x));
+        int prow = int(floor(uCentre.y + b * uHalf.y));
         int ov = int(texelFetch(uClock, cell, 0).r * 255.0 + 0.5);
+        if (uWrap) pcol = ((pcol % uGrid.x) + uGrid.x) % uGrid.x;
         if (pcol >= 0 && pcol < uGrid.x) {                   /* off the ends of the lines: blank */
             prow = ((prow % uGrid.y) + uGrid.y) % uGrid.y;   /* the rows wrap */
             int v = int(texelFetch(uPage, ivec2(pcol, prow), 0).r * 255.0 + 0.5);
@@ -587,9 +634,9 @@ static const char *FS = "#version 330 core\n" GLSL(
             if (ov != 0) a *= 1.0 - uClockA;                 /* make way for the clock */
             /* depth: towards the fast-spinning middle the type warms to
              * the accent and brightens, out at the edges it sinks into the dark */
-            float rr = length(vec2(p, c));
+            float rr = length(vec2(p, c)), rd = length(cc / uFar);
             float lift = uDepth * (1.0 - smoothstep(0.0, 0.8, rr));
-            float fade = mix(1.0, 0.42, uDepth * smoothstep(0.3, 1.35, rr));
+            float fade = mix(1.0, 0.42, uDepth * smoothstep(0.3, 1.35, rd));
             vec3 fg = mix(uFg, uGold, 0.5 * lift) * (1.0 + 0.3 * lift) * fade;
             vec3 gd = uGold * (1.0 + 0.2 * lift) * fade;
             col = mix(col, v >= 128 ? gd : fg, a);
@@ -622,12 +669,13 @@ static const char *FS_CRT = "#version 330 core\n" GLSL(
     uniform sampler2D uAcc;     /* the phosphor, with mips for the glow */
     uniform vec2 uRes;
     uniform float uCurve;
+    uniform float uBulgeY;      /* 0 when spanning: rows stay level to the side edges, so they meet the next monitor's */
     uniform vec3 uBg;
     out vec4 o;
     void main() {
         vec2 q = gl_FragCoord.xy / uRes * 2.0 - 1.0;
         q *= 1.0 + 0.1 * uCurve;
-        q *= 1.0 - 0.085 * uCurve + 0.05 * uCurve * pow(abs(q.yx), vec2(2.0));
+        q *= 1.0 - 0.085 * uCurve + 0.05 * uCurve * pow(abs(q.yx), vec2(2.0)) * vec2(1.0, uBulgeY);
         vec2 uv = q * 0.5 + 0.5;
         vec2 px = 1.5 / uRes;                              /* soft glass edge */
         vec2 e = smoothstep(vec2(0.0), px, uv) * smoothstep(vec2(0.0), px, 1.0 - uv);
@@ -668,11 +716,66 @@ static void hex(const char *h, float *rgb) {
     for (int i = 0; i < 3; i++) rgb[i] = ((v >> (16 - 8 * i)) & 255) / 255.0f;
 }
 
+/* the output under the middle of the layout */
+static int front_output(void) {
+    float x0 = 1e9f, x1 = -1e9f;
+    for (int i = 0; i < span_n; i++) {
+        x0 = fminf(x0, span[i][0]); x1 = fmaxf(x1, span[i][0] + span[i][2]);
+    }
+    float mx = (x0 + x1) / 2;
+    for (int i = 0; i < span_n; i++)
+        if (span[i][0] <= mx && mx < span[i][0] + span[i][2]) return i;
+    return 0;
+}
+
+/* the layout's bounding box, x0 y0 x1 y1 */
+static void layout_box(float b[4]) {
+    b[0] = b[1] = 1e9f; b[2] = b[3] = -1e9f;
+    for (int i = 0; i < span_n; i++) {
+        b[0] = fminf(b[0], span[i][0]); b[2] = fmaxf(b[2], span[i][0] + span[i][2]);
+        b[1] = fminf(b[1], span[i][1]); b[3] = fmaxf(b[3], span[i][1] + span[i][3]);
+    }
+}
+
+/* where the grid sits in this window (see org_x etc.) */
+static void place_grid(void) {
+    if (span_me < 0) {
+        org_x = floorf((W - cols * cw) * 0.5f); org_y = floorf((H - rows * ch) * 0.5f);
+        cen_x = half_x = far_x = cols * 0.5f; cen_y = half_y = far_y = rows * 0.5f;
+        fr_c0 = fr_r0 = 0; fr_cols = cols; fr_rows = rows;
+        return;
+    }
+    /* logical units -> this window's px (1 under layer-shell) */
+    float sc = W / span[span_me][2], b[4];
+    layout_box(b);
+    /* the grid's corner in logical units, the same in every instance */
+    float gx = b[0] + floorf(((b[2] - b[0]) * sc - cols * cw) * 0.5f) / sc;
+    float gy = b[1] + floorf(((b[3] - b[1]) * sc - rows * ch) * 0.5f) / sc;
+    org_x = roundf((gx - span[span_me][0]) * sc);
+    org_y = roundf((gy - span[span_me][1]) * sc);
+    const float *f = span[span_front];
+    cen_x = ((f[0] + f[2] / 2) - gx) * sc / cw; cen_y = ((f[1] + f[3] / 2) - gy) * sc / ch;
+    half_x = f[2] / 2 * sc / cw; half_y = f[3] / 2 * sc / ch;
+    far_x = fmaxf(cen_x, cols - cen_x); far_y = fmaxf(cen_y, rows - cen_y);
+    fr_c0 = (int)ceilf((f[0] - gx) * sc / cw); fr_r0 = (int)ceilf((f[1] - gy) * sc / ch);
+    fr_cols = (int)(f[2] * sc / cw); fr_rows = (int)(f[3] * sc / ch);
+}
+
 static void grid_init(void) {
-    int cell_h = opt_cell > 0 ? (int)opt_cell : (int)(H / 50.0f + 0.5f);
+    /* spanning: one cell size everywhere, from the front output's height */
+    float sc = span_me >= 0 ? W / span[span_me][2] : 1.0f;
+    float ref_h = span_me >= 0 ? span[span_front][3] : H;
+    int cell_h = opt_cell > 0 ? (int)(opt_cell * sc) : (int)(ref_h * sc / 50.0f + 0.5f);
     if (cell_h < 10) cell_h = 10;
     build_atlas(cell_h);
-    cols = W / cw + 1; rows = H / ch + 1;   /* overhang; centred below */
+    if (span_me >= 0) {
+        float b[4];
+        layout_box(b);
+        cols = (int)((b[2] - b[0]) * sc) / cw + 1; rows = (int)((b[3] - b[1]) * sc) / ch + 1;
+    } else {
+        cols = W / cw + 1; rows = H / ch + 1;   /* overhang; centred below */
+    }
+    place_grid();
     page = calloc((size_t)cols * rows, 1);
     clockov = calloc((size_t)cols * rows, 1);
     if (opt_text) load_text_file();
@@ -818,7 +921,11 @@ static void render(double tw, double el, double dt, GLuint target) {
     glUseProgram(prog);
     glUniform2f(glGetUniformLocation(prog, "uRes"), (float)W, (float)H);
     glUniform2f(glGetUniformLocation(prog, "uCell"), (float)cw, (float)ch);
-    glUniform2f(glGetUniformLocation(prog, "uOrigin"), floorf((W - cols * cw) * 0.5f), floorf((H - rows * ch) * 0.5f));
+    place_grid();
+    glUniform2f(glGetUniformLocation(prog, "uOrigin"), org_x, org_y);
+    glUniform2f(glGetUniformLocation(prog, "uCentre"), cen_x, cen_y);
+    glUniform2f(glGetUniformLocation(prog, "uHalf"), half_x, half_y);
+    glUniform2f(glGetUniformLocation(prog, "uFar"), far_x, far_y);
     glUniform2i(glGetUniformLocation(prog, "uGrid"), cols, rows);
     glUniform1f(glGetUniformLocation(prog, "uTwist"), twist_at(tw));
     /* the clock fades in from 2 s to 5 s */
@@ -826,6 +933,7 @@ static void render(double tw, double el, double dt, GLuint target) {
     a = a < 0 ? 0 : a > 1 ? 1 : a;
     glUniform1f(glGetUniformLocation(prog, "uClockA"), (float)(a * a * (3 - 2 * a)));
     glUniform1f(glGetUniformLocation(prog, "uDepth"), opt_plain ? 0.0f : 1.0f);
+    glUniform1i(glGetUniformLocation(prog, "uWrap"), span_me >= 0);
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     if (opt_plain) return;
@@ -851,6 +959,8 @@ static void render(double tw, double el, double dt, GLuint target) {
     glUniform2f(glGetUniformLocation(prog_crt, "uRes"), (float)W, (float)H);
     double cu = el / 3.0 > 1 ? 1 : el / 3.0;
     glUniform1f(glGetUniformLocation(prog_crt, "uCurve"), (float)(cu * (2 - cu)));
+    glUniform1f(glGetUniformLocation(prog_crt, "uBulgeY"), span_me >= 0 ? 0.0f : 1.0f);
+
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
@@ -943,9 +1053,28 @@ static void usage(void) {
     fprintf(stderr,
         "usage: stir [--window | --root | --layer] [--cell PX] [--speed X] [--twist RAD] [--seed N]\n"
         "            [--name NAME] [--text FILE] [--no-clock] [--plain] [--font FONTCONFIG-PATTERN]\n"
+        "            [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
         "            [--palette brass|paper|phosphor|amber|ice] [--shot FILE.ppm [--size WxH] [--at SECONDS]]\n"
         "  --palette  colours; default: picked from the seed, so each session differs\n");
     exit(1);
+}
+
+static double wallclock(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+/* "x,y,w,h;x,y,w,h;..." */
+static void parse_layout(const char *str) {
+    for (span_n = 0; span_n < MAX_OUT; span_n++) {
+        float *r = span[span_n];
+        int used = 0;
+        if (sscanf(str, "%f,%f,%f,%f%n", &r[0], &r[1], &r[2], &r[3], &used) != 4 || r[2] <= 0 || r[3] <= 0)
+            break;
+        str += used;
+        if (*str == ';') str++;
+    }
 }
 
 static void save_ppm(const char *path) {
@@ -980,9 +1109,14 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-shot") && i + 1 < argc) opt_shot = argv[++i];
         else if (!strcmp(a, "-size") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &off_w, &off_h) != 2) usage(); }
         else if (!strcmp(a, "-at") && i + 1 < argc) opt_at = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-epoch") && i + 1 < argc) opt_epoch = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-layout") && i + 1 < argc) parse_layout(argv[++i]);
+        else if (!strcmp(a, "-output") && i + 1 < argc) span_me = atoi(argv[++i]);
         else usage();
     }
     if (opt_twist <= 0) usage();
+    if (span_me >= span_n) span_me = -1;
+    if (span_me >= 0) span_front = front_output();
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
     rng = opt_seed | 1;
     pick_palette();
@@ -1022,7 +1156,7 @@ int main(int argc, char **argv) {
     /* a window gets its real size from the WM; size the grid for the
      * largest it's likely to be (the screen), and recentre on resize */
     int gw = W, gh = H;
-    if (dpy && !opt_root && !opt_shot) {
+    if (dpy && !opt_root && !opt_shot && span_me < 0) {
         gw = DisplayWidth(dpy, DefaultScreen(dpy));
         gh = DisplayHeight(dpy, DefaultScreen(dpy));
     }
@@ -1049,7 +1183,10 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    /* spanning: time runs from the shared epoch, so every instance twists alike */
     double t0 = now(), last = t0;
+    if (span_me >= 0 && opt_epoch) t0 -= wallclock() - opt_epoch;
+
     for (;;) {
         if (opt_layer && !wl_poll()) return 0;
         while (dpy && XPending(dpy)) {
