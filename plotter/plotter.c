@@ -13,8 +13,16 @@
  * hatched hillshading and coastal ripple lines, a ridgeline landscape with
  * hidden lines removed (and a hatched sun behind it), a harmonograph, a
  * spirograph rosette, warped concentric rings, and a multi-strand Truchet
- * weave. Mostly sepia ink, with an accent pen (brass gold, terracotta or
- * sage) swapped in for part of it: the carriage parks for each pen change.
+ * weave. Mostly one ink, with an accent pen swapped in for part of it: the
+ * carriage parks for each pen change.
+ *
+ * Pen sets: each run picks one from the seed (--palette NAME to choose),
+ * with paper, mat and machine to match. sepia: sepia ink with brass gold,
+ * terracotta or sage on cream, a brown machine with brass. blue: blue-black
+ * fountain-pen ink with royal blue or red on white, an aluminium machine on a
+ * slate mat. technical: black technical pen with red or fine grey on bright
+ * white, a black machine. colour: felt tips (teal, magenta, orange,
+ * ultramarine; a fresh main colour each sheet) on a green cutting mat.
  *
  * Ink: each stroke is resampled and given a motion profile, so every point
  * of the pen's path has a time. Ink is laid down as antialiased capsules into
@@ -131,10 +139,38 @@ static float smoothstepf(float a, float b, float x) { return smooth(clampf((x - 
 /* ---- the sheet, in mm; y down ---- */
 static float PW = 420, PH = 297;       /* A3, landscape (portrait on a tall screen) */
 
-/* pens */
-enum { SEPIA, GOLD, TERRA, SAGE, NPEN };
-static const char *PEN_HEX[NPEN] = {"#2A211B", "#C99529", "#A53C2C", "#5A7548"};
-static const char *PAPER_HEX = "#F4EFE3", *PAPER_ALT_HEX = "#EAE3D2", *BORDER_HEX = "#D6CDB7";
+/* pens: the main ink and three accent slots, filled from the pen set */
+enum { INK, ACC1, ACC2, ACC3, NPEN };
+
+/* pen sets, one per run (from the seed, or --palette): the inks, the paper,
+ * the bed's mat and its grid, and the machine (dark, mid and light faces,
+ * and its fittings). A set with shuffle picks a fresh main ink per sheet
+ * from all four, the accent from the other three. */
+typedef struct {
+    const char *name, *pen[NPEN], *paper, *bed, *bedline;
+    float dark[3], mid[3], hi[3], metal[3];
+    int shuffle;
+} Pal;
+static const Pal PALS[] = {
+    /* sepia ink, brass gold / terracotta / sage, on cream; a brown machine with brass */
+    {"sepia", {"#2A211B", "#C99529", "#A53C2C", "#5A7548"}, "#F4EFE3", "#D6CDB7", "#EAE3D2",
+     {0.165f, 0.13f, 0.106f}, {0.25f, 0.205f, 0.17f}, {0.42f, 0.355f, 0.29f}, {0.79f, 0.585f, 0.16f}, 0},
+    /* blue-black fountain-pen ink, a royal blue or a red, on white; an
+     * aluminium machine with steel fittings on a slate mat */
+    {"blue", {"#1E2740", "#2A5BC8", "#C23A30", "#2A5BC8"}, "#F3F3EF", "#26292D", "#33373C",
+     {0.25f, 0.265f, 0.285f}, {0.44f, 0.46f, 0.485f}, {0.63f, 0.65f, 0.675f}, {0.74f, 0.76f, 0.79f}, 0},
+    /* black technical pen, red (or a fine grey), on bright white; a black machine */
+    {"technical", {"#131313", "#C9282A", "#C9282A", "#77787A"}, "#F8F8F6", "#18191B", "#26282B",
+     {0.045f, 0.045f, 0.05f}, {0.10f, 0.10f, 0.11f}, {0.21f, 0.215f, 0.225f}, {0.55f, 0.57f, 0.60f}, 0},
+    /* felt tips: teal, magenta, orange, ultramarine, on white; a graphite
+     * machine on a green cutting mat */
+    {"colour", {"#0B8378", "#C8246E", "#E8730E", "#2B3BB0"}, "#F6F5F1", "#1D3529", "#2C4D3B",
+     {0.11f, 0.115f, 0.12f}, {0.20f, 0.21f, 0.22f}, {0.36f, 0.37f, 0.385f}, {0.70f, 0.71f, 0.73f}, 1},
+};
+#define NPAL ((int)(sizeof PALS / sizeof PALS[0]))
+static int opt_pal = -1;
+static const Pal *pal;
+static int sheet_pen[NPEN];             /* this sheet's slots -> the set's pens */
 
 /* ---- polylines: what a generator hands the planner ---- */
 typedef struct {
@@ -395,7 +431,7 @@ static void gen_flow(Rng *R, Paths *P, int accent) {
             }
         }
         if ((nf + nb) * step < 6) { F.dead[line++] = 1; continue; }
-        int pen = SEPIA;
+        int pen = INK;
         if (accent && fbm(x / csc + 9.1f, y / csc + 3.7f, 2, csalt) > cthresh) pen = accent;
         path_begin(P, pen, NIB);
         for (int i = nb - 1; i >= 0; i--) path_pt(P, bw[2 * i], bw[2 * i + 1]);
@@ -517,10 +553,10 @@ static void gen_topo(Rng *R, Paths *P, int accent) {
     T.wl = rr(R, 0.22f, 0.34f);
     int nlev = 9;
     float dl = (1 - T.wl) / (nlev + 0.5f);
-    int wpen = accent ? accent : SEPIA;
+    int wpen = accent ? accent : INK;
     Paths seg = {0};
-    contour(&T, T.wl, &seg, SEPIA, 0.5f);                                      /* the coast */
-    for (int k = 1; k <= nlev; k++) contour(&T, T.wl + k * dl, &seg, SEPIA, k % 4 == 0 ? 0.5f : 0.3f);
+    contour(&T, T.wl, &seg, INK, 0.5f);                                      /* the coast */
+    for (int k = 1; k <= nlev; k++) contour(&T, T.wl + k * dl, &seg, INK, k % 4 == 0 ? 0.5f : 0.3f);
     for (int k = 1; k <= 4; k++) contour(&T, T.wl - k * dl * 0.42f * (1 + 0.25f * k), &seg, wpen, 0.3f);  /* ripples */
     chain(&seg, P, 0.01f);
     paths_free(&seg);
@@ -530,8 +566,8 @@ static void gen_topo(Rng *R, Paths *P, int accent) {
     for (float lim = 0.52f;; lim -= 0.04f) {
         Paths h = {0};
         ShadeBand b1 = {&T, -2, lim}, b2 = {&T, -2, lim - 0.15f};
-        hatch(&h, SEPIA, 0.3f, 0.785f, 1.7f, T.x0, T.y0, T.x0 + bw, T.y0 + bh, shade_in, &b1, 0);
-        hatch(&h, SEPIA, 0.3f, -0.785f, 1.7f, T.x0, T.y0, T.x0 + bw, T.y0 + bh, shade_in, &b2, 0.7f);
+        hatch(&h, INK, 0.3f, 0.785f, 1.7f, T.x0, T.y0, T.x0 + bw, T.y0 + bh, shade_in, &b1, 0);
+        hatch(&h, INK, 0.3f, -0.785f, 1.7f, T.x0, T.y0, T.x0 + bw, T.y0 + bh, shade_in, &b2, 0.7f);
         if (paths_length(&h) < room || lim < 0.2f) {
             for (int i = 0; i < h.ns; i++) {
                 path_begin(P, h.pen[i], h.w[i]);
@@ -544,8 +580,8 @@ static void gen_topo(Rng *R, Paths *P, int accent) {
         paths_free(&h);
     }
     /* a double-ruled border */
-    path_rect(P, SEPIA, 0.5f, T.x0, T.y0, T.x0 + bw, T.y0 + bh);
-    path_rect(P, SEPIA, 0.3f, T.x0 - 2.5f, T.y0 - 2.5f, T.x0 + bw + 2.5f, T.y0 + bh + 2.5f);
+    path_rect(P, INK, 0.5f, T.x0, T.y0, T.x0 + bw, T.y0 + bh);
+    path_rect(P, INK, 0.3f, T.x0 - 2.5f, T.y0 - 2.5f, T.x0 + bw + 2.5f, T.y0 + bh + 2.5f);
     free(T.h); free(T.shade);
 }
 
@@ -584,7 +620,7 @@ static void gen_ridges(Rng *R, Paths *P, int accent) {
             float h = amp * env * edge * powf(f, 1.7f) * 2.2f * (0.55f + 0.45f * depth);
             float y = yb - l * dy - h;
             int vis = y < hz[i] - 0.12f;
-            if (vis && !run) { path_begin(P, SEPIA, 0.38f); if (i) path_pt(P, lxv, fminf(lyv, hz[i - 1])); run = 1; }
+            if (vis && !run) { path_begin(P, INK, 0.38f); if (i) path_pt(P, lxv, fminf(lyv, hz[i - 1])); run = 1; }
             if (vis) path_pt(P, x, y);
             if (!vis && run) { path_end(P); run = 0; }
             lxv = x; lyv = y;
@@ -621,7 +657,7 @@ static void gen_harmono(Rng *R, Paths *P, int accent) {
     double L = 0;
     float px = 0, py = 0;
     float split = accent && rnd(R) < 0.7f ? BUDGET * rr(R, 0.22f, 0.35f) : -1;
-    int pen = split > 0 ? accent : SEPIA;
+    int pen = split > 0 ? accent : INK;
     path_begin(P, pen, NIB);
     for (float t = 0;; t += dt) {
         float e = expf(-d * t);
@@ -632,7 +668,7 @@ static void gen_harmono(Rng *R, Paths *P, int accent) {
         if (t > 0) L += hypotf(x - px, y - py);
         path_pt(P, x, y);
         if (split > 0 && L > split) {                          /* change pens here */
-            path_end(P); path_begin(P, SEPIA, NIB); path_pt(P, x, y); split = -1;
+            path_end(P); path_begin(P, INK, NIB); path_pt(P, x, y); split = -1;
         }
         px = x; py = y;
     }
@@ -681,7 +717,7 @@ static void gen_spiro(Rng *R, Paths *P, int accent) {
     for (int i = 0; i < 12; i++) {
         float s = 1 - i * shrink;
         if (s < 0.25f || used + L * s > BUDGET * 1.05f) break;
-        used += hypo(P, accent && i % every == every - 1 ? accent : SEPIA, cx, cy, Rm * s, bR, br, bd, rot + i * twist, 0);
+        used += hypo(P, accent && i % every == every - 1 ? accent : INK, cx, cy, Rm * s, bR, br, bd, rot + i * twist, 0);
     }
 }
 
@@ -700,7 +736,7 @@ static void gen_rings(Rng *R, Paths *P, int accent) {
         float r = r0 + i * gap, grow = powf((float)i / N, 1.3f);
         int n = (int)(TAU * r / 0.6f) + 12;
         float start = rr(R, 0, TAU);
-        path_begin(P, i >= a0 && i < a1 ? accent : SEPIA, NIB);
+        path_begin(P, i >= a0 && i < a1 ? accent : INK, NIB);
         for (int k = 0; k <= n; k++) {
             float a = start + TAU * k / n;
             float nx = cosf(a) * fq + ox, ny = sinf(a) * fq + oy;
@@ -734,7 +770,7 @@ static void gen_truchet(Rng *R, Paths *P, int accent) {
                 float a0 = corner == 0 ? 0 : corner == 1 ? TAU / 4 : corner == 2 ? TAU / 2 : 3 * TAU / 4;
                 for (int s = 0; s < k; s++) {
                     float r = c / 2 + (s - (k - 1) * 0.5f) * g;
-                    int pen = (k == 3 && s == 1 && accent) ? accent : SEPIA;
+                    int pen = (k == 3 && s == 1 && accent) ? accent : INK;
                     path_begin(&seg, pen, NIB);
                     for (int m = 0; m <= 10; m++) {
                         float an = a0 + TAU / 4 * m / 10;
@@ -750,7 +786,7 @@ static void gen_truchet(Rng *R, Paths *P, int accent) {
     paths_free(&seg);
     if (accent && k == 2)                              /* two strands: colour a few whole curves */
         for (int i = 0; i < P->ns; i++) if (rnd(R) < 0.18f) P->pen[i] = (unsigned char)accent;
-    path_rect(P, SEPIA, 0.5f, x0, y0, x0 + nx * c, y0 + ny * c);
+    path_rect(P, INK, 0.5f, x0, y0, x0 + nx * c, y0 + ny * c);
 }
 
 enum { K_FLOW, K_TOPO, K_RIDGES, K_HARMONO, K_SPIRO, K_RINGS, K_TRUCHET, NKIND };
@@ -1034,7 +1070,7 @@ static void plot_paths(const Paths *P, Rng *R, int keep_order) {
     char *done = calloc((size_t)P->ns + 1, 1);
     float *buf = NULL;
     int bcap = 0;
-    static const int order[NPEN] = {GOLD, TERRA, SAGE, SEPIA};
+    static const int order[NPEN] = {ACC1, ACC2, ACC3, INK};
     for (int oi = 0; oi < NPEN; oi++) {
         int pen = order[oi], left = 0;
         for (int i = 0; i < P->ns; i++) left += P->pen[i] == pen;
@@ -1079,8 +1115,30 @@ static int sheet_k = -1, prev_kind = -1;
 static double sheet_T;                  /* global time this sheet started sliding in */
 static double sheet_cycle;
 
+static float paper_rgb[3], pen_T[NPEN][3], pen_rgb[NPEN][3];
+static void hex(const char *h, float *rgb) {
+    unsigned v = (unsigned)strtoul(h + 1, NULL, 16);
+    for (int i = 0; i < 3; i++) rgb[i] = ((v >> (16 - 8 * i)) & 255) / 255.0f;
+}
+
+/* this sheet's pens: the set's own order, or (shuffle) a fresh main ink
+ * and the rest as accents; on its own stream so the art stays the same */
+static void pick_pens(int k) {
+    for (int p = 0; p < NPEN; p++) sheet_pen[p] = p;
+    if (pal->shuffle) {
+        Rng Q = {mix32(opt_seed * 0x2545f491u + (uint32_t)k * 0x9e3779b9u + 7) | 1};
+        for (int i = NPEN - 1; i > 0; i--) { int j = ri(&Q, i + 1), t = sheet_pen[i]; sheet_pen[i] = sheet_pen[j]; sheet_pen[j] = t; }
+    }
+    hex(pal->paper, paper_rgb);
+    for (int p = 0; p < NPEN; p++) {
+        hex(pal->pen[sheet_pen[p]], pen_rgb[p]);
+        for (int i = 0; i < 3; i++) pen_T[p][i] = pen_rgb[p][i] / paper_rgb[i];
+    }
+}
+
 static void make_sheet(int k) {
     Rng R = {mix32(opt_seed * 0x9e3779b9u + (uint32_t)k * 0x85ebca6bu + 1) | 1};
+    pick_pens(k);
     int kind = opt_kind >= 0 ? opt_kind : ri(&R, NKIND);
     if (opt_kind < 0 && kind == prev_kind) kind = (kind + 1 + ri(&R, NKIND - 1)) % NKIND;
     prev_kind = kind;
@@ -1093,8 +1151,8 @@ static void make_sheet(int k) {
     pl_t = 0; pl_salt = R.s;
     park_x = -0.035f * PW; park_y = -0.03f * PH;
     pl_x = park_x; pl_y = park_y;
-    pl_pen = SEPIA;
-    for (int i = 0; i < art.ns; i++) if (art.pen[i] != SEPIA) { pl_pen = art.pen[i]; break; }
+    pl_pen = INK;
+    for (int i = 0; i < art.ns; i++) if (art.pen[i] != INK) { pl_pen = art.pen[i]; break; }
     push(park_x, park_y, 0, 0, 0, 0, 0, 1);
     plot_paths(&art, &R, 0);
     /* a plotter speed setting, so the piece takes a few minutes */
@@ -1114,8 +1172,8 @@ static void make_sheet(int k) {
     float sc = 0.4f;
     float tw = text_width(cap) * sc;
     Paths txt = {0};
-    text_paths(&R, &txt, cap, PW - PW * 0.06f - tw, PH - PH * 0.045f, sc, SEPIA, 0.36f);
-    pen_change(SEPIA);
+    text_paths(&R, &txt, cap, PW - PW * 0.06f - tw, PH - PH * 0.045f, sc, INK, 0.36f);
+    pen_change(INK);
     plot_paths(&txt, &R, 1);
     paths_free(&txt);
     travel(park_x, park_y);
@@ -1192,8 +1250,8 @@ static const char *LIB = GLSL(
         f = f * f * (3.0 - 2.0 * f);
         return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y);
     }
-    const vec3 DARK = vec3(0.165, 0.13, 0.106), MID = vec3(0.25, 0.205, 0.17), HI = vec3(0.42, 0.355, 0.29);
-    const vec3 BRASS = vec3(0.79, 0.585, 0.16);
+    uniform vec3 DARK, MID, HI;             /* the machine's faces */
+    uniform vec3 METAL;                     /* and its fittings */
 );
 
 /* the sheet itself, baked once per size: paper colour with mottling,
@@ -1314,7 +1372,7 @@ static const char *FS_COMP = GLSL(
         if (de < 1.0) {
             col = over(col, mix(MID, DARK, smoothstep(-bh, bh + 9.0 * u, p.y - by)), de);
             vec2 sc = vec2(rx, by + sign(p.y - by) * (bh + 1.0 * u));
-            col = over(col, mix(BRASS, BRASS * 0.6, smoothstep(-3.0 * u, 3.0 * u, p.y - sc.y)), length(p - sc) - 3.2 * u);
+            col = over(col, mix(METAL, METAL * 0.6, smoothstep(-3.0 * u, 3.0 * u, p.y - sc.y)), length(p - sc) - 3.2 * u);
         }
         if (near > 0.0) { o = vec4(col, 1.0); return; }
 
@@ -1330,12 +1388,12 @@ static const char *FS_COMP = GLSL(
         col = over(col, c, d);
         /* a brass plate across it */
         float dpl = box(p, vec2(uPen.x, by), vec2(21.0 * u, 4.0 * u), 2.0 * u);
-        col = over(col, mix(BRASS * 1.1, BRASS * 0.65, smoothstep(by - 4.0 * u, by + 4.0 * u, p.y)), dpl);
+        col = over(col, mix(METAL * 1.1, METAL * 0.65, smoothstep(by - 4.0 * u, by + 4.0 * u, p.y)), dpl);
         /* the pen in its clamp: seen from above, its cap in the ink's colour */
         float s = 1.0 + 0.08 * uLift;
         vec2 pp = uPen - vec2(1.0, 1.5) * u * uLift;
         float rr = length(p - pp);
-        col = over(col, mix(BRASS, BRASS * 0.55, smoothstep(-16.0 * u, 16.0 * u, p.y - pp.y + (p.x - pp.x) * 0.5)), rr - 16.0 * s * u);
+        col = over(col, mix(METAL, METAL * 0.55, smoothstep(-16.0 * u, 16.0 * u, p.y - pp.y + (p.x - pp.x) * 0.5)), rr - 16.0 * s * u);
         col = over(col, DARK, rr - 12.5 * s * u);
         vec3 pcap = uPenCol * (0.75 + 0.45 * smoothstep(9.0 * u, -9.0 * u, (p.x - pp.x) + (p.y - pp.y)));
         col = over(col, pcap, rr - 10.5 * s * u);
@@ -1345,10 +1403,9 @@ static const char *FS_COMP = GLSL(
 
 static GLuint prog_seg, prog_paper, prog_bed, prog_comp, vao_seg, vbo_seg, vao_empty;
 static GLuint tex_ink, fbo_ink, tex_sheet, fbo_sheet, tex_bg, fbo_bg;
-static float paper_rgb[3], bed_rgb[3], bedline_rgb[3];
+static float bed_rgb[3], bedline_rgb[3];
 static int ink_w, ink_h, lay_w, lay_h;
 static float px_mm, pap_x, pap_y;
-static float pen_T[NPEN][3], pen_rgb[NPEN][3];
 
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
@@ -1381,10 +1438,6 @@ static GLuint mk_prog(const char *vs, const char *fs) {
     if (!ok) die("shader link failed");
     return pr;
 }
-static void hex(const char *h, float *rgb) {
-    unsigned v = (unsigned)strtoul(h + 1, NULL, 16);
-    for (int i = 0; i < 3; i++) rgb[i] = ((v >> (16 - 8 * i)) & 255) / 255.0f;
-}
 static GLuint mk_target(GLuint *tex, GLenum fmt, int w, int h) {
     GLuint f;
     glGenTextures(1, tex);
@@ -1415,14 +1468,14 @@ static void gl_init(void) {
         glVertexAttribPointer(i, i == 2 ? 3 : 4, GL_FLOAT, GL_FALSE, 11 * sizeof(float), (void *)(sizeof(float) * 4 * i));
         glVertexAttribDivisor(i, 1);
     }
-    hex(PAPER_HEX, paper_rgb);
-    for (int p = 0; p < NPEN; p++) {
-        hex(PEN_HEX[p], pen_rgb[p]);
-        for (int i = 0; i < 3; i++) pen_T[p][i] = pen_rgb[p][i] / paper_rgb[i];
-    }
-    hex(BORDER_HEX, bed_rgb);
-    hex(PAPER_ALT_HEX, bedline_rgb);                                   /* the mat's grid, lighter */
+    hex(pal->paper, paper_rgb);
+    hex(pal->bed, bed_rgb);
+    hex(pal->bedline, bedline_rgb);                                    /* the mat's grid */
     glUseProgram(prog_comp);
+    glUniform3fv(glGetUniformLocation(prog_comp, "DARK"), 1, pal->dark);
+    glUniform3fv(glGetUniformLocation(prog_comp, "MID"), 1, pal->mid);
+    glUniform3fv(glGetUniformLocation(prog_comp, "HI"), 1, pal->hi);
+    glUniform3fv(glGetUniformLocation(prog_comp, "METAL"), 1, pal->metal);
     glUniform1i(glGetUniformLocation(prog_comp, "uBg"), 0);
     glUniform1i(glGetUniformLocation(prog_comp, "uInk"), 1);
     glUniform1i(glGetUniformLocation(prog_comp, "uSheet"), 2);
@@ -1677,8 +1730,10 @@ static int wl_poll(void) {
 static void usage(void) {
     fprintf(stderr,
         "usage: plotter [--window | --root | --layer] [--seed N] [--speed X] [--kind NAME]\n"
+        "               [--palette NAME]\n"
         "               [--shot FILE.ppm] [--bench N] [--size WxH] [--at SECONDS]\n"
-        "kinds: flow topo ridges harmonograph spirograph rings truchet\n");
+        "kinds: flow topo ridges harmonograph spirograph rings truchet\n"
+        "palettes: sepia blue technical colour (default: picked from the seed)\n");
     exit(1);
 }
 
@@ -1708,6 +1763,11 @@ int main(int argc, char **argv) {
             for (int j = 0; j < NKIND; j++) if (!strcmp(k, KIND_NAME[j])) opt_kind = j;
             if (opt_kind < 0) usage();
         }
+        else if (!strcmp(a, "-palette") && i + 1 < argc) {
+            const char *k = argv[++i];
+            for (int j = 0; j < NPAL; j++) if (!strcmp(k, PALS[j].name)) opt_pal = j;
+            if (opt_pal < 0) usage();
+        }
         else if (!strcmp(a, "-shot") && i + 1 < argc) opt_shot = argv[++i];
         else if (!strcmp(a, "-bench") && i + 1 < argc) opt_bench = atoi(argv[++i]);
         else if (!strcmp(a, "-size") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &off_w, &off_h) != 2) usage(); }
@@ -1716,6 +1776,7 @@ int main(int argc, char **argv) {
     }
     if (opt_speed <= 0) usage();
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
+    pal = &PALS[opt_pal >= 0 ? opt_pal : (int)(mix32(opt_seed ^ 0x51ed270bu) % NPAL)];
     gethostname(host, sizeof host - 1);
     if (getenv("PLOTTER_HOST")) snprintf(host, sizeof host, "%s", getenv("PLOTTER_HOST"));   /* for testing the script */
     host[strcspn(host, ".")] = 0;
