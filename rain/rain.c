@@ -2,9 +2,12 @@
  * rain — looking out of a window at night through rain-covered glass.
  *
  * Behind the glass, out of focus, a street running away from the window:
- * facades with lit windows and shopfronts, street lamps, cars coming and
- * going with their reflections on the wet road, all blurred into warm
- * bokeh. On the glass, water: small beads that sit, larger drops that
+ * facades with lit windows in warm and cool whites, shopfronts under neon
+ * signs, white LED and sodium lamps, a junction with signals cycling and
+ * traffic crossing, cars coming (headlights) and going (tail lights), a bus
+ * now and then, people under umbrellas, and every light streaked long down
+ * the wet road and its puddles, all blurred into bokeh. The layout and its
+ * neon colours vary with the seed. On the glass, water: small beads that sit, larger drops that
  * grow as rain lands on them, then let go and run down in wobbly paths,
  * leaving trails of tiny beads and swallowing whatever they meet. Each drop
  * is a little lens: it shows a sharp, upside-down view of the street, with
@@ -585,13 +588,45 @@ static void sim_step(float dt) {
  * first-floor window looking down the street towards a vanishing point. */
 #define CAM_H 6.0f
 #define FOC 0.9f
-#define VPX 0.64f      /* vanishing point, x as a fraction of the width */
+#define VPX 0.64f      /* vanishing point, x as a fraction of the width (default; per seed below) */
 #define VPY 0.53f      /* and y as a fraction of the height (down) */
 #define LAT_L -11.0f   /* the facades */
 #define LAT_R 9.5f
 static float lights[4096 * 8];
 static int nl;
 static float bokeh_r;                  /* px */
+
+/* What this seed's street is like: where it vanishes, where a cross street
+ * cuts through it (a junction with signals and a zebra), the colours of its
+ * neon, how many of its lamps are white LED rather than sodium. */
+static float vpx = VPX, gap0 = 42, gap1 = 54, lamp_led = 0.5f, bus_tall;
+static float sign_pal[4][3], bus_col[3];
+static uint32_t laid_seed;
+static int laid;
+static const float NEON[7][3] = {
+    {0.08f, 0.95f, 0.85f}, {1.00f, 0.10f, 0.16f}, {1.00f, 0.16f, 0.72f}, {0.25f, 0.46f, 1.00f},
+    {0.30f, 1.00f, 0.38f}, {0.68f, 0.30f, 1.00f}, {0.92f, 0.95f, 1.00f},
+};
+static void street_layout(void) {
+    if (laid && laid_seed == scene_seed) return;
+    laid = 1; laid_seed = scene_seed;
+    vpx = 0.42f + 0.24f * h01(91, 1, 1);
+    gap0 = 28 + 24 * h01(91, 2, 1);
+    gap1 = gap0 + 10 + 5 * h01(91, 3, 1);
+    lamp_led = 0.2f + 0.8f * h01(91, 4, 1);
+    /* four of the neon colours, teal, red or magenta first */
+    int idx[7] = {0, 1, 2, 3, 4, 5, 6};
+    for (int i = 6; i > 0; i--) {
+        int j = (int)(h01(91, 10 + i, 1) * (i + 1)), k = idx[i];
+        idx[i] = idx[j]; idx[j] = k;
+    }
+    if (idx[0] > 2) { int k = idx[0]; idx[0] = (int)(h01(91, 9, 1) * 3); for (int i = 1; i < 4; i++) if (idx[i] == idx[0]) idx[i] = k; }
+    for (int i = 0; i < 4; i++) for (int c = 0; c < 3; c++) sign_pal[i][c] = NEON[idx[i]][c];
+    static const float liv[4][3] = {{0.55f, 0.06f, 0.05f}, {0.05f, 0.38f, 0.40f}, {0.75f, 0.76f, 0.74f}, {0.10f, 0.22f, 0.50f}};
+    int l = (int)(h01(91, 20, 1) * 4) & 3;
+    for (int c = 0; c < 3; c++) bus_col[c] = liv[l][c];
+    bus_tall = h01(91, 21, 1) < 0.4f;
+}
 
 static void add_light(float x, float y, float rb, float rs, float r, float g, float b, float shape) {
     if (nl >= 4096) return;
@@ -603,8 +638,36 @@ static void add_light(float x, float y, float rb, float rs, float r, float g, fl
 
 /* world to screen px */
 static void proj(float lat, float hgt, float z, float *x, float *y) {
-    *x = (VPX * W / H + FOC * lat / z) * H;
+    *x = (vpx * W / H + FOC * lat / z) * H;
     *y = (VPY + FOC * (CAM_H - hgt) / z) * H;
+}
+
+/* a light's reflection in the wet road: a long streak, broken by ripples,
+ * down from its mirror image at (x, ym) px */
+static void add_streak(float x, float ym, float hw, float r, float g, float b) {
+    float hl = clampf(0.55f * (ym - VPY * H), bokeh_r * 1.2f, H * 0.4f);
+    add_light(x, ym, hw, hl, r, g, b, 1);
+}
+
+/* a rectangle of light, w x h px about (x, y): 3 drawn in both passes (signs),
+ * 4 only as bokeh (windows: the street pass draws them sharp itself) */
+static void add_rect(float x0, float y0, float x1, float y1, const float *c, float e, float shape) {
+    add_light((x0 + x1) / 2, (y0 + y1) / 2, fmaxf(fabsf(x1 - x0) / 2, 0.5f), fmaxf(fabsf(y1 - y0) / 2, 0.5f),
+              c[0] * e, c[1] * e, c[2] * e, shape);
+}
+/* a rectangle on a side facade (plane lat), z0..z1 by h0..h1 metres */
+static void facade_rect(float lat, float z0, float z1, float h0, float h1, const float *c, float e, float shape) {
+    float xa, xb, ya, yb, d;
+    float zm = 0.5f * (z0 + z1);
+    proj(lat, h1, z0, &xa, &d); proj(lat, h1, z1, &xb, &d);
+    proj(lat, h1, zm, &d, &ya); proj(lat, h0, zm, &d, &yb);
+    add_rect(xa, ya, xb, yb, c, e, shape);
+}
+/* one facing us (plane z), lat0..lat1 by h0..h1 */
+static void front_rect(float z, float l0, float l1, float h0, float h1, const float *c, float e, float shape) {
+    float xa, xb, ya, yb;
+    proj(l0, h1, z, &xa, &ya); proj(l1, h0, z, &xb, &yb);
+    add_rect(xa, ya, xb, yb, c, e, shape);
 }
 
 static float bh(uint32_t side, float z) {
@@ -612,116 +675,282 @@ static float bh(uint32_t side, float z) {
     return 7 + 22 * h01(side, (uint32_t)(seg < 0 ? 0 : seg), 7);
 }
 
-/* is window (column ci, floor fi) on this side lit at scene time t; its colour */
+/* is window (column ci, floor fi) on this side lit at scene time t; its
+ * colour: warm and cool whites, the odd tungsten lamp, television or LED
+ * strip. Shopfronts (fi 0) stay lit by day. Must match window() in FS_STREET. */
 static int win_lit(uint32_t side, uint32_t ci, uint32_t fi, float t, float litp, float *col) {
     uint32_t e = (uint32_t)floorf(t / 600 + h01(side, ci, fi + 500));
-    float p = fi == 0 ? litp * 1.5f : litp;
+    float p = fi == 0 ? fmaxf(litp * 1.5f, 0.55f) : litp;
     if (h01(side + 16 * e, ci, fi) >= p) return 0;
-    float k = h01(side, ci, fi + 2000), b = 0.45f + 0.55f * h01(side, ci, fi + 3000);
-    static const float pal[5][3] = {{0.94f, 0.89f, 0.81f}, {0.91f, 0.60f, 0.29f}, {0.95f, 0.74f, 0.33f},
-                                    {0.56f, 0.65f, 0.45f}, {0.80f, 0.30f, 0.18f}};
+    float k = h01(side, ci, fi + 2000), b = 0.5f + 0.5f * h01(side, ci, fi + 3000);
+    static const float pal[6][3] = {{1.00f, 0.82f, 0.62f}, {0.96f, 0.94f, 0.90f}, {0.80f, 0.90f, 1.00f},
+                                    {1.00f, 0.66f, 0.36f}, {0.45f, 0.62f, 1.00f}, {0.78f, 0.52f, 1.00f}};
+    int i;
     if (fi == 0) {
-        int i = (int)(k * 5);
-        if (i > 4) i = 4;
-        for (int c = 0; c < 3; c++) col[c] = pal[i][c] * (0.8f + 0.4f * b);
+        i = k < 0.4f ? 2 : k < 0.65f ? 1 : k < 0.85f ? 0 : k < 0.93f ? 5 : 3;
+        b = 0.8f + 0.4f * b;
     } else {
-        for (int c = 0; c < 3; c++) col[c] = mixf(pal[1][c], pal[0][c], k) * b;
-        if (k > 0.93f) for (int c = 0; c < 3; c++) col[c] = pal[3][c] * 0.6f * b;
+        i = k < 0.4f ? 0 : k < 0.62f ? 1 : k < 0.8f ? 2 : k < 0.92f ? 3 : k < 0.97f ? 4 : 5;
+        if (i == 4) b *= 0.5f + 0.5f * h01(ci, fi, (uint32_t)(t * 6));
     }
+    for (int c = 0; c < 3; c++) col[c] = pal[i][c] * b;
     return 1;
+}
+
+/* the signals at the junction: main street green, amber, then red while
+ * the cross street goes */
+#define SIG_P 47.0f
+static float sig_phase(float t, uint32_t j) { return fmodf(t + SIG_P * h01(91, 30 + j, 1), SIG_P); }
+
+/* what moves: cars, a bus now and then, people with umbrellas. Vehicles are
+ * boxes (lat centre, near-end z, length, bus?; half-width, height, colour,
+ * going away?); people (lat, z, stride phase, umbrella colour + 1 or 0). */
+typedef struct { float lat, z, len, bus, hw, h, col, away; } Veh;
+#define MAXV 22
+#define MAXP 12
+static Veh veh[MAXV];
+static int nveh;
+static float peds[MAXP * 4];
+static int nped;
+
+static void traffic(float t, float night, float rainy) {
+    street_layout();
+    nveh = 0;
+    float busz[2] = {-1e9f, -1e9f};
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        float P = 75 + 70 * h01(lane, 1, 31), v = 6.5f, ph = fmodf(t + P * h01(lane, 2, 31), P);
+        if (ph > 257 / v) continue;
+        float z = lane == 0 ? 260 - v * ph : 3 + v * ph;
+        busz[lane] = z;
+        veh[nveh++] = (Veh){lane == 0 ? -5.6f : -2.0f, z, 11.5f, 1, 1.25f, bus_tall ? 4.2f : 3.1f, 0, (float)lane};
+    }
+    float density = mixf(0.55f, 0.8f, 1 - night);
+    for (uint32_t lane = 0; lane < 2; lane++)
+        for (uint32_t k = 0; k < 10; k++) {
+            float v = 8 + 6 * h01(lane, k, 11);
+            float len = 167 / v, P = len + 6 + 30 * h01(lane, k, 12);
+            float tt = t + P * h01(lane, k, 13) * 7;
+            float cyc = floorf(tt / P), ph = tt - cyc * P;
+            if (ph > len || h01(lane, k, 1000 + (uint32_t)cyc) > density) continue;
+            float z = lane == 0 ? 170 - v * ph : 3 + v * ph;
+            if (fabsf(z - busz[lane]) < 17 || nveh >= MAXV) continue;
+            veh[nveh++] = (Veh){lane == 0 ? -5.6f : -2.0f, z, 4.4f, 0, 0.9f, 1.45f, h01(lane, k, 1400 + (uint32_t)cyc), (float)lane};
+        }
+    /* people on both pavements, most under umbrellas when it rains */
+    nped = 0;
+    for (uint32_t k = 0; k < MAXP; k++) {
+        uint32_t side = k & 1;
+        float lat = side ? 1.4f + 2.2f * h01(k, 1, 41) : -10.3f + 1.8f * h01(k, 1, 41);
+        float v = 1.1f + 0.5f * h01(k, 2, 41), span = 70, P = span / v + 10 + 30 * h01(k, 3, 41);
+        float tt = t + P * h01(k, 4, 41), cyc = floorf(tt / P), ph = tt - cyc * P;
+        if (ph > span / v) continue;
+        int fwd = h01(k, 5, 41 + (uint32_t)cyc) < 0.5f;
+        float z = fwd ? 6 + v * ph : 6 + span - v * ph;
+        float umb = h01(k, 6, 41 + (uint32_t)cyc) < 0.25f + 0.7f * rainy ? 1 + (float)(int)(h01(k, 7, 41 + (uint32_t)cyc) * 6) : 0;
+        float *p = &peds[nped++ * 4];
+        p[0] = lat; p[1] = z; p[2] = ph * v * 3.3f; p[3] = umb;
+    }
+}
+
+/* can a light down the cross street (|lat| beyond the facades) be seen
+ * through the gap? */
+static int through_gap(float lat, float z) {
+    float f = lat < 0 ? -LAT_L : LAT_R;
+    if (fabsf(lat) <= f) return 1;
+    float zc = z * f / fabsf(lat);
+    return zc > gap0 && zc < gap1;
 }
 
 static void scene_lights(float t, float night, float wet, float snow, float rainy) {
     nl = 0;
+    street_layout();
     float lamps = smooth(0.25f, 0.85f, night);
     bokeh_r = H * 0.036f * mixf(0.72f, 1.0f, rainy);
     float x, y, x2, y2;
     float rs_min = 2.5f * H / 1080.0f;
-    /* street lamps, both sides, staggered */
+    float rw = 0.6f * wet;             /* how much the road gives back */
+    /* street lamps, both sides, staggered: white LED or orange sodium */
     if (lamps > 0.01f)
         for (int side = 0; side < 2; side++)
             for (int k = 0; k < 16; k++) {
-                float z = (side ? 9.0f : 21.0f) + 24.0f * k, lat = side ? 0.8f : -8.4f, hgt = 6.4f;
+                float z = (side ? 9.0f : 21.0f) + 24.0f * k, lat = side ? 0.8f : -8.4f, hgt = 8.5f;
                 proj(lat, hgt, z, &x, &y);
-                int led = h01(side, k, 77) < 0.35f;
-                float c[3] = {0.91f, 0.56f, 0.24f};
-                if (led) { c[0] = 1.0f; c[1] = 0.80f; c[2] = 0.52f; }
-                float pw = lamps * 1.5f * powf(10 / z, 1.05f);
+                int led = h01(side, k, 77) < lamp_led;
+                float c[3] = {1.0f, 0.58f, 0.24f};
+                if (led) { c[0] = 0.84f; c[1] = 0.92f; c[2] = 1.0f; }
+                float pw = lamps * 1.6f * powf(10 / z, 1.0f);
                 float near = smooth(200, 10, z);
                 float rs = fmaxf(rs_min, 0.32f * FOC / z * H);
                 add_light(x, y, bokeh_r * (0.9f + 0.25f * near), rs, c[0] * pw, c[1] * pw, c[2] * pw, 0);
                 if (wet > 0.01f) {
                     proj(lat, -hgt, z, &x2, &y2);
-                    float pr = pw * 0.35f * wet;
-                    add_light(x2, y2, bokeh_r * 0.9f, rs * 1.3f, c[0] * pr, c[1] * pr, c[2] * pr, 1);
+                    float pr = pw * rw * 1.4f;
+                    add_streak(x2, y2, bokeh_r * 0.75f, c[0] * pr, c[1] * pr, c[2] * pr);
                 }
             }
-    /* windows and shopfronts */
+    /* windows and shopfronts, as rectangles of light; shop signs over them */
     float litp = 0.06f + 0.3f * smooth(0.2f, 0.9f, night);
+    float wk = 0.55f + 0.45f * night, sk = 0.6f + 0.6f * night;
     for (uint32_t side = 0; side < 2; side++) {
-        float lat = side ? LAT_R : LAT_L;
+        float lat = side ? LAT_R : LAT_L, in = side ? -1 : 1;
         for (uint32_t ci = 2; ci < 40; ci++) {
-            float z = (ci + 0.5f) * 3.5f;
-            float top = bh(side, z);
+            float z0 = ci * 3.5f;
+            if (z0 + 3.5f > gap0 && z0 < gap1) continue;
+            float top = bh(side, z0 + 1.75f);
             for (uint32_t fi = 0; fi < 9; fi++) {
-                float hgt = fi == 0 ? 1.5f : (fi + 0.55f) * 3.2f;
-                if (hgt > top - 0.5f) break;
+                int shop = fi == 0;
+                float h0 = shop ? 0.18f : (fi + 0.3f) * 3.2f, h1 = shop ? 2.59f : (fi + 0.82f) * 3.2f;
+                if (h1 > top) break;
                 float c[3];
                 if (!win_lit(side, ci, fi, t, litp, c)) continue;
-                proj(lat, hgt, z, &x, &y);
-                float pw = (fi == 0 ? 0.5f : 0.26f) * powf(12 / z, 0.9f) * (0.25f + 0.75f * night);
-                float rs = fmaxf(rs_min, (fi == 0 ? 1.2f : 0.7f) * FOC / z * H);
-                add_light(x, y, bokeh_r * (0.85f + 0.2f * h01(side, ci, fi + 4000)), rs * 0.6f, c[0] * pw, c[1] * pw, c[2] * pw, 0);
-                if (fi == 0 && wet > 0.01f) {
-                    proj(lat * 0.93f, -hgt, z, &x2, &y2);
-                    float pr = pw * 0.3f * wet;
-                    add_light(x2, y2, bokeh_r * 0.85f, rs, c[0] * pr, c[1] * pr, c[2] * pr, 1);
+                float e = 0.42f * wk;
+                if (!shop) {
+                    /* a lamp in the room: a small disc, in some */
+                    if (h01(side, ci, fi + 8000) > 0.55f) continue;
+                    proj(lat, (h0 + h1) / 2, z0 + 1.75f, &x, &y);
+                    float pw = 0.3f * powf(12 / (z0 + 1.75f), 0.9f) * wk;
+                    add_light(x, y, bokeh_r * (0.8f + 0.25f * h01(side, ci, fi + 4000)), rs_min, c[0] * pw, c[1] * pw, c[2] * pw, 0);
+                    continue;
                 }
-            }
-        }
-    }
-    /* a traffic light */
-    {
-        float ph = fmodf(t + 17, 60);
-        float c[3] = {0.56f, 0.72f, 0.42f};
-        if (ph >= 26 && ph < 29) { c[0] = 1.0f; c[1] = 0.62f; c[2] = 0.15f; }
-        else if (ph >= 29) { c[0] = 0.86f; c[1] = 0.22f; c[2] = 0.10f; }
-        proj(1.2f, 4.2f, 46, &x, &y);
-        float pw = 0.7f * (0.4f + 0.6f * night);
-        add_light(x, y, bokeh_r * 0.8f, rs_min * 1.2f, c[0] * pw, c[1] * pw, c[2] * pw, 0);
-        if (wet > 0.01f) {
-            proj(1.2f, -4.2f, 46, &x2, &y2);
-            add_light(x2, y2, bokeh_r * 0.8f, rs_min * 1.5f, c[0] * pw * 0.3f * wet, c[1] * pw * 0.3f * wet, c[2] * pw * 0.3f * wet, 1);
-        }
-    }
-    /* cars: headlights coming, tail lights going */
-    float density = mixf(0.35f, 0.6f, 1 - night) + 0.1f;
-    for (uint32_t lane = 0; lane < 2; lane++)
-        for (uint32_t k = 0; k < 6; k++) {
-            float v = 8 + 6 * h01(lane, k, 11);
-            float len = 257 / v, P = len + 6 + 40 * h01(lane, k, 12);
-            float tt = t + P * h01(lane, k, 13) * 7;
-            float cyc = floorf(tt / P), ph = tt - cyc * P;
-            if (ph > len || h01(lane, k, 1000 + (uint32_t)cyc) > density) continue;
-            float z = lane == 0 ? 260 - v * ph : 3 + v * ph;
-            float lat = lane == 0 ? -5.6f : -2.0f;
-            float on = smooth(3, 7, z) * smooth(260, 230, z);
-            float c[3];
-            float pw;
-            if (lane == 0) { c[0] = 1.0f; c[1] = 0.92f; c[2] = 0.78f; pw = 2.4f * powf(10 / z, 1.2f) * (0.5f + 0.5f * night); }
-            else { c[0] = 0.85f; c[1] = 0.17f; c[2] = 0.08f; pw = 1.1f * powf(10 / z, 1.1f) * (0.45f + 0.55f * night); }
-            pw = fminf(pw, 3.0f) * on;
-            for (int s = -1; s <= 1; s += 2) {
-                proj(lat + s * 0.72f, 0.7f, z, &x, &y);
-                float rs = fmaxf(rs_min, 0.22f * FOC / z * H);
-                add_light(x, y, bokeh_r * (0.9f + 0.3f * smooth(80, 5, z)), rs, c[0] * pw, c[1] * pw, c[2] * pw, 0);
+                facade_rect(lat, z0 + 0.21f, z0 + 3.29f, h0, h1, c, e * 0.45f, 4);
                 if (wet > 0.01f) {
-                    proj(lat + s * 0.72f, -0.7f, z, &x2, &y2);
-                    float pr = pw * 0.45f * wet;
-                    add_light(x2, y2 + rs, bokeh_r * 0.9f, rs * 1.4f, c[0] * pr, c[1] * pr, c[2] * pr, 1);
+                    proj(lat * 0.96f, -1.4f, z0 + 1.75f, &x2, &y2);
+                    proj(lat * 0.96f, -1.4f, z0 + 3.0f, &x, &y);
+                    float pr = e * rw * 0.9f;
+                    add_streak(x2, y2, fmaxf(fabsf(x - x2), bokeh_r * 0.5f), c[0] * pr, c[1] * pr, c[2] * pr);
                 }
             }
+            /* a lit fascia over the shop, or a blade sign up the wall */
+            float kind = h01(side, ci, 6000);
+            if (kind > 0.46f) continue;
+            float kc = h01(side, ci, 6001), md = h01(side, ci, 6002);
+            float c[3];
+            for (int k = 0; k < 3; k++) c[k] = kc < 0.1f ? NEON[6][k] : sign_pal[(int)(kc * 4) & 3][k];
+            float on = 1;
+            if (md < 0.1f) on = h01(side, ci, (uint32_t)(t * 9)) < 0.8f ? 1 : 0.15f;                     /* a tired tube */
+            else if (md < 0.25f) on = fmodf(t + 9 * md, 1.5f + 4 * md) < 0.9f + 2 * md ? 1 : 0.05f;    /* blinking */
+            float e = 1.3f * sk * on;
+            float hc, lc, zc, hw;
+            if (kind < 0.3f) {
+                facade_rect(lat, z0 + 0.3f, z0 + 3.2f, 2.75f, 3.4f, c, e, 3);
+                hc = 3.07f; lc = lat + in * 0.1f; zc = z0 + 1.75f; hw = 1.45f;
+            } else {
+                float hs = 2.0f + 2.5f * h01(side, ci, 6003);
+                if (4 + hs > top) continue;
+                front_rect(z0, lat + in * 0.3f, lat + in * 0.95f, 4.0f, 4.0f + hs, c, e, 3);
+                hc = 4 + hs / 2; lc = lat + in * 0.62f; zc = z0; hw = 0.33f;
+            }
+            if (wet > 0.01f) {
+                proj(lc, -hc, zc, &x2, &y2);
+                proj(lc + hw, -hc, zc, &x, &y);
+                float pr = e * rw * 0.7f;
+                add_streak(x2, y2, fmaxf(fabsf(x - x2), bokeh_r * 0.45f), c[0] * pr, c[1] * pr, c[2] * pr);
+            }
         }
+        /* across the junction, the end wall of the next block faces us */
+        float top = bh(side, gap1 + 1);
+        for (uint32_t ci = (uint32_t)(fabsf(lat) / 3.5f) + 1; ci < 14; ci++) {
+            float l0 = ci * 3.5f;
+            if (!through_gap(-in * (l0 + 1.75f), gap1)) continue;
+            for (uint32_t fi = 0; fi < 9; fi++) {
+                int shop = fi == 0;
+                float h0 = shop ? 0.18f : (fi + 0.3f) * 3.2f, h1 = shop ? 2.59f : (fi + 0.82f) * 3.2f;
+                if (h1 > top) break;
+                float c[3];
+                if (!win_lit(side + 2, ci, fi, t, litp, c) || (!shop && h01(side + 2, ci, fi + 8000) > 0.55f)) continue;
+                float e = (shop ? 0.42f : 0.3f) * wk;
+                front_rect(gap1, -in * (l0 + (shop ? 0.21f : 0.77f)), -in * (l0 + (shop ? 3.29f : 2.73f)), h0, h1, c, e, 4);
+            }
+        }
+    }
+    /* traffic signals at the junction (and the next one): we see the faces
+     * meant for the traffic going away from us; one overhead on a mast */
+    for (uint32_t j = 0; j < 2; j++) {
+        float ph = sig_phase(t, j);
+        float c[3] = {0.10f, 1.0f, 0.62f}, dh = -0.3f;
+        if (ph >= 24 && ph < 27) { c[0] = 1.0f; c[1] = 0.55f; c[2] = 0.02f; dh = 0; }
+        else if (ph >= 27) { c[0] = 1.0f; c[1] = 0.07f; c[2] = 0.05f; dh = 0.3f; }
+        float zj = j == 0 ? gap0 - 1.5f : gap1 + 62;
+        static const float heads[3][2] = {{-8.0f, 3.2f}, {0.4f, 3.2f}, {-4.4f, 5.7f}};
+        for (int i = 0; i < (j == 0 ? 3 : 2); i++) {
+            proj(heads[i][0], heads[i][1] + dh, zj, &x, &y);
+            float pw = 1.1f * powf(30 / zj, 0.8f) * (0.55f + 0.45f * night);
+            add_light(x, y, bokeh_r * 0.8f, rs_min * 1.3f, c[0] * pw, c[1] * pw, c[2] * pw, 0);
+            if (wet > 0.01f) {
+                proj(heads[i][0], -heads[i][1] - dh, zj, &x2, &y2);
+                float pr = pw * rw * 1.2f;
+                add_streak(x2, y2, bokeh_r * 0.6f, c[0] * pr, c[1] * pr, c[2] * pr);
+            }
+        }
+    }
+    /* cross traffic, while our street waits at red: side-on, a white light
+     * leading and a red one trailing */
+    {
+        float ph = sig_phase(t, 0);
+        if (ph > 27.5f && ph < 46.5f)
+            for (uint32_t k = 0; k < 4; k++) {
+                if (h01(k, (uint32_t)(t / SIG_P), 51) < 0.35f) continue;
+                int dir = k & 1;
+                float zc = dir ? gap0 + 3.0f : gap1 - 3.0f, s = 11 + 3 * h01(k, 2, 51);
+                float lc = (ph - 27.5f - 2.5f * (k >> 1)) * s - 90;
+                if (dir) lc = -lc;
+                float fade = smooth(27.5f, 29, ph) * smooth(46.5f, 45, ph);
+                for (int e = 0; e < 2; e++) {
+                    float l = lc + (dir ? -1 : 1) * (e ? -2.2f : 2.2f);
+                    if (!through_gap(l, zc)) continue;
+                    const float *cc = e ? (const float[]){1.0f, 0.06f, 0.04f} : (const float[]){0.95f, 0.96f, 1.0f};
+                    float pw = (e ? 0.7f : 1.6f) * powf(30 / zc, 1.1f) * fade * (0.5f + 0.5f * night);
+                    proj(l, 0.75f, zc, &x, &y);
+                    add_light(x, y, bokeh_r * 0.85f, rs_min * 1.2f, cc[0] * pw, cc[1] * pw, cc[2] * pw, 0);
+                    if (wet > 0.01f) {
+                        proj(l, -0.75f, zc, &x2, &y2);
+                        float pr = pw * rw * 1.4f;
+                        add_streak(x2, y2, bokeh_r * 0.6f, cc[0] * pr, cc[1] * pr, cc[2] * pr);
+                    }
+                }
+            }
+    }
+    /* vehicles: headlights coming, tail lights (and brakes) going; a bus
+     * lit inside */
+    float sph = sig_phase(t, 0);
+    int stopping = sph >= 24;
+    for (int i = 0; i < nveh; i++) {
+        const Veh *v = &veh[i];
+        float z = v->z;
+        float on = smooth(3, 7, z) * smooth(v->bus ? 260 : 170, v->bus ? 230 : 150, z);
+        if (on <= 0) continue;
+        float c[3], pw, hl = v->bus ? 0.8f : 0.7f;
+        if (!v->away) {
+            int led = v->col > 0.5f;
+            c[0] = led ? 0.90f : 1.0f; c[1] = led ? 0.95f : 0.92f; c[2] = led ? 1.0f : 0.80f;
+            pw = 2.6f * powf(10 / z, 1.2f) * (0.55f + 0.45f * night);
+        } else {
+            c[0] = 1.0f; c[1] = 0.06f; c[2] = 0.04f;
+            pw = 1.1f * powf(10 / z, 1.1f) * (0.45f + 0.55f * night);
+            if (stopping && z > gap0 - 40 && z < gap0 - 2) pw *= 2.2f;
+        }
+        pw = fminf(pw, 3.5f) * on;
+        for (int s = -1; s <= 1; s += 2) {
+            float l = v->lat + s * (v->hw - 0.2f);
+            proj(l, hl, z, &x, &y);
+            float rs = fmaxf(rs_min, 0.22f * FOC / z * H);
+            add_light(x, y, bokeh_r * (0.9f + 0.3f * smooth(80, 5, z)), rs, c[0] * pw, c[1] * pw, c[2] * pw, 0);
+            if (wet > 0.01f) {
+                proj(l, -hl, z, &x2, &y2);
+                float pr = pw * rw * 1.6f;
+                add_streak(x2, y2, bokeh_r * 0.7f, c[0] * pr, c[1] * pr, c[2] * pr);
+            }
+        }
+        if (v->bus) {
+            static const float in_c[3] = {0.82f, 0.92f, 1.0f}, dest[3] = {0.55f, 1.0f, 0.35f};
+            float e = 0.5f * on, lr = v->lat + v->hw;
+            /* the side windows, the windscreen or back window, the destination */
+            for (int k = 0; k < 3; k++)
+                facade_rect(lr, z + 0.6f + k * 3.6f, z + 3.9f + k * 3.6f, 1.15f, v->h - 0.55f, in_c, e, 4);
+            front_rect(z, v->lat - v->hw + 0.15f, v->lat + v->hw - 0.15f, 1.0f, v->h - 0.5f, in_c, e * (v->away ? 0.4f : 0.6f), 4);
+            if (!v->away) front_rect(z, v->lat - 0.8f, v->lat + 0.8f, v->h - 0.42f, v->h - 0.12f, dest, 1.2f * on, 3);
+        }
+    }
     /* snow falling between us and the street */
     if (snow > 0.02f)
         for (uint32_t k = 0; k < 160; k++) {
@@ -745,12 +974,19 @@ static const char *VS = "#version 330 core\n" GLSL(
         gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
     });
 
-/* the street, sharp, at half resolution: facades with windows, the wet road
- * mirroring them, the sky; the lights are added on top as points */
+/* the street, sharp, at half resolution: facades with windows, a junction,
+ * the wet road with puddles mirroring them, the sky, and what moves (cars,
+ * buses, people under umbrellas, as boxes and silhouettes); the lights are
+ * added on top as points */
 static const char *FS_STREET = "#version 330 core\n" GLSL(
     uniform vec2 uRes;
     uniform float uAsp, uT, uDay, uDusk, uCloud, uFlash, uWet, uLitP, uNight, uSnowGround;
     uniform uint uSeed;
+    uniform float uVpx, uLampLed;
+    uniform vec2 uGap;
+    uniform vec3 uBus;
+    uniform vec4 uVeh[22], uVehB[22], uPed[12];
+    uniform int uNVeh, uNPed;
     out vec4 o;
     const float CAMH = 6.0, FOC = 0.9, VPY = 0.53, LL = 11.0, LR = 9.5;
 
@@ -761,6 +997,13 @@ static const char *FS_STREET = "#version 330 core\n" GLSL(
     }
     float h01(uint a, uint b, uint c) { return float(hash3(a, b, c) >> 8) * (1.0 / 16777216.0); }
     float bh(uint side, float z) { return 7.0 + 22.0 * h01(side, uint(max(floor(z / 14.0), 0.0)), 7u); }
+    float vn2(vec2 p) {
+        vec2 i = floor(p), f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        uvec2 u = uvec2(ivec2(i) + 4096);
+        return mix(mix(h01(u.x, u.y, 99u), h01(u.x + 1u, u.y, 99u), f.x),
+                   mix(h01(u.x, u.y + 1u, 99u), h01(u.x + 1u, u.y + 1u, 99u), f.x), f.y);
+    }
 
     vec3 sky(float Y) {
         float t = clamp((VPY - Y) / VPY, 0.0, 1.0);
@@ -772,140 +1015,346 @@ static const char *FS_STREET = "#version 330 core\n" GLSL(
         return c;
     }
 
+    /* must match win_lit() */
     vec3 window(uint side, float ci, float fi, out float lit) {
         uint c = uint(ci), f = uint(fi);
         uint e = uint(floor(uT / 600.0 + h01(side, c, f + 500u)));
-        float p = f == 0u ? uLitP * 1.5 : uLitP;
+        float p = f == 0u ? max(uLitP * 1.5, 0.55) : uLitP;
         lit = h01(side + 16u * e, c, f) < p ? 1.0 : 0.0;
-        float k = h01(side, c, f + 2000u), b = 0.45 + 0.55 * h01(side, c, f + 3000u);
-        vec3 pal[5] = vec3[5](vec3(0.94, 0.89, 0.81), vec3(0.91, 0.60, 0.29), vec3(0.95, 0.74, 0.33),
-                              vec3(0.56, 0.65, 0.45), vec3(0.80, 0.30, 0.18));
-        if (f == 0u) return pal[min(int(k * 5.0), 4)] * (0.45 + 0.3 * b);
-        if (k > 0.93) return pal[3] * 0.6 * b;
-        return mix(pal[1], pal[0], k) * b;
+        float k = h01(side, c, f + 2000u), b = 0.5 + 0.5 * h01(side, c, f + 3000u);
+        vec3 pal[6] = vec3[6](vec3(1.00, 0.82, 0.62), vec3(0.96, 0.94, 0.90), vec3(0.80, 0.90, 1.00),
+                              vec3(1.00, 0.66, 0.36), vec3(0.45, 0.62, 1.00), vec3(0.78, 0.52, 1.00));
+        int i;
+        if (f == 0u) {
+            i = k < 0.4 ? 2 : k < 0.65 ? 1 : k < 0.85 ? 0 : k < 0.93 ? 5 : 3;
+            b = 0.8 + 0.4 * b;
+        } else {
+            i = k < 0.4 ? 0 : k < 0.62 ? 1 : k < 0.8 ? 2 : k < 0.92 ? 3 : k < 0.97 ? 4 : 5;
+            if (i == 4) b *= 0.5 + 0.5 * h01(c, f, uint(uT * 6.0));
+        }
+        return pal[i] * b;
     }
 
-    vec3 facade(uint side, float z, float hgt) {
-        float tone = h01(side, uint(floor(z / 14.0)), 3u);
-        vec3 wallN = vec3(0.034, 0.027, 0.022) * (0.7 + 0.6 * tone) + vec3(0.10, 0.055, 0.02) * exp(-hgt / 3.5) * 0.7 * uNight;
-        vec3 wallD = mix(vec3(0.33, 0.31, 0.29), vec3(0.40, 0.33, 0.27), tone);
+    /* a wall: u runs along it (z for the street's facades, |lat| for an end
+     * wall facing us), dist is how far off it is */
+    vec3 facade(uint side, float u, float hgt, float dist) {
+        uint seg = uint(floor(u / 14.0));
+        float tone = h01(side, seg, 3u);
+        vec3 mats[6] = vec3[6](vec3(0.40, 0.21, 0.16), vec3(0.62, 0.57, 0.49), vec3(0.47, 0.47, 0.48),
+                               vec3(0.30, 0.36, 0.43), vec3(0.14, 0.15, 0.17), vec3(0.72, 0.72, 0.70));
+        vec3 wallD = mats[min(int(h01(side, seg, 4u) * 6.0), 5)] * (0.82 + 0.36 * tone);
+        vec3 lamp = mix(vec3(1.0, 0.58, 0.24), vec3(0.84, 0.92, 1.0), uLampLed);
+        vec3 wallN = wallD * 0.10 + vec3(0.010, 0.011, 0.015) + lamp * exp(-hgt / 5.0) * 0.07 * uNight;
         vec3 c = mix(wallN, wallD, uDay);
-        float cz = z / 3.5, fl = hgt < 3.6 ? 0.0 : (hgt - 0.0) / 3.2;
-        float ci = floor(cz), fi = floor(fl);
-        vec2 f = vec2(fract(cz), hgt < 3.6 ? hgt / 3.6 : fract(fl));
         bool shop = hgt < 3.6;
-        vec2 lo = shop ? vec2(0.06, 0.05) : vec2(0.22, 0.3), hi = shop ? vec2(0.94, 0.72) : vec2(0.78, 0.82);
+        float cz = u / 3.5, fl = hgt / 3.2;
+        float ci = floor(cz), fi = shop ? 0.0 : floor(fl);
+        vec2 f = vec2(fract(cz), shop ? hgt / 3.6 : fract(fl));
         vec2 fw = max(fwidth(vec2(cz, shop ? hgt / 3.6 : fl)), vec2(1e-4));
+        /* cornices along each floor, a dark fascia over the shops */
+        if (!shop) c *= 1.0 - 0.35 * (1.0 - smoothstep(0.0, 0.05 + fw.y, f.y)) + 0.12 * smoothstep(0.93 - fw.y, 0.97, f.y);
+        else if (f.y > 0.75) c = mix(c, c * 0.35, smoothstep(0.75, 0.75 + fw.y, f.y));
+        vec2 lo = shop ? vec2(0.06, 0.05) : vec2(0.22, 0.3), hi = shop ? vec2(0.94, 0.72) : vec2(0.78, 0.82);
         vec2 w2 = smoothstep(lo - fw, lo + fw, f) * (1.0 - smoothstep(hi - fw, hi + fw, f));
         float win = w2.x * w2.y;
         if (win > 0.0) {
             float lit;
             vec3 wc = window(side, ci, fi, lit);
-            vec3 dark = mix(vec3(0.012, 0.010, 0.009), vec3(0.24, 0.235, 0.23), uDay);
-            c = mix(c, lit > 0.5 ? wc * mix(0.85, 0.25, uDay) * (shop ? 0.45 + 0.55 * smoothstep(6.0, 30.0, z) : 1.0) + dark : dark, win);
+            float k2 = h01(side, uint(ci), uint(fi) + 7000u);
+            vec3 dark = mix(vec3(0.010, 0.011, 0.013), vec3(0.27, 0.30, 0.34) + 0.08 * k2 - 0.1 * f.y, uDay);
+            /* inside a lit room: brighter low down, curtains half drawn in some */
+            float room = (0.8 + 0.3 * f.y) * (k2 > 0.55 ? mix(1.0, 0.3, smoothstep(0.3, 0.32, abs(f.x - 0.5) + 0.25 * k2)) : 1.0);
+            if (shop) room = 0.85 + 0.15 * step(0.5, fract(f.y * 7.0 + k2)) - 0.45 * step(f.y, 0.22)
+                           - 0.6 * step(abs(fract(f.x * 3.0 + k2 * 5.0) - 0.5), 0.04) * step(f.y, 0.55) * step(0.5, k2);
+            vec3 lw = wc * room * (shop ? mix(0.9, 0.7, uDay) : mix(0.9, 0.3, uDay));
+            c = mix(c, lit > 0.5 ? lw + dark * 0.4 : dark, win);
         }
-        return mix(c, sky(VPY - 0.02), 1.0 - exp(-z / 230.0));
+        return mix(c, sky(VPY - 0.02), 1.0 - exp(-dist / 230.0));
+    }
+
+    /* the road, pavements, kerbs and markings at (lat, z), unlit by reflection */
+    vec3 ground(float lat, float zg, out float puddle) {
+        bool cross = zg > uGap.x && zg < uGap.y;
+        bool road = (lat > -7.6 && lat < 0.0) || cross;
+        vec3 g = road ? mix(vec3(0.014, 0.014, 0.015), vec3(0.17, 0.17, 0.17), uDay)
+                      : mix(vec3(0.030, 0.029, 0.029), vec3(0.30, 0.29, 0.28), uDay);
+        g = mix(g, mix(vec3(0.09, 0.08, 0.075), vec3(0.62, 0.61, 0.60), uDay), uSnowGround * (road ? 0.5 : 1.0));
+        float fwl = max(fwidth(lat), 1e-3), fwz = max(fwidth(zg), 1e-3);
+        float paint = 0.0;
+        paint += (1.0 - smoothstep(0.08, 0.08 + fwl, abs(lat + 3.8))) * step(fract(zg / 9.0), 0.45) * (cross ? 0.0 : 1.0);
+        /* the zebra before the junction, a stop line, kerbs */
+        if (zg > uGap.x - 4.5 && zg < uGap.x - 1.5 && lat > -7.6 && lat < 0.0)
+            paint += smoothstep(0.5 - fwl, 0.5 + fwl, fract((lat + 7.6) / 1.1)) * 1.4;
+        paint += (1.0 - smoothstep(0.2, 0.2 + fwz, abs(zg - uGap.x + 5.5))) * step(-3.8, lat) * step(lat, 0.0) * 1.2;
+        g += paint * mix(vec3(0.05, 0.05, 0.05), vec3(0.24), uDay) * (1.0 - uSnowGround);
+        if (!cross) g += (1.0 - smoothstep(0.0, 0.15 + fwl, min(abs(lat + 7.6), abs(lat)))) * mix(0.02, 0.12, uDay);
+        /* pools of lamplight, white LED or sodium */
+        for (int s = 0; s < 2; s++) {
+            float z0 = s == 0 ? 9.0 : 21.0, la = s == 0 ? 0.8 : -8.4;
+            float kk = clamp(floor((zg - z0) / 24.0 + 0.5), 0.0, 15.0), zz = z0 + 24.0 * kk;
+            float d2 = (zg - zz) * (zg - zz) + (lat - la) * (lat - la);
+            vec3 lc = h01(s == 0 ? 1u : 0u, uint(kk), 77u) < uLampLed ? vec3(0.20, 0.23, 0.26) : vec3(0.30, 0.16, 0.06);
+            g += lc * exp(-d2 / 30.0) * uNight * 0.5;
+        }
+        /* shop light spilling over the pavement */
+        if (!road) {
+            uint side = lat < -3.0 ? 0u : 1u;
+            float dw = side == 0u ? lat + LL : LR - lat, lit;
+            vec3 wc = window(side, floor(zg / 3.5), 0.0, lit);
+            g += wc * lit * exp(-dw / 1.6) * 0.14 * (1.0 - 0.8 * uDay);
+        }
+        puddle = smoothstep(0.56, 0.64, vn2(vec2(lat * 0.5, zg * 0.16)) * 0.7 + vn2(vec2(lat * 1.7, zg * 0.6)) * 0.3)
+               * smoothstep(0.35, 0.9, uWet) * (1.0 - uSnowGround);
+        return g * (1.0 - 0.55 * puddle * uWet);
+    }
+
+    /* what moves, along a ray from a camera camh up (or, mirrored in the
+     * road, down): the nearest vehicle or person before zmax; rgb and cover */
+    vec4 actors(float X, float Y, float camh, float sg, float zmax) {
+        float a = (X - uVpx * uAsp) / FOC, b = sg * (Y - VPY) / FOC;
+        float best = zmax;
+        vec4 r = vec4(0.0);
+        if (b <= 0.0) return r;            /* everything's lower than the window */
+        vec3 amb = mix(vec3(0.020, 0.021, 0.025), vec3(0.42, 0.42, 0.43), uDay);
+        for (int i = 0; i < uNVeh; i++) {
+            vec4 v = uVeh[i], w = uVehB[i];
+            float t0 = v.y, t1 = v.y + v.z;
+            int face = 0;
+            if (abs(a) < 1e-6) { if (abs(v.x) > w.x) continue; }
+            else {
+                float la = (v.x - w.x) / a, lb = (v.x + w.x) / a;
+                float lo = min(la, lb), hi = max(la, lb);
+                if (lo > t0) { t0 = lo; face = 1; }
+                t1 = min(t1, hi);
+            }
+            if (abs(b) < 1e-6) { if (camh < 0.0 || camh > w.y) continue; }
+            else {
+                float ha = (camh - w.y) / b, hb = camh / b;
+                float lo = min(ha, hb), hi = max(ha, hb);
+                if (lo > t0) { t0 = lo; face = 2; }
+                t1 = min(t1, hi);
+            }
+            if (t0 >= t1 || t0 <= 0.0 || t0 >= best) continue;
+            best = t0;
+            float lat = a * t0, hgt = camh - b * t0, hv = hgt / w.y;
+            bool bus = v.w > 0.5;
+            vec3 body = bus ? uBus : (w.z < 0.3 ? vec3(0.05) : w.z < 0.5 ? vec3(0.55, 0.56, 0.58) :
+                                      w.z < 0.65 ? vec3(0.75) : w.z < 0.8 ? vec3(0.42, 0.05, 0.04) : vec3(0.10, 0.16, 0.33));
+            vec3 col = body * amb * 1.6;
+            if (face == 2) col = body * amb * 2.2 + amb * 0.25;
+            float glass = 0.0, litg = 0.0;
+            if (face == 0) {
+                float u = (lat - v.x) / w.x;
+                if (bus) { glass = step(0.3, hv) * step(hv, 0.86) * step(abs(u), 0.9); litg = glass * (w.w > 0.5 ? 0.35 : 0.6); }
+                else glass = step(0.6, hv) * step(hv, 0.93) * step(abs(u), 0.82);
+            } else if (face == 1) {
+                float al = t0 - v.y;
+                if (bus) {
+                    glass = step(0.36, hv) * step(hv, 0.84) * step(0.12, fract(al / 1.8)) * step(0.5, al) * step(al, v.z - 0.4);
+                    litg = glass * 0.75;
+                    if (w.y > 3.5) col *= 1.0 - 0.6 * step(0.47, hv) * step(hv, 0.53);
+                } else glass = step(0.62, hv) * step(hv, 0.93) * step(0.8, al) * step(al, 3.6);
+                if (hgt < 0.42 && fract(al / v.z * 2.0 + 0.25) < 0.22) col *= 0.2;   /* wheels */
+            }
+            col = mix(col, mix(vec3(0.006), amb * 0.6 + vec3(0.05), uDay), glass);
+            col += litg * vec3(0.82, 0.92, 1.0) * mix(0.8, 0.35, uDay);
+            r = vec4(col, 1.0);
+        }
+        for (int i = 0; i < uNPed; i++) {
+            vec4 p = uPed[i];
+            float z = p.y;
+            if (z >= best || z <= 0.5) continue;
+            float u = a * z - p.x, h = camh - b * z - 0.03 * abs(sin(p.z));
+            if (abs(u) > 0.65 || h < 0.0 || h > 2.15) continue;
+            float st = 0.11 * sin(p.z) * (1.0 - h / 0.9);
+            bool m = h < 0.9 && (abs(u - st) < 0.07 || abs(u + st) < 0.07);
+            m = m || (h >= 0.85 && h < 1.52 && abs(u) < 0.2 + 0.06 * (1.52 - h));
+            m = m || length(vec2(u, h - 1.64)) < 0.11;
+            float um = 0.0;
+            if (p.w > 0.5) {
+                float hu = h - 1.8;
+                um = (hu > 0.0 && abs(u) < 0.6 && hu < 0.32 * (1.0 - (u / 0.6) * (u / 0.6))) ? 1.0 : 0.0;
+                m = m || (abs(u) < 0.015 && h > 1.3 && h < 1.8) || um > 0.5;
+            }
+            if (!m) continue;
+            best = z;
+            vec3 uc[6] = vec3[6](vec3(0.03), vec3(0.45, 0.04, 0.05), vec3(0.04, 0.30, 0.32),
+                                 vec3(0.06, 0.08, 0.25), vec3(0.50, 0.10, 0.35), vec3(0.55, 0.55, 0.52));
+            vec3 col = um > 0.5 ? uc[int(p.w - 1.0) % 6] * (amb * 2.2 + 0.02) : amb * vec3(0.30, 0.30, 0.34);
+            r = vec4(col, 1.0);
+        }
+        return r;
     }
 
     /* what a ray through (X, Y) meets above the ground: facade or sky */
     vec3 upper(float X, float Y) {
-        float dx = X - 0.64 * uAsp, dy = Y - VPY;
+        float dx = X - uVpx * uAsp, dy = Y - VPY;
         float zl = dx < -1e-4 ? FOC * LL / -dx : 1e9, zr = dx > 1e-4 ? FOC * LR / dx : 1e9;
         uint side = zl < zr ? 0u : 1u;
         float z = min(zl, zr);
         float hgt = CAMH - dy * z / FOC;
-        if (z < 1e8 && hgt >= 0.0 && hgt <= bh(side, z)) return facade(side, z, hgt);
+        if (z < 1e8 && hgt >= 0.0) {
+            if (z > uGap.x && z < uGap.y) {
+                /* through the junction: the next block's end wall, or the
+                 * cross street's road */
+                float lat = dx * uGap.y / FOC, h2 = CAMH - dy * uGap.y / FOC;
+                if (h2 < 0.0) {
+                    float zg = FOC * CAMH / dy, pd;
+                    return mix(ground(dx * zg / FOC, zg, pd), sky(VPY - 0.02), 1.0 - exp(-zg / 260.0));
+                }
+                if (h2 <= bh(side, uGap.y + 1.0)) return facade(side + 2u, abs(lat), h2, uGap.y);
+            } else if (hgt <= bh(side, z)) return facade(side, z, hgt, z);
+        }
         vec3 c = sky(Y);
-        /* the far end of the street, a low silhouette */
+        /* the far end of the street, a low silhouette, a few windows lit */
         float s = 0.012 + 0.045 * pow(h01(uint(floor(X * 38.0 + 400.0)), 9u, 9u), 2.0);
-        if (VPY - Y < s && dy < 0.0) c = mix(c, mix(vec3(0.022, 0.018, 0.015), vec3(0.43, 0.42, 0.40), uDay), 0.85);
+        if (VPY - Y < s && dy < 0.0) {
+            c = mix(c, mix(vec3(0.016, 0.017, 0.020), vec3(0.43, 0.43, 0.43), uDay), 0.85);
+            vec2 q = vec2(X * 260.0, Y * 300.0);
+            float w = h01(uint(floor(q.x) + 9000.0), uint(floor(q.y)), 9u);
+            if (w < 0.12 * uNight && fract(q.x) > 0.3 && fract(q.y) > 0.4) c += (w < 0.05 ? vec3(0.5, 0.6, 0.75) : vec3(0.7, 0.55, 0.4)) * 0.6;
+        }
         return c;
     }
 
     void main() {
         vec2 uv = gl_FragCoord.xy / uRes;
         float X = uv.x * uAsp, Y = 1.0 - uv.y;
-        float dx = X - 0.64 * uAsp, dy = Y - VPY;
+        float dx = X - uVpx * uAsp, dy = Y - VPY;
         vec3 c;
         float zl = dx < -1e-4 ? FOC * LL / -dx : 1e9, zr = dx > 1e-4 ? FOC * LR / dx : 1e9;
         float zf = min(zl, zr), zg = dy > 1e-4 ? FOC * CAMH / dy : 1e9;
         if (zg < zf) {
             /* the ground */
-            float lat = dx * zg / FOC;
-            bool road = lat > -7.6 && lat < 0.0;
-            vec3 g = road ? mix(vec3(0.016, 0.014, 0.012), vec3(0.16, 0.155, 0.15), uDay)
-                          : mix(vec3(0.032, 0.026, 0.021), vec3(0.25, 0.24, 0.23), uDay);
-            g = mix(g, mix(vec3(0.09, 0.08, 0.075), vec3(0.62, 0.61, 0.60), uDay), uSnowGround * (road ? 0.5 : 1.0));
-            float fwl = max(fwidth(lat), 1e-3);
-            float dash = (1.0 - smoothstep(0.08, 0.08 + fwl, abs(lat + 3.8))) * step(fract(zg / 9.0), 0.45);
-            g += dash * mix(vec3(0.05, 0.045, 0.04), vec3(0.18), uDay) * (1.0 - uSnowGround);
-            /* pools of lamplight */
-            for (int s = 0; s < 2; s++) {
-                float z0 = s == 0 ? 9.0 : 21.0, la = s == 0 ? 0.8 : -8.4;
-                float zz = z0 + 24.0 * clamp(floor((zg - z0) / 24.0 + 0.5), 0.0, 15.0);
-                float d2 = (zg - zz) * (zg - zz) + (lat - la) * (lat - la);
-                g += vec3(0.30, 0.17, 0.07) * exp(-d2 / 30.0) * uNight * 0.5;
-            }
-            /* wet: the street mirrored in it, rippled */
-            float ripple = sin(Y * 420.0 + sin(X * 37.0) * 3.0) * 0.0025 * uWet;
-            float fres = mix(0.18, 0.6, exp(-dy * 6.0));
-            c = g + upper(X + ripple, 2.0 * VPY - Y) * fres * uWet;
+            float lat = dx * zg / FOC, puddle;
+            vec3 g = ground(lat, zg, puddle);
+            /* wet: the street mirrored in it, smeared into streaks on the
+             * asphalt, sharper in the puddles */
+            float ripple = sin(Y * 420.0 + sin(X * 37.0) * 3.0) * 0.0025 * uWet * (1.0 - 0.7 * puddle);
+            float sm = (h01(uint(gl_FragCoord.y * 0.7), uint(X * 90.0), 5u) - 0.5) * 0.05 * dy * (1.0 - puddle);
+            float fres = mix(0.18, 0.6, exp(-dy * 6.0)) * mix(0.55, 1.15, puddle);
+            vec3 refl = upper(X + ripple, 2.0 * VPY - Y + sm);
+            vec4 ra = actors(X + ripple, Y, -CAMH, -1.0, 1e9);
+            refl = mix(refl, ra.rgb, ra.a);
+            c = g + refl * fres * uWet;
             c = mix(c, sky(VPY - 0.02), 1.0 - exp(-zg / 260.0));
         } else {
             c = upper(X, Y);
         }
+        vec4 act = actors(X, Y, CAMH, 1.0, min(zf, zg));
+        c = mix(c, act.rgb, act.a);
         o = vec4(c, 1.0);
     });
 
-/* lights, instanced: a bokeh disc or a sharp point, or a wet-road streak */
+/* lights, instanced: a bokeh disc or a sharp point, a wet-road streak, a
+ * snowflake, or a rectangle (a sign, a window) */
 static const char *VS_LIGHT = "#version 330 core\n" GLSL(
-    layout(location = 0) in vec4 a0;   /* x, y (px, y down), bokeh r, sharp r */
+    layout(location = 0) in vec4 a0;   /* x, y (px, y down), bokeh r, sharp r (streak: half-width, half-length; rect: half-size) */
     layout(location = 1) in vec4 a1;   /* rgb, shape */
     uniform vec2 uScreen;
-    uniform float uBokeh;
+    uniform float uBokeh, uRectR;
     out vec2 vP;
     out vec3 vCol;
     out float vShape;
     out vec2 vC;
+    out vec2 vSz;
+    out float vR;
     void main() {
         vec2 c = vec2(gl_VertexID & 1, gl_VertexID >> 1) * 2.0 - 1.0;
-        float r = uBokeh > 0.5 ? a0.z : a0.w;
-        vec2 ext = vec2(r, a1.w > 0.5 && a1.w < 1.5 ? r * (uBokeh > 0.5 ? 2.2 : 4.0) : r);
-        if (a1.w > 0.5 && a1.w < 1.5) ext.x *= 0.8;
-        vec2 p = a0.xy + c * ext + (a1.w > 0.5 && a1.w < 1.5 ? vec2(0.0, ext.y * 0.6) : vec2(0.0));
+        float sh = a1.w;
+        bool bok = uBokeh > 0.5;
+        vec2 ext, off = vec2(0.0);
+        vCol = a1.rgb;
+        vSz = vec2(0.0);
+        vR = 1.0;
+        if (sh < 0.5) {
+            /* bright ones bloom past their disc */
+            float r = bok ? a0.z : a0.w;
+            vR = bok && max(a1.r, max(a1.g, a1.b)) > 0.45 ? 1.7 : 1.0;
+            ext = vec2(r * vR);
+            vP = c * vR;
+            vCol *= bok ? 1.0 : 2.6;
+        } else if (sh < 1.5) {
+            ext = vec2(bok ? a0.z : max(a0.z * 0.3, 1.5), a0.w * (bok ? 1.0 : 0.85));
+            off = vec2(0.0, ext.y * 0.4);
+            vP = c;
+            vCol *= bok ? 1.0 : 1.8;
+        } else if (sh < 2.5) {
+            ext = vec2(bok ? a0.z : a0.w);
+            vP = c;
+        } else {
+            /* a rectangle seen out of focus is itself, rounded by the disc */
+            float R = bok ? uRectR : 0.7;
+            vSz = a0.zw;
+            vR = R;
+            ext = a0.zw + R + 1.0;
+            if (sh > 3.5 && !bok) ext = vec2(0.0);
+            vP = c * ext;
+            if (bok) vCol *= min(2.0 * a0.z, 1.8 * R) * min(2.0 * a0.w, 1.8 * R) / (2.6 * R * R);
+        }
+        vec2 p = a0.xy + c * ext + off;
         gl_Position = vec4(p.x / uScreen.x * 2.0 - 1.0, 1.0 - p.y / uScreen.y * 2.0, 0.0, 1.0);
-        vP = c;
-        vShape = a1.w;
+        vShape = sh;
         vC = a0.xy / uScreen * 2.0 - 1.0;
-        /* the same light spread over a bigger disc is dimmer */
-        vCol = a1.rgb * (uBokeh > 0.5 ? 1.0 : 2.6);
     });
 static const char *FS_LIGHT = "#version 330 core\n" GLSL(
     in vec2 vP;
     in vec3 vCol;
     in float vShape;
     in vec2 vC;
+    in vec2 vSz;
+    in float vR;
     uniform float uBokeh, uEdge;
     out vec4 o;
+    float sdBox(vec2 p, vec2 b) { vec2 d = abs(p) - b; return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0); }
     void main() {
-        float d = length(vP), v;
+        float v;
         if (vShape < 0.5) {
+            float d = length(vP);
             if (uBokeh > 0.5) {
-                /* a disc with a brighter rim, clipped into a cat's eye
-                 * towards the corners */
+                /* a disc with a brighter rim, pinched into a cat's eye
+                 * towards the corners, and a glow round the bright ones */
                 v = 1.0 - smoothstep(1.0 - uEdge, 1.0, d);
-                vec2 q = vP + vC * vec2(1.0, -1.0) * 0.45;
-                v *= 1.0 - smoothstep(1.22 - uEdge, 1.22, length(q));
+                vec2 q = vP - vC * 0.34;
+                v *= 1.0 - smoothstep(1.03 - uEdge, 1.03, length(q));
                 v *= 0.8 + 0.3 * smoothstep(0.55, 0.97, d) + 0.03 * sin(d * 23.0);
+                if (vR > 1.0) v += 0.16 * exp(-max(d - 0.9, 0.0) * 4.5) * (1.0 - smoothstep(1.25, 1.7, d));
             } else {
-                v = exp(-d * d * 7.0) + 0.12 * exp(-d * d * 1.5);
+                v = exp(-d * d * 7.0) + 0.12 * exp(-d * d * 1.5) * (1.0 - smoothstep(0.5, 1.0, d));
             }
         } else if (vShape < 1.5) {
-            /* reflection: a soft vertical streak, broken by ripples */
+            /* reflection: a long soft streak, brightest near its source,
+             * broken into bands by the ripples */
             vec2 p = vP;
-            v = exp(-p.x * p.x * 4.0 - (p.y + 0.2) * (p.y + 0.2) * 1.6) * (0.75 + 0.25 * sin(p.y * 9.0 + p.x * 3.0));
-        } else {
+            float y = p.y + 0.6;
+            v = exp(-p.x * p.x * 3.0) * exp(-y * y * 1.1) * (1.0 - smoothstep(0.8, 1.0, abs(p.y)));
+            v *= 0.72 + 0.28 * sin(p.y * 21.0 + vC.x * 40.0) * sin(p.y * 7.0 + vC.y * 30.0);
+        } else if (vShape < 2.5) {
+            float d = length(vP);
             v = exp(-d * d * 3.5);
+        } else {
+            float sd = sdBox(vP, vSz);
+            if (uBokeh > 0.5) {
+                float dn = sd / vR;
+                v = 1.0 - smoothstep(vShape > 3.5 ? 0.35 : 1.0 - uEdge, 1.0, dn);
+                v *= 1.0 - smoothstep(1.03 - uEdge, 1.03, sdBox(vP - vC * 0.34 * vR, vSz) / vR);
+                v *= 0.85 + 0.2 * smoothstep(0.6, 0.97, dn);
+            } else {
+                /* a sign: a frame and rows of letters along its length */
+                v = 1.0 - smoothstep(-0.5, 0.5, sd);
+                vec2 u = vP / max(vSz, vec2(1.0));
+                bool wide = vSz.x > vSz.y;
+                vec2 l = wide ? u : u.yx;
+                float n = max(2.0, floor(1.1 * max(vSz.x, vSz.y) / max(min(vSz.x, vSz.y), 1.0)));
+                float cx = (l.x * 0.5 + 0.5) * n, cy = l.y;
+                float k = fract(sin(floor(cx) * 91.7 + vCol.r * 13.0) * 4375.5);
+                float fx = fract(cx);
+                float g = step(0.2, fx) * step(fx, 0.8) * step(abs(cy), 0.6);
+                float stroke = max(step(abs(fx - 0.25), 0.07) + step(abs(fx - 0.75), 0.07) * step(0.3, k),
+                                   step(abs(abs(cy) - 0.5 * step(0.5, k)), 0.09) + step(abs(cy - 0.0), 0.08) * step(k, 0.6));
+                float frame = step(0.82, max(abs(u.x), abs(u.y)));
+                v *= 0.25 + 0.75 * max(frame, min(stroke, 1.0) * g);
+            }
         }
         if (v < 0.002) discard;
         o = vec4(vCol * v, 1.0);
@@ -1362,7 +1811,8 @@ static const char *FS_AIR = "#version 330 core\n" GLSL(
     uniform vec2 uBoltP[18];
     layout(location = 0) out vec4 oS;
     layout(location = 1) out vec4 oA;
-    const float CAMH = 6.0, FOC = 0.9, VPX = 0.64, VPY = 0.53, LL = 11.0, LR = 9.5;
+    uniform float uVpx;
+    const float CAMH = 6.0, FOC = 0.9, VPY = 0.53, LL = 11.0, LR = 9.5;
 
     uint hash3(uint a, uint b, uint c) {
         uint h = a * 0x8da6b343u ^ b * 0xd8163841u ^ c * 0xcb1ab31fu ^ uSeed;
@@ -1375,7 +1825,7 @@ static const char *FS_AIR = "#version 330 core\n" GLSL(
     /* how far away the street is through (X, Y): 1e9 for sky; the height
      * there and, on the ground, how far across */
     float depth(float X, float Y, out float hgt, out float lat) {
-        float dx = X - VPX * uAsp, dy = Y - VPY;
+        float dx = X - uVpx * uAsp, dy = Y - VPY;
         float zl = dx < -1e-4 ? FOC * LL / -dx : 1e9, zr = dx > 1e-4 ? FOC * LR / dx : 1e9;
         float zf = min(zl, zr), zg = dy > 1e-4 ? FOC * CAMH / dy : 1e9;
         lat = dx * zg / FOC;
@@ -1471,7 +1921,7 @@ static const char *FS_AIR = "#version 330 core\n" GLSL(
             /* low cloud, lit from below by the town, moving on the wind */
             float t = max(VPY - Y, 0.004);
             float zc = 140.0 / t;
-            vec2 cp = vec2((X - VPX * uAsp) * zc * 0.0016 + uCurtain * 0.35, zc * 0.0022 + uT * 0.0015);
+            vec2 cp = vec2((X - uVpx * uAsp) * zc * 0.0016 + uCurtain * 0.35, zc * 0.0022 + uT * 0.0015);
             float n = texture(uN, cp).r * 0.65 + texture(uN, cp * 2.3 + 0.37).r * 0.35;
             float cl = smoothstep(0.62 - 0.45 * uCloud, 0.95 - 0.3 * uCloud, n) * (0.35 + 0.65 * uCloud);
             vec3 under = mix(vec3(0.075, 0.078, 0.092), vec3(0.62, 0.63, 0.66), uDay) + exp(-t * 4.0) * mix(vec3(0.06, 0.045, 0.04), vec3(0.0), uDay);
@@ -1572,6 +2022,7 @@ static void air_pass(float t, float day) {
     glBindTexture(GL_TEXTURE_2D, tB);
     glUniform1i(U(p_air, "uB"), 0);
     glUniform1i(U(p_air, "uN"), 1);
+    glUniform1f(U(p_air, "uVpx"), vpx);
     float rain = w->rain, snow = w->snow * smooth(0.05f, 0.2f, w->rain);
     glUniform2f(U(p_air, "uRes"), (float)hw(), (float)hh());
     glUniform1f(U(p_air, "uAsp"), (float)W / H);
@@ -1665,6 +2116,28 @@ static void tq(int i) {
     if (i == 6) for (int k = 0; k < 6; k++) { GLuint64 ns; glGetQueryObjectui64v(dbg_q[k], GL_QUERY_RESULT, &ns); dbg_pass[k] += ns * 1e-6; }
 }
 
+/* the street's layout and what's moving in it, for the street pass */
+static void street_uniforms(float t, float night, float rainy) {
+    traffic(t, night, rainy);
+    glUniform1f(U(p_street, "uVpx"), vpx);
+    glUniform1f(U(p_street, "uLampLed"), lamp_led);
+    glUniform2f(U(p_street, "uGap"), gap0, gap1);
+    glUniform3f(U(p_street, "uBus"), bus_col[0], bus_col[1], bus_col[2]);
+    float a[MAXV * 4], b[MAXV * 4];
+    for (int i = 0; i < nveh; i++) {
+        const Veh *v = &veh[i];
+        a[i * 4] = v->lat; a[i * 4 + 1] = v->z; a[i * 4 + 2] = v->len; a[i * 4 + 3] = v->bus;
+        b[i * 4] = v->hw; b[i * 4 + 1] = v->h; b[i * 4 + 2] = v->col; b[i * 4 + 3] = v->away;
+    }
+    glUniform1i(U(p_street, "uNVeh"), nveh);
+    if (nveh) {
+        glUniform4fv(U(p_street, "uVeh"), nveh, a);
+        glUniform4fv(U(p_street, "uVehB"), nveh, b);
+    }
+    glUniform1i(U(p_street, "uNPed"), nped);
+    if (nped) glUniform4fv(U(p_street, "uPed"), nped, peds);
+}
+
 static void render(GLuint target) {
     const Wx *w = &wx_cur;
     float day = sky_day, night = 1 - day;
@@ -1692,6 +2165,7 @@ static void render(GLuint target) {
     glUniform1f(U(p_street, "uSnowGround"), snowg);
     glUniform1f(U(p_street, "uLitP"), 0.06f + 0.3f * smooth(0.2f, 0.9f, night));
     glUniform1ui(U(p_street, "uSeed"), scene_seed);
+    street_uniforms(t, night, rainy);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     /* its lights, as points there and as bokeh discs */
@@ -1711,6 +2185,7 @@ static void render(GLuint target) {
     glClear(GL_COLOR_BUFFER_BIT);
     glUniform1f(U(p_light, "uBokeh"), 1);
     glUniform1f(U(p_light, "uEdge"), 2.5f / (bokeh_r * 0.5f));
+    glUniform1f(U(p_light, "uRectR"), bokeh_r);
     glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, nl);
     glDisable(GL_BLEND);
     glActiveTexture(GL_TEXTURE0);
