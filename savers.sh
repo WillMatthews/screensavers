@@ -3,7 +3,7 @@
 # in git, so a saver nobody has built here yet must never be picked: a pick
 # that can't start leaves swaylock-plugin re-running it over a blank screen.
 
-SAVERS=(pipes maze flightsim stir splitflap gauges marbling contours plotter rain clockwork nightsky)
+SAVERS=(pipes maze flightsim stir splitflap gauges marbling contours plotter rain clockwork nightsky steam)
 
 # savers that take --epoch/--layout/--output and treat all outputs as one wall
 SPANNING=(flightsim stir nightsky marbling splitflap gauges clockwork)
