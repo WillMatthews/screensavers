@@ -6,7 +6,7 @@
  * ("This is Will's computer. overtime is locked. Away since 14:32. ..."),
  * set solid and word-wrapped, with live details (how long the screen has been
  * locked, the time, battery, uptime) refreshed every minute. The name, the
- * host and the word "away" are set in gold. --text FILE replaces the
+ * host and the word "away" are set in the accent. --text FILE replaces the
  * messages with your own (same $tokens and *gold* markup, see MSGS below).
  *
  * Each frame every cell looks up the letter it shows by turning its own
@@ -22,9 +22,14 @@
  * it starts at half that (--speed 1 for theirs) and swings between winding one way and the other
  * (--twist MAX radians), so the page comes back to readable now and then.
  *
- * On top: glowing type, warming to gold towards the fast-spinning middle
- * and sinking into the dark at the edges, phosphor trails, and a curved
- * monitor face with scanlines (--plain for none of that).
+ * On top: glowing type, warming to the accent towards the fast-spinning
+ * middle and sinking into the dark at the edges, phosphor trails, and a
+ * curved monitor face with scanlines (--plain for none of that).
+ *
+ * Colours come from one of a few palettes, picked from the seed so lock
+ * sessions differ, or named with --palette: brass (cream and gold on brown),
+ * paper (soft grey and white on neutral black), phosphor (green P1 CRT),
+ * amber (P3 amber terminal) or ice (blue-white and cyan on blue-black).
  *
  * Over the middle, not twisted, a big HH:MM made of its own digits (like an
  * old banner printout) fades in a few seconds after start, its letters
@@ -73,6 +78,7 @@ static float opt_twist = 5.0f;         /* the twist swings between +-this (radia
 static const char *opt_font = "JetBrainsMono Nerd Font Mono,monospace:style=Medium";
 static const char *opt_name = "Will";
 static const char *opt_text;          /* file of messages; default MSGS */
+static const char *opt_palette;       /* --palette NAME; default from the seed */
 static uint32_t opt_seed;
 static const char *opt_shot;
 static double opt_at = 25;             /* --shot: the frame this many seconds in */
@@ -580,7 +586,7 @@ static const char *FS = "#version 330 core\n" GLSL(
             float a = glyph(v & 127, l);
             if (ov != 0) a *= 1.0 - uClockA;                 /* make way for the clock */
             /* depth: towards the fast-spinning middle the type warms to
-             * gold and brightens, out at the edges it sinks into the dark */
+             * the accent and brightens, out at the edges it sinks into the dark */
             float rr = length(vec2(p, c));
             float lift = uDepth * (1.0 - smoothstep(0.0, 0.8, rr));
             float fade = mix(1.0, 0.42, uDepth * smoothstep(0.3, 1.35, rr));
@@ -721,6 +727,31 @@ static void post_size(void) {
     for (int i = 0; i < 2; i++) fbo_acc[i] = mk_target(&tex_acc[i], 1);
 }
 
+/* bg, ink (the type, set at 62% over bg), accent (the keywords at 85%, and
+ * what the middle warms towards), clock, caption */
+static const struct palette { const char *name, *bg, *ink, *accent, *clock, *caption; } palettes[] = {
+    {"brass",    "#17120E", "#EFE3CE", "#FFC332", "#FFC332", "#EFE3CE"},   /* Aged Brass */
+    {"paper",    "#0F0F10", "#B4B4B2", "#FFFFFF", "#FFFFFF", "#9C9C9A"},   /* Midjourney-ish, neutral */
+    {"phosphor", "#07110A", "#33C85E", "#C2FFD0", "#9CFFB4", "#3FCF6A"},   /* P1 green CRT */
+    {"amber",    "#120A03", "#D47A10", "#FFD48C", "#FFB040", "#D98A20"},   /* P3 amber terminal */
+    {"ice",      "#0A0F18", "#C8D8EC", "#5FE0FF", "#7FE8FF", "#B0C4DC"},   /* blue-white and cyan */
+};
+#define NPAL ((int)(sizeof palettes / sizeof palettes[0]))
+static int pal;
+
+/* --palette NAME, else from the seed (hashed, so the message order the
+ * seed also drives isn't tied to the palette) */
+static void pick_palette(void) {
+    if (opt_palette) {
+        for (pal = 0; pal < NPAL; pal++) if (!strcmp(palettes[pal].name, opt_palette)) return;
+        fprintf(stderr, "stir: no palette \"%s\" (brass, paper, phosphor, amber, ice)\n", opt_palette);
+        exit(1);
+    }
+    uint32_t h = opt_seed * 2654435761u;
+    h ^= h >> 15;
+    pal = (int)(h % NPAL);
+}
+
 static void gl_init(void) {
     prog = mk_prog(FS);
     prog_trail = mk_prog(FS_TRAIL);
@@ -732,17 +763,19 @@ static void gl_init(void) {
     tex_page = mk_tex(cols, rows, NULL);
     tex_clock = mk_tex(cols, rows, NULL);
 
-    /* Aged Brass: cream type on near-black brown, the keywords and clock in gold */
-    float bg[3], cream[3], gold[3], c[3];
-    hex("#17120E", bg); hex("#EFE3CE", cream); hex("#FFC332", gold);
+    /* the palette: type on the background, the keywords (uGold, also what
+     * the middle warms towards), the clock, and the caption under it */
+    const struct palette *pl = &palettes[pal];
+    float bg[3], ink[3], acc[3], clk[3], cap[3], c[3];
+    hex(pl->bg, bg); hex(pl->ink, ink); hex(pl->accent, acc); hex(pl->clock, clk); hex(pl->caption, cap);
     glUseProgram(prog);
     glUniform3fv(glGetUniformLocation(prog, "uBg"), 1, bg);
-    for (int i = 0; i < 3; i++) c[i] = cream[i] * 0.62f + bg[i] * 0.38f;
+    for (int i = 0; i < 3; i++) c[i] = ink[i] * 0.62f + bg[i] * 0.38f;
     glUniform3fv(glGetUniformLocation(prog, "uFg"), 1, c);
-    for (int i = 0; i < 3; i++) c[i] = gold[i] * 0.85f + bg[i] * 0.15f;
+    for (int i = 0; i < 3; i++) c[i] = acc[i] * 0.85f + bg[i] * 0.15f;
     glUniform3fv(glGetUniformLocation(prog, "uGold"), 1, c);
-    glUniform3fv(glGetUniformLocation(prog, "uClockCol"), 1, gold);
-    glUniform3fv(glGetUniformLocation(prog, "uCaption"), 1, cream);
+    glUniform3fv(glGetUniformLocation(prog, "uClockCol"), 1, clk);
+    glUniform3fv(glGetUniformLocation(prog, "uCaption"), 1, cap);
     glUniform1i(glGetUniformLocation(prog, "uAtlas"), 0);
     glUniform1i(glGetUniformLocation(prog, "uPage"), 1);
     glUniform1i(glGetUniformLocation(prog, "uClock"), 2);
@@ -910,7 +943,8 @@ static void usage(void) {
     fprintf(stderr,
         "usage: stir [--window | --root | --layer] [--cell PX] [--speed X] [--twist RAD] [--seed N]\n"
         "            [--name NAME] [--text FILE] [--no-clock] [--plain] [--font FONTCONFIG-PATTERN]\n"
-        "            [--shot FILE.ppm [--size WxH] [--at SECONDS]]\n");
+        "            [--palette brass|paper|phosphor|amber|ice] [--shot FILE.ppm [--size WxH] [--at SECONDS]]\n"
+        "  --palette  colours; default: picked from the seed, so each session differs\n");
     exit(1);
 }
 
@@ -940,6 +974,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-font") && i + 1 < argc) opt_font = argv[++i];
         else if (!strcmp(a, "-text") && i + 1 < argc) opt_text = argv[++i];
         else if (!strcmp(a, "-name") && i + 1 < argc) opt_name = argv[++i];
+        else if (!strcmp(a, "-palette") && i + 1 < argc) opt_palette = argv[++i];
         else if (!strcmp(a, "-no-clock")) opt_clock = 0;
         else if (!strcmp(a, "-plain")) opt_plain = 1;
         else if (!strcmp(a, "-shot") && i + 1 < argc) opt_shot = argv[++i];
@@ -950,6 +985,7 @@ int main(int argc, char **argv) {
     if (opt_twist <= 0) usage();
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
     rng = opt_seed | 1;
+    pick_palette();
 
     Display *dpy = NULL;
     Window root = 0, win = 0;
