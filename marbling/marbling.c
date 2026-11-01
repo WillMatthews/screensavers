@@ -32,6 +32,10 @@
  * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen,
  * --bench N to time N frames offscreen.
  *
+ * The inks come from one of several palettes after traditional marbled
+ * papers (brass, ebru, florentine, sea, ink), picked from the seed for the
+ * whole session, or fixed with --palette NAME.
+ *
  * Keys (window mode): q / Escape quit.
  */
 #define _DEFAULT_SOURCE
@@ -84,26 +88,51 @@ static uint32_t mix32(uint32_t x) {
     return x ? x : 1;
 }
 
-/* ---- inks: Aged Brass ---- */
-enum { CREAM, GOLD, GOLD2, AMBER, RUST, TERRA, SAGE, BROWN, NINK };
-static const char *INK_HEX[NINK] = {"#EFE3CE", "#FFC332", "#D6A12A", "#E9994A", "#C66B1B", "#A53C2C", "#8FA672", "#2A211B"};
-static const char *BATH_DARK = "#1B1511", *BATH_CREAM = "#EADCC3";
+/* ---- inks: a palette per session, picked from the seed ----
+ * Each palette has eight inks, two baths (a dark one and a pale size), a
+ * paper and harmonious ink sets for each bath. The first ink of a set is
+ * the one that ends up on top and, with the second, makes the stones of
+ * "stone", so those two always stand off the bath and from each other. */
+#define NINK 8
+typedef struct {
+    const char *name;
+    const char *ink[NINK];
+    const char *bath_dark, *bath_cream;
+    float paper[3];
+    int dark[5][5], cream[5][5];
+} Palette;
 
-/* harmonious sets; the first ink is the one that ends up on top */
-static const int SET_DARK[][5] = {
-    {CREAM, GOLD, TERRA, SAGE, -1},
-    {AMBER, CREAM, TERRA, SAGE, -1},
-    {GOLD, TERRA, CREAM, RUST, -1},
-    {CREAM, GOLD2, TERRA, -1, -1},
-    {GOLD, CREAM, SAGE, -1, -1},
+static const Palette PALETTES[] = {
+    /* Aged Brass: 0 cream 1 gold 2 gold2 3 amber 4 rust 5 terra 6 sage 7 brown */
+    {"brass", {"#EFE3CE", "#FFC332", "#D6A12A", "#E9994A", "#C66B1B", "#A53C2C", "#8FA672", "#2A211B"},
+     "#1B1511", "#EADCC3", {0.957f, 0.925f, 0.866f},
+     {{0, 1, 5, 6, -1}, {3, 0, 5, 6, -1}, {1, 5, 0, 4, -1}, {0, 2, 5, -1, -1}, {1, 0, 6, -1, -1}},
+     {{5, 7, 2, 6, -1}, {7, 4, 6, -1, -1}, {7, 5, 2, -1, -1}, {6, 7, 4, 1, -1}, {4, 7, 6, 5, -1}}},
+    /* Turkish ebru: 0 white 1 indigo 2 madder 3 ochre 4 deep red 5 sky 6 rose 7 ink black */
+    {"ebru", {"#F3ECDD", "#2C3D78", "#B3322B", "#D9A43C", "#6E1C22", "#7E9CC6", "#C26C60", "#1C1B26"},
+     "#121423", "#EEE2C8", {0.957f, 0.93f, 0.875f},
+     {{0, 2, 3, 5, -1}, {3, 0, 2, 5, -1}, {0, 3, 5, 2, -1}, {2, 0, 3, 6, -1}, {5, 3, 0, 2, -1}},
+     {{1, 2, 3, -1, -1}, {2, 1, 3, 7, -1}, {1, 3, 4, 5, -1}, {7, 2, 3, 1, -1}, {2, 1, 5, 3, -1}}},
+    /* Florentine end-papers: 0 white 1 navy 2 Prussian 3 red 4 sky 5 pale blue 6 deep red 7 black */
+    {"florentine", {"#F2EFE7", "#1B2A4E", "#1E5A8C", "#C2362E", "#86A9CC", "#C9D6E2", "#6C1A20", "#121620"},
+     "#0E1424", "#EDE8DC", {0.96f, 0.945f, 0.91f},
+     {{0, 3, 4, 2, -1}, {4, 0, 3, -1, -1}, {3, 0, 2, 4, -1}, {0, 4, 6, -1, -1}, {5, 3, 2, 0, -1}},
+     {{1, 3, 2, -1, -1}, {2, 3, 1, 4, -1}, {3, 1, 4, -1, -1}, {1, 2, 6, 4, -1}, {3, 7, 2, 4, -1}}},
+    /* sea: 0 white 1 teal 2 navy 3 sand 4 coral 5 aqua 6 deep teal 7 pale sand */
+    {"sea", {"#F1EEE5", "#2C8580", "#1C3052", "#D8C397", "#E07A5F", "#86C2B8", "#164A50", "#EBDDBE"},
+     "#0B1A1F", "#E9E3D3", {0.955f, 0.945f, 0.915f},
+     {{0, 1, 3, 5, -1}, {5, 0, 3, 4, -1}, {3, 1, 0, 5, -1}, {0, 5, 1, -1, -1}, {7, 1, 5, 4, -1}},
+     {{1, 2, 3, -1, -1}, {2, 1, 5, 4, -1}, {6, 3, 2, 5, -1}, {1, 2, 4, 3, -1}, {2, 5, 6, 3, -1}}},
+    /* ink (suminagashi): 0 off-white 1 pale grey 2 grey 3 charcoal 4 black 5 deep red 6 mid grey 7 dark grey */
+    {"ink", {"#EEECE6", "#B9B7B1", "#7C7A76", "#3C3B39", "#151515", "#8E1D1D", "#9D9A93", "#55524D"},
+     "#121212", "#ECE9E2", {0.95f, 0.945f, 0.93f},
+     /* the red only ever a vein, in two sets of five, so it stays an accent */
+     {{0, 2, 1, 5, -1}, {1, 0, 3, -1, -1}, {0, 6, 3, -1, -1}, {6, 0, 3, -1, -1}, {0, 1, 7, 5, -1}},
+     {{4, 2, 1, 5, -1}, {3, 4, 1, -1, -1}, {4, 7, 1, 5, -1}, {2, 4, 3, -1, -1}, {3, 6, 4, -1, -1}}},
 };
-static const int SET_CREAM[][5] = {
-    {TERRA, BROWN, GOLD2, SAGE, -1},
-    {BROWN, RUST, SAGE, -1, -1},
-    {BROWN, TERRA, GOLD2, -1, -1},
-    {SAGE, BROWN, RUST, GOLD, -1},
-    {RUST, BROWN, SAGE, TERRA, -1},
-};
+#define NPAL ((int)(sizeof PALETTES / sizeof *PALETTES))
+static const Palette *P;               /* this session's */
+static int opt_palette = -1;
 
 static void hex(const char *h, float *rgb) {
     unsigned v = (unsigned)strtoul(h + 1, NULL, 16);
@@ -155,7 +184,7 @@ static void add_drop(float x, float y, float r, int ink, float dur) {
     Op *o = add_op(OP_DROP, dur, dur * 0.2f + frange(0.0f, 0.12f));
     if (!o) return;
     float c[3];
-    hex(INK_HEX[ink], c);
+    hex(P->ink[ink], c);
     float tone = frange(0.95f, 1.04f), lum = 0.3f * c[0] + 0.55f * c[1] + 0.15f * c[2];
     for (int i = 0; i < 3; i++) c[i] = lum + (c[i] - lum) * 0.93f;   /* real inks are a touch muted */
     o->v[0] = x; o->v[1] = y; o->v[2] = r; o->v[3] = frange(0.03f, 0.07f);
@@ -265,9 +294,9 @@ static void gen_recipe(int idx, float aspect, Recipe *out) {
     R->kind = kind_of(idx);
     R->dark = dark_of(idx);
     R->aspect = A_ = aspect;
-    hex(R->dark ? BATH_DARK : BATH_CREAM, R->bath);
+    hex(R->dark ? P->bath_dark : P->bath_cream, R->bath);
     rng = mix32(opt_seed ^ (uint32_t)idx * 0x9E3779B9U);
-    const int *set = R->dark ? SET_DARK[irange(0, 4)] : SET_CREAM[irange(0, 4)];
+    const int *set = R->dark ? P->dark[irange(0, 4)] : P->cream[irange(0, 4)];
     for (ninks = 0; ninks < 5 && set[ninks] >= 0; ninks++) inks[ninks] = set[ninks];
     R->pdir = frange(0, 6.2831853f);
     gen_t = idx == 0 ? 0.6 : 0.8;      /* after the paper's gone */
@@ -466,6 +495,7 @@ static const char *FS_SHOW = GLSL(
     uniform float uProg;        /* its progress, 0..1 */
     uniform vec3 uNext;         /* the next recipe's bath */
     uniform vec4 uPaper;        /* phase (0 none, 1 laying, 2 down, 3 lifting), its progress, soak, - */
+    uniform vec3 uPaperCol;
     uniform vec2 uPdir;
     out vec4 o;
 
@@ -562,7 +592,7 @@ static const char *FS_SHOW = GLSL(
             float lifting = uPaper.x > 2.5 ? 1.0 : 0.0;
             /* the sheet's shadow on the water, just off its edge */
             if (under < 0.0 && uPaper.x != 2.0) col *= 1.0 - 0.38 * exp(under * 26.0);
-            vec3 paper = vec3(0.957, 0.925, 0.866) * (1.0 + 0.07 * fibre(gl_FragCoord.xy, vec2(1.1, 0.7)) + 0.04 * (sw - 0.5));
+            vec3 paper = uPaperCol * (1.0 + 0.07 * fibre(gl_FragCoord.xy, vec2(1.1, 0.7)) + 0.04 * (sw - 0.5));
             vec3 print = cache(p);
             paper *= mix(vec3(1.0), mix(print, vec3(1.0), 0.3) * 1.06, uPaper.z * 0.38);
             /* the edge, bent up off the water: a light crease, then the curl */
@@ -776,7 +806,7 @@ static void render(double t, GLuint target) {
         paper[2] = ease((float)(pt / (COVER + REST + 0.4)));
     }
     float next[3];
-    hex(dark_of(idx + 1) ? BATH_DARK : BATH_CREAM, next);
+    hex(dark_of(idx + 1) ? P->bath_dark : P->bath_cream, next);
 
     glBindFramebuffer(GL_FRAMEBUFFER, target);
     glViewport(0, 0, W, H);
@@ -794,6 +824,7 @@ static void render(double t, GLuint target) {
     glUniform1f(glGetUniformLocation(prog_show, "uProg"), prog);
     glUniform3fv(glGetUniformLocation(prog_show, "uNext"), 1, next);
     glUniform4fv(glGetUniformLocation(prog_show, "uPaper"), 1, paper);
+    glUniform3fv(glGetUniformLocation(prog_show, "uPaperCol"), 1, P->paper);
     glUniform2f(glGetUniformLocation(prog_show, "uPdir"), cosf(rec.pdir), sinf(rec.pdir));
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
@@ -885,8 +916,10 @@ static int wl_poll(void) {
 static void usage(void) {
     fprintf(stderr,
         "usage: marbling [--window | --root | --layer] [--seed N] [--recipe NAME]\n"
+        "                [--palette NAME]\n"
         "                [--shot FILE.ppm | --bench N] [--size WxH] [--at SECONDS]\n"
-        "recipes: stone ripple nonpareil chevron bouquet whirl\n");
+        "recipes: stone ripple nonpareil chevron bouquet whirl\n"
+        "palettes: brass ebru florentine sea ink (default: from the seed)\n");
     exit(1);
 }
 
@@ -921,6 +954,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-window")) opt_root = 0;
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-palette") && i + 1 < argc) {
+            const char *n = argv[++i];
+            for (int k = 0; k < NPAL; k++) if (!strcmp(n, PALETTES[k].name)) opt_palette = k;
+            if (opt_palette < 0) usage();
+        }
         else if (!strcmp(a, "-recipe") && i + 1 < argc) {
             const char *n = argv[++i];
             for (int k = 0; k < NKIND; k++) if (!strcmp(n, KIND_NAME[k])) opt_recipe = k;
@@ -934,6 +972,7 @@ int main(int argc, char **argv) {
     }
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
     if (!opt_seed) opt_seed = 1;
+    P = &PALETTES[opt_palette >= 0 ? opt_palette : (int)(mix32(opt_seed * 2246822519U ^ 0x9a1e77eU) % NPAL)];
     int offline = opt_shot || opt_bench > 0;
 
     Display *dpy = NULL;
