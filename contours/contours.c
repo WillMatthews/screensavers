@@ -17,12 +17,17 @@
  * Every pixel then draws, from the height and its central differences:
  *   - contours every --interval metres, index contours every fifth, as
  *     constant-width anti-aliased lines (distance to the nearest level =
- *     |fract(h / I) - 1/2| * I / |grad h|), thin ones fading where they crowd;
- *   - a soft hillshade from the sun, which swings across the north;
+ *     |fract(h / I) - 1/2| * I / |grad h|), thin ones narrowing then fading
+ *     where they crowd; lit Tanaka-fashion, brighter and bolder on slopes
+ *     facing the sun, darker and finer in shade, with a little ink spread;
+ *     ticks on the downhill side of contours closing round a hollow;
+ *   - a soft multi-directional hillshade over a fine and a broad normal,
+ *     the sun swinging across the north, hollows shadowed and crests lifted, on a
+ *     hypsometric tint from the palette's paper, woodland and highlight;
  *   - water below datum (which rises and falls a few metres, so the shores
  *     breathe), with engraved waterlines following the shore outwards;
  *   - rivers along their valleys, widening downstream; woodland stipple;
- *   - a faint kilometre grid.
+ *   - a faint kilometre grid; and paper grain over it all.
  * On the CPU the same terrain finds summits (spot heights with triangles)
  * and straight stretches of index contour to carry their height, set along
  * the line, readable side up, knocking a gap in the lines beneath. Round it:
@@ -732,6 +737,7 @@ static const char *FS_BAKE = "#version 330 core\n" NOISE_GLSL GLSL(
 
 static const char *FS_MAP = "#version 330 core\n" GLSL(
     uniform sampler2D uH, uAux, uMask;
+    uniform sampler2D uNoise;   /* 256x256 RGBA of independent noise, repeating */
     uniform vec2 uRes, uN;
     uniform vec2 uOrgT;     /* world px of screen (0, 0), mod the texture size */
     uniform vec2 uOrgS;     /* ditto, mod the stipple period */
@@ -772,6 +778,81 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
         return col;
     }
 
+    /* ---- the print: relief, hypsometric tint, illuminated contours, grain.
+     * Everything here is driven by the palette's paper / hi / lo / wood /
+     * line colours, so any palette gets the same treatment. ---- */
+    /* noise from uNoise, one texel per k * uS px of the world-anchored
+     * stipple frame; k divides 80, so the tile repeats whole across
+     * uOrgS's wrap (5 * 4096 * uS px) and the grain never jumps */
+    vec4 nz(vec2 ws, vec2 k) { return texture(uNoise, ws / (256.0 * k * uS)); }
+    /* soft multi-directional hillshade, 0 on the flat, over a blend of a fine
+     * and a broad normal: the sun's light; a fill from 90 degrees round it
+     * that only lifts the slopes it faces (so slopes edge-on to the sun still
+     * model); and steepness darkening whatever way the slope faces */
+    float relief(vec2 g, vec2 gb) {
+        vec2 sd = vec2(cos(uSun), sin(uSun));
+        vec3 nf = normalize(vec3(-g * (2.6 / uMpp), 1.0)), nb = normalize(vec3(-gb * (3.4 / uMpp), 1.0));
+        vec3 n = normalize(0.45 * nf + 0.55 * nb);
+        float key = dot(n.xy, sd) * 0.7071 + (n.z - 1.0) * 0.7071;
+        float fill = max(dot(n.xy, vec2(sd.y, -sd.x)) * 0.7071 + (n.z - 1.0) * 0.7071, 0.0);
+        float shade = 0.85 * key + 0.3 * fill - 0.4 * (1.0 - n.z);
+        /* a gentle s-curve: mid-slopes carry, the steepest don't burn out */
+        return sign(shade) * (1.0 - exp(-2.4 * abs(shade)));
+    }
+    /* ground colour from height: low ground leans to the woodland ink, the
+     * paper warms with height, and the high tops catch the light */
+    vec3 hypso(float h) {
+        vec3 c = mix(cPaper, cPaper2, 0.05 + 0.95 * smoothstep(-30.0, 900.0, h));
+        c = mix(c, cWood, 0.05 * (1.0 - smoothstep(20.0, 260.0, h)));
+        c = mix(c, cHi, 0.07 * smoothstep(600.0, 1150.0, h));
+        return c;
+    }
+    /* paper grain: a fine tooth and a broad mottling, -1..1 */
+    float grain(vec2 ws) {
+        float tooth = nz(ws, vec2(1.25)).r - 0.5;
+        float fibre = nz(ws, vec2(2.5, 5.0)).g - 0.5;              /* lengthwise fibres */
+        float mott = nz(ws, vec2(40.0)).b * 0.6 + nz(ws, vec2(16.0)).a * 0.4 - 0.5;
+        return tooth * 0.9 + fibre * 0.5 + mott * 1.1;
+    }
+    /* depression ticks, for a pixel at w a distance dt down from the contour
+     * at level L, gn the unit way up, hxx and hyy the broad second
+     * differences (m per px^2). The contour has to curve round the low side
+     * (the divergence of gn, from the Hessian, is its curvature k), and for
+     * one of a few sizes R a ring round a point R further down has to stand
+     * above L all round, with dry, lower ground in the middle: then the line
+     * closes round a hollow. Returns the tick coverage. */
+    float hollow(vec2 w, vec2 gn, float gl, float hxx, float hyy, float L, float dt) {
+        float tl = 3.6 * uS;
+        if (dt > tl + 1.0) return 0.0;
+        vec2 e = vec2(5.0 * uS, -5.0 * uS);
+        float hxy = (Hh(w + e.xx) + Hh(w + e.yy) - Hh(w + e.xy) - Hh(w + e.yx)) / (4.0 * e.x * e.x);
+        float k = (hxx * gn.y * gn.y - 2.0 * hxy * gn.x * gn.y + hyy * gn.x * gn.x) / gl;
+        if (k < 1.0 / (60.0 * uS) || k > 0.25 / uS) return 0.0;      /* too open, or too small to tick */
+        /* twelve ticks round the loop, set by the direction of the slope;
+         * only the pixels under a tick go on to ask whether it's a hollow */
+        vec2 dn = -gn;
+        float u = atan(dn.y, dn.x) * 12.0 / 6.2831853;
+        float du = abs(fract(u + 0.5) - 0.5) * 6.2831853 / 12.0 / k;
+        float tick = cov(du, 0.9 * uS) * clamp(tl + 0.5 - dt, 0.0, 1.0);
+        if (tick <= 0.0) return 0.0;
+        vec2 p0 = w + gn * dt, tn = vec2(-dn.y, dn.x);
+        for (int i = 0; i < 3; i++) {
+            float R = uS * (i == 0 ? 6.0 : i == 1 ? 13.0 : 26.0);
+            vec2 c = p0 + dn * R;
+            float hc = Hh(c);
+            if (hc < uWater + 1.0 || hc > L - 0.5) continue;   /* a lake's basin, or not lower */
+            bool found = true;
+            for (int j = 0; j < 9 && found; j++) {
+                float a = 0.6981317 * float(j);               /* the far side first */
+                vec2 q = c + 1.3 * R * (dn * cos(a) + tn * sin(a));
+                vec2 qs = q - uOrgT;                          /* off the baked ground: no */
+                found = Hh(q) > L && all(greaterThan(qs, vec2(-7.0))) && all(lessThan(qs, uRes + 7.0));
+            }
+            if (found) return tick;
+        }
+        return 0.0;
+    }
+
     void main() {
         vec2 sp = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
         vec2 gm = sp * uMpp + uOrgG;
@@ -787,17 +868,25 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
         float gl = max(length(g), 1e-4);
         float knock = texelFetch(uMask, ivec2(gl_FragCoord.xy), 0).r;
 
-        /* paper, warming with height, and the hillshade */
-        vec3 col = mix(cPaper, cPaper2, 0.25 + 0.75 * smoothstep(-50.0, 1100.0, h));
-        vec3 n = normalize(vec3(-g * (2.2 / uMpp), 1.0));
-        vec3 L = normalize(vec3(cos(uSun), sin(uSun), 1.1));
-        float sh = dot(n, L) - L.z;                        /* 0 on the flat */
-        col = sh > 0.0 ? mix(col, cHi, min(sh, 1.0) * kHi) : mix(col, cLo, min(-sh, 1.0) * kLo);
+        /* paper, tinted by height, and the hillshade: a broad gradient and
+         * hollowness from four samples further out soften and deepen it */
+        vec3 col = hypso(h);
+        float rb = 5.0 * uS;
+        float hxp = Hh(w + ex * rb), hxm = Hh(w - ex * rb), hyp = Hh(w + ey * rb), hym = Hh(w - ey * rb);
+        vec2 gb = vec2(hxp - hxm, hyp - hym) / (2.0 * rb);
+        float sh = relief(g, gb);
+        float cav = (hxp + hxm + hyp + hym) * 0.25 - h;     /* m: + in hollows, - on crests */
+        col = sh > 0.0 ? mix(col, cHi, min(sh, 1.0) * kHi * 1.5) : mix(col, cLo, min(-sh, 1.0) * kLo * 1.15);
+        col = mix(col, cLo, smoothstep(0.0, 14.0 * uMpp / 8.0, cav) * kLo * 0.45);
+        col = mix(col, cHi, smoothstep(0.0, 14.0 * uMpp / 8.0, -cav) * kHi * 0.5);
+        vec2 ws = sp + uOrgS;
+        float grn = grain(ws);
 
         /* water: below datum, a soft shore */
         float dsh = (h - uWater) / gl;                      /* px from the shore, + on land */
         float wet = clamp(0.5 - dsh, 0.0, 1.0);
         col = mix(col, cWater, wet);
+        col = mix(col, cLo, wet * smoothstep(0.0, 60.0, uWater - h) * kLo * 0.6);   /* deeper, darker */
 
         /* woodland stipple */
         float slope = gl / uMpp;
@@ -855,17 +944,41 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
             }
         }
 
-        /* contours */
-        float lines = 1.0 - wet;
+        /* contours, illuminated (Tanaka style): brighter and a touch bolder where the
+         * slope faces the sun, darker and finer in its shade; intermediates
+         * thin and then fade as they crowd, so steep ground stays legible;
+         * a little ink spread along every line */
+        float lines = (1.0 - wet) * (1.0 - knock);
         float spc = uI / gl;                                 /* px between contours */
+        vec2 gn = g / gl;                                    /* unit, uphill */
+        float face = -dot(gn, vec2(cos(uSun), sin(uSun)));
+        float lit = max(face, 0.0), shd = max(-face, 0.0);
+        float ink = 0.86 + 0.14 * nz(ws, vec2(2.5)).a + 0.03 * grn;
         float f = h / uI;
         float dt = abs(fract(f + 0.5) - 0.5) * spc;
-        float thin = cov(dt, 0.85 * uS) * smoothstep(1.6, 3.6, spc);
+        float wt = 0.95 * uS * (1.0 + 0.25 * face) * mix(0.6, 1.0, smoothstep(2.5, 7.0, spc));
+        float thin = cov(dt, wt) * smoothstep(2.2, 4.6, spc) * ink;
         float f5 = h / (5.0 * uI);
         float di = abs(fract(f5 + 0.5) - 0.5) * spc * 5.0;
-        float idx = cov(di, 1.4 * uS) * smoothstep(1.4, 3.0, spc * 5.0);
-        col = mix(col, cThin, thin * aThin * lines * (1.0 - knock));
-        col = mix(col, cIndex, idx * aIndex * lines * (1.0 - knock));
+        float wi = 1.6 * uS * (1.0 + 0.35 * face) * mix(0.7, 1.0, smoothstep(5.0, 16.0, spc * 5.0));
+        float fi = smoothstep(2.6, 5.5, spc * 5.0);
+        float idx = cov(di, wi) * fi * ink;
+        float halo = exp(-di * di / (6.0 * uS * uS)) * fi * 0.16 * (0.4 + 0.6 * lit);
+        vec3 lthin = mix(mix(cThin, cHi, 0.4 * lit), cLo, 0.4 * shd);
+        vec3 lidx = mix(mix(cIndex, cHi, 0.45 * lit), cLo, 0.42 * shd);
+        float ath = aThin * (0.8 + 0.25 * lit - 0.3 * shd), aix = aIndex * (1.0 + 0.2 * lit - 0.12 * shd);
+        col = mix(col, lidx, halo * aIndex * lines);
+        col = mix(col, lthin, min(thin * ath, 1.0) * lines);
+        /* depressions: ticks on the downhill side, on intermediates and index */
+        if (spc > 3.5 && wet < 1.0) {
+            float Lv = floor(f + 0.5) * uI;
+            if (h < Lv) {
+                float tk = hollow(w, gn, gl, (hxp + hxm - 2.0 * h) / (rb * rb), (hyp + hym - 2.0 * h) / (rb * rb), Lv, dt);
+                bool isI = abs(fract(Lv / (5.0 * uI) + 0.5) - 0.5) < 0.1;
+                col = mix(col, isI ? lidx : lthin, tk * (isI ? aix : ath) * lines * ink);
+            }
+        }
+        col = mix(col, lidx, min(idx * aix, 1.0) * lines);
 
         /* rivers: along their valleys, widening as they come down */
         if (abs(ax.x) < 0.06 && ax.w > 0.45) {
@@ -878,11 +991,13 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
 
         /* the shoreline itself */
         col = mix(col, cWaterInk, cov(abs(dsh), 1.1 * uS) * 0.8);
+        /* the paper's grain over everything printed on it */
+        col = mix(col, grn > 0.0 ? cHi : cLo, min(abs(grn), 1.0) * (grn > 0.0 ? 0.022 : 0.04));
 
         /* the light over everything: the moving sun's cast shadows and the
          * drifting clouds' (from the quarter-resolution FS_SHADE pass) */
-        vec2 shd = texture(uShade, gl_FragCoord.xy / uRes).rg;
-        col = mix(col, cLo, min((1.0 - shd.r) * kShadow + shd.g * kCloud, 0.8));
+        vec2 csh = texture(uShade, gl_FragCoord.xy / uRes).rg;
+        col = mix(col, cLo, min((1.0 - csh.r) * kShadow + csh.g * kCloud, 0.8));
         o = vec4(col, 1.0);
     });
 
@@ -1024,6 +1139,18 @@ static void targets(void) {
     baked = 0;
 }
 
+/* the paper's grain: a 256x256 RGBA texture of independent noise, left
+ * bound on unit 3 for the map pass */
+static void noise_tex(GLuint p) {
+    unsigned char *n = malloc(256 * 256 * 4);
+    for (int i = 0; i < 256 * 256 * 4; i++) n[i] = (unsigned char)(hash2(i, i >> 10, 4242) >> 24);
+    glActiveTexture(GL_TEXTURE4);
+    mk_tex(GL_RGBA8, 256, 256, GL_RGBA, GL_UNSIGNED_BYTE, n, GL_LINEAR, GL_REPEAT);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(U(p, "uNoise"), 4);
+    free(n);
+}
+
 static void gl_init(void) {
     prog_bake = mk_prog(VS, FS_BAKE);
     prog_map = mk_prog(VS, FS_MAP);
@@ -1050,6 +1177,7 @@ static void gl_init(void) {
     /* shadows and cloud shadows darken towards the hillshade's dark side */
     glUniform1f(U(p, "kShadow"), 0.2f + 0.25f * P.lo_k);
     glUniform1f(U(p, "kCloud"), 0.1f + 0.15f * P.lo_k);
+    noise_tex(p);
     u3(p, "cPaper", P.paper); u3(p, "cPaper2", P.paper2); u3(p, "cMargin", P.margin);
     u3(p, "cHi", P.hi); u3(p, "cLo", P.lo); u3(p, "cThin", P.thin); u3(p, "cIndex", P.index);
     u3(p, "cWater", P.water); u3(p, "cWaterInk", P.waterink); u3(p, "cWood", P.wood);
