@@ -13,6 +13,10 @@
  * is a little lens: it shows a sharp, upside-down view of the street, with
  * a dark rim and a glint. The glass between them is fogged, so the street
  * is blurrier there, and a running drop wipes a clear track through it.
+ * Runners drag a thin film of water behind them, steer into the wet paths
+ * earlier ones left (so a few rivulets persist and branches merge), and
+ * big impacts throw out specks. The fog itself is a mist of beads too small
+ * to simulate, gone from the wiped tracks, thicker low down and at the frame.
  *
  * Between the glass and the street, the weather itself: rain falling at
  * several depths as streaks that catch the lamps (or snow drifting down),
@@ -379,6 +383,8 @@ static void wx_ease(float dt) {
 /* ---- the water on the glass ----
  * Positions in screen pixels, y down. sc scales everything from 1080p. */
 #define MAXD 9000
+#define NHIST 7
+#define FILM_LIFE 1.1f    /* s a runner's film lasts behind it */
 typedef struct {
     float x, y, r;          /* centre, radius */
     float vy, wx;           /* running: speed down, sideways wander */
@@ -386,14 +392,44 @@ typedef struct {
     float runr;             /* the radius at which this one lets go */
     float seed, melt;       /* flakes: 0 crystal .. 1 water */
     uint8_t type, run;      /* type 0 water, 1 snowflake */
+    uint8_t nh;             /* runners: points behind, newest first, */
+    float hx[NHIST], hy[NHIST], ht[NHIST];   /* the thin film they drag */
 } Drop;
 static Drop drops[MAXD];
 static int nd, cap_d;
+static float sim_t;                    /* s, for the films' ages */
 #define DROP_SCALE 1.8f   /* drop sizes are in 1080p px x this */
 static float sc = 1, maxr;
 static int *ghead, gnx, gny;
 static int gnext[MAXD];
 static float gcs;
+
+/* where runners have been: a coarse grid of how wet the glass is, fading
+ * over a minute. Water would rather run down a wet path than a dry one, so
+ * runners steer into old tracks and stick less there, and drops sitting on
+ * a track let go sooner: a few rivulets persist. */
+static float *wetg, wcs;
+static int wnx, wny;
+static void wet_alloc(void) {
+    wcs = 5 * sc;
+    wnx = (int)(W / wcs) + 1; wny = (int)(H / wcs) + 1;
+    free(wetg);
+    wetg = calloc((size_t)wnx * wny, sizeof(float));
+}
+static float wet_at(float x, float y) {
+    int cx = (int)(x / wcs), cy = (int)(y / wcs);
+    if (cx < 0 || cy < 0 || cx >= wnx || cy >= wny) return 0;
+    return wetg[cy * wnx + cx];
+}
+static void wet_mark(float x, float y, float r) {
+    int cy = (int)(y / wcs), x0 = (int)((x - r * 0.6f) / wcs), x1 = (int)((x + r * 0.6f) / wcs);
+    if (cy < 0 || cy >= wny) return;
+    for (int cx = x0 < 0 ? 0 : x0; cx <= x1 && cx < wnx; cx++) wetg[cy * wnx + cx] = 1;
+}
+static void wet_decay(float dt) {
+    float k = expf(-dt / 50.0f);
+    for (int i = 0; i < wnx * wny; i++) wetg[i] *= k;
+}
 
 static void grid_alloc(void) {
     gcs = 24 * sc;
@@ -403,6 +439,7 @@ static void grid_alloc(void) {
     cap_d = (int)(2600.0f * W * H / (1920.0f * 1080.0f));
     if (cap_d > MAXD - 64) cap_d = MAXD - 64;
     if (cap_d < 600) cap_d = 600;
+    wet_alloc();
 }
 
 static void grid_add(int i) {
@@ -491,8 +528,16 @@ static void impact(float snow, float size) {
         return;
     }
     float u = frand();
-    float r = sc * (0.9f + 3.6f * size * powf(u, 2.2f));
+    float r = sc * (0.6f + 3.4f * size * powf(u, 2.8f));
     if (frand() < 0.08f * size * size) r += sc * (2.5f + 4.0f * frand()) * size;
+    if (r > 3.4f * sc && frand() < 0.6f) {   /* a big one splashes: a few specks thrown out */
+        int ns = 2 + (int)(frand() * 4);
+        for (int k = 0; k < ns; k++) {
+            float a = frand() * 6.2832f, dd = r * (1.4f + 1.6f * frand());
+            float sx = x + cosf(a) * dd, sy = y + sinf(a) * dd * 0.8f, sr = sc * (0.5f + 0.6f * frand());
+            if (overlap(sx, sy, sr, -1, 1.0f) < 0) add_drop(sx, sy, sr, 0);
+        }
+    }
     int j = overlap(x, y, r, -1, 0.9f);
     if (j >= 0) {
         Drop tmp = {0};
@@ -517,6 +562,13 @@ static void sim_step(float dt) {
     while (impact_acc >= 1) { impact_acc -= 1; impact(w->snow, w->size); }
 
     float wet = smooth(0.0f, 0.15f, w->rain);
+    wet_decay(dt);
+    sim_t += dt;
+    if (sim_t > 1e4f) {                      /* keep the films' clock precise */
+        sim_t -= 1e4f;
+        for (int i = 0; i < nd; i++)
+            for (int k = 0; k < drops[i].nh; k++) drops[i].ht[k] -= 1e4f;
+    }
     /* evaporation: r^2 shrinks steadily, so the smallest go first */
     float evap = sc * sc * (0.004f + 0.05f * (1 - wet)) * (w->temp > 0 ? 1.0f : 0.3f);
     /* the room warms the glass: even below freezing flakes go, slowly */
@@ -535,7 +587,7 @@ static void sim_step(float dt) {
             float r2 = d->r * d->r - evap * dt;
             d->r = r2 > 0 ? sqrtf(r2) : 0;
             if (d->r < 0.45f * sc) d->r = 0;
-            if (d->r > d->runr) { d->run = 1; d->vy = 0; d->stall = 0.1f + 0.4f * frand(); }
+            if (d->r > d->runr * (1 - 0.3f * wet_at(d->x, d->y + d->r))) { d->run = 1; d->vy = 0; d->stall = 0.1f + 0.4f * frand(); d->nh = 0; }
             continue;
         }
         /* running: a bigger drop runs faster; it sticks and lurches */
@@ -548,13 +600,28 @@ static void sim_step(float dt) {
         } else {
             d->vy += (vt - d->vy) * fminf(1, dt * 3.5f);
             float p = 1.4f * expf(-(rr - d->runr / sc) * 0.5f);
+            p *= 1 - 0.8f * wet_at(d->x, d->y + d->r);
             if (frand() < p * dt) d->stall = 0.08f + 0.6f * frand() * frand();
         }
         d->wx += ((frand() - 0.5f) * sc * 900 * (0.4f + 0.6f * (1 - fminf(1, d->vy / (sc * 300)))) - d->wx * 3.0f) * dt;
+        {   /* lean towards the wetter side just below */
+            float ly = d->y + d->r + wcs, lo = d->r * 0.5f + wcs;
+            float wl = wet_at(d->x - lo, ly) + wet_at(d->x - lo * 0.5f, ly), wr = wet_at(d->x + lo, ly) + wet_at(d->x + lo * 0.5f, ly);
+            d->wx += (wr - wl) * sc * 600 * dt;
+            d->wx = clampf(d->wx, -0.4f * d->vy - sc * 6, 0.4f * d->vy + sc * 6);
+        }
         float dy = d->vy * dt;
         d->x += (d->wx * fminf(1, d->vy / (sc * 40)) + w->wind * d->vy * 0.55f) * dt;
         d->y += dy;
         d->trail += dy;
+        wet_mark(d->x, d->y - d->r * 0.3f, d->r);
+        if (!d->nh || hypotf(d->x - d->hx[0], d->y - d->hy[0]) > fmaxf(d->r * 0.9f, 4 * sc)) {
+            memmove(d->hx + 1, d->hx, sizeof d->hx - sizeof *d->hx);
+            memmove(d->hy + 1, d->hy, sizeof d->hy - sizeof *d->hy);
+            memmove(d->ht + 1, d->ht, sizeof d->ht - sizeof *d->ht);
+            d->hx[0] = d->x; d->hy[0] = d->y; d->ht[0] = sim_t;
+            if (d->nh < NHIST) d->nh++;
+        }
         if (d->trail > d->r * (0.45f + 0.7f * frand())) {
             d->trail = 0;
             float rb = d->r * (0.14f + 0.2f * frand());
@@ -1394,6 +1461,12 @@ static const char *VS_DROP = "#version 330 core\n" GLSL(
         float r = a0.z * uRScale;
         float ext = (a1.z > 0.5 ? r : r * (1.0 + a0.w) * 1.15) + 1.5;
         vec2 p = a0.xy + c * ext;
+        if (a1.z > 1.5) {   /* a film segment: along its direction, half-length a0.w */
+            vec2 q = vec2(c.x * (r + 1.5), c.y * (a0.w + r + 1.5));
+            p = a0.xy + vec2(-a1.y, a1.x) * q.x + a1.xy * q.y;
+            ext = 1.0;
+            c = q;
+        }
         gl_Position = vec4(p.x / uScreen.x * 2.0 - 1.0, 1.0 - p.y / uScreen.y * 2.0, 0.0, 1.0);
         vP = c * ext;
         vR = r;
@@ -1419,8 +1492,9 @@ static const char *FS_DROP = "#version 330 core\n" GLSL(
             if (al < 0.0) { al /= 1.0 + vS; pe *= 1.0 + 0.7 * vS * min(1.0, -al); }
             else al *= 1.0 + 0.12 * vS;
             float a = atan(p.y, p.x);
+            float lumpy = 1.0 + 2.2 * smoothstep(5.0, 18.0, vR);
             float wob = 1.0 + (0.035 * sin(3.0 * a + vSeed * 6.28) + 0.02 * sin(5.0 * a + vSeed * 19.0) +
-                               0.03 * sin(2.0 * a + vSeed * 41.0)) / (1.0 + 4.0 * vS);
+                               0.03 * sin(2.0 * a + vSeed * 41.0)) * lumpy / (1.0 + 4.0 * vS);
             /* beads sag a little: fuller below */
             float d = length(vec2(al, pe)) * wob * (1.0 - 0.06 * clamp(p.y, -1.0, 1.0) * (1.0 - min(vS, 1.0)));
             if (d >= 1.0) discard;
@@ -1431,6 +1505,18 @@ static const char *FS_DROP = "#version 330 core\n" GLSL(
             oN = vec4(n.x * 0.5 + 0.5, -n.y * 0.5 + 0.5, h, aa);
             oIce = vec4(0.0);
             gl_FragDepth = 1.0 - 0.9 * h;
+        } else if (vType > 1.5) {
+            /* a runner's film: a thin flat ridge of water, wavering in width */
+            float ww = vR * mix(1.0, vSeed, clamp(vP.y / (2.0 * vS) + 0.5, 0.0, 1.0)) *
+                       (1.0 + 0.16 * sin(gl_FragCoord.y * 0.21 + gl_FragCoord.x * 0.05));
+            float dd = length(vec2(vP.x, max(abs(vP.y) - vS, 0.0))) / ww;
+            if (dd >= 1.0) discard;
+            float h = sqrt(1.0 - dd * dd) * 0.4;
+            vec2 n = vec2(-vDir.y, vDir.x) * clamp(vP.x / ww, -1.0, 1.0) * 0.72;
+            float aa = 1.0 - smoothstep(1.0 - 1.4 / max(ww, 0.7), 1.0, dd);
+            oN = vec4(n.x * 0.5 + 0.5, -n.y * 0.5 + 0.5, h, aa * 0.9);
+            oIce = vec4(0.0);
+            gl_FragDepth = 1.0 - 0.3 * h;
         } else {
             float s = sin(vSeed * 6.28), k = cos(vSeed * 6.28);
             vec2 q = mat2(k, s, -s, k) * p;
@@ -1460,6 +1546,39 @@ static const char *FS_WIPE = "#version 330 core\n" GLSL(
         o = vec4(0.0, 0.0, 0.0, (1.0 - smoothstep(0.5, 1.0, d)) * 0.9);
     });
 
+/* the mist's beads, baked once: one per cell at most, in two sizes: their
+ * normal (y up), coverage, and how foggy it must be for the bead to be there */
+static const char *FS_MIST = "#version 330 core\n" GLSL(
+    uniform float uPx;
+    out vec4 o;
+    vec4 hash4(vec2 p) {
+        vec4 q = fract(vec4(p.xyxy) * vec4(0.1031, 0.1030, 0.0973, 0.1099));
+        q += dot(q, q.wzxy + 33.33);
+        return fract((q.xxyz + q.yzzw) * q.zywx);
+    }
+    vec4 mist(vec2 px, float cell, float r0, float r1) {
+        vec2 id = floor(px / cell);
+        vec4 h = hash4(id + cell * 17.0);
+        float r = mix(r0, r1, h.z * h.z);
+        vec2 c = (id + 0.5) * cell + (h.xy - 0.5) * max(cell - 2.0 * r - 1.0, 0.0);
+        vec2 p = (px - c) / r;
+        p.y *= 1.0 + 0.12 * (h.x - 0.5);
+        float m = length(p);
+        return vec4(clamp(p, -1.0, 1.0), 1.0 - smoothstep(1.0 - 1.2 / r, 1.0, m), h.w);
+    }
+    void main() {
+        vec2 px = gl_FragCoord.xy;
+        vec4 a = mist(px, 7.0 * uPx, 0.9 * uPx, 2.1 * uPx);
+        a.w /= 0.9;
+        vec4 b = mist(px + 3.0 * uPx, 15.0 * uPx, 1.8 * uPx, 4.2 * uPx);
+        b.w = sqrt(b.w / 0.55);
+        if (a.w > 1.0) a.z = 0.0;
+        if (b.w <= 1.0 && b.z > a.z) a = b;
+        /* packed four bits a field: R normal x, y; G coverage, threshold */
+        vec4 q = floor(clamp(vec4(a.xy * 0.5 + 0.5, a.z, min(a.w, 1.0)), 0.0, 1.0) * 15.0 + 0.5);
+        o = vec4((q.x * 16.0 + q.y) / 255.0, (q.z * 16.0 + q.w) / 255.0, 0.0, 1.0);
+    });
+
 /* everything onto the screen */
 static const char *FS_COMP = "#version 330 core\n" GLSL(
     uniform sampler2D uD, uIce, uS, uBl, uB, uF, uN;
@@ -1468,8 +1587,17 @@ static const char *FS_COMP = "#version 330 core\n" GLSL(
     uniform vec3 uHaze;
     uniform sampler2D uA;
     uniform float uBloom;
+    uniform sampler2D uM;
+    uniform float uMist, uLensK;
     out vec4 o;
     float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+    /* the street seen through a lens of normal n: sharp, upside down,
+     * squeezed, folded back at the screen's edges */
+    vec3 lensview(vec2 uv, vec2 n, float k, float asp, float lod) {
+        vec2 u = uv - n * k * vec2(1.0 / asp, 1.0);
+        u = 1.0 - abs(1.0 - abs(u));
+        return textureLod(uS, u, lod).rgb;
+    }
     void main() {
         vec2 uv = gl_FragCoord.xy / uRes;
         float asp = uRes.x / uRes.y;
@@ -1481,6 +1609,8 @@ static const char *FS_COMP = "#version 330 core\n" GLSL(
         float fog = texture(uF, uv).r * (0.55 + 0.9 * nz.r);
         /* frost, feathering in from the edges */
         float e = min(min(uv.x, 1.0 - uv.x) * asp, min(uv.y, 1.0 - uv.y));
+        /* condensation is thicker low down and towards the cold frame */
+        fog *= 0.62 + 0.4 * smoothstep(0.65, 0.0, uv.y) + 0.4 * (1.0 - smoothstep(0.0, 0.16, e));
         float fr = uFrost * (1.0 - smoothstep(0.0, 0.03 + 0.17 * uFrost, e + (nz.r - 0.5) * 0.14));
         float cry = texture(uN, nuv * 7.0).b;
         float frost = clamp(fr * fr * (0.55 + 0.9 * cry) * (0.8 + 0.4 * nz.g), 0.0, 1.0);
@@ -1489,25 +1619,47 @@ static const char *FS_COMP = "#version 330 core\n" GLSL(
         vec3 bg = textureLod(uBl, uv, uBlur + veil * 1.6).rgb + textureLod(uB, uv, veil * 2.6).rgb * uBokehGain * (1.0 - 0.3 * veil);
         vec3 far = textureLod(uBl, uv, 5.5).rgb;
         vec3 haze = uHaze + far * 1.3;
-        vec3 col = mix(bg, haze, veil * 0.55);
+        vec3 col = mix(bg, haze + textureLod(uB, uv, 5.0).rgb * uBokehGain * 0.5, clamp(veil * 0.6, 0.0, 0.62));
         col = mix(col, haze * 1.4 + far * 0.6 + vec3(0.035, 0.032, 0.028), frost * 0.75);
         /* the rain falling outside, behind the water on the glass */
         vec4 air = texture(uA, uv) * (1.0 - 0.75 * veil);
         col = col * (1.0 - air.a) + air.rgb;
 
+        /* the mist: beads too small to simulate, thick where it's fogged,
+         * gone from the tracks the runners wiped */
+        float fm = smoothstep(0.08, 0.5, fog) * uMist * (1.0 - frost);
+        if (fm > 0.01) {
+            uvec2 mt = uvec2(texelFetch(uM, ip, 0).rg * 255.0 + 0.5);
+            vec4 mq = vec4(mt.x >> 4, mt.x & 15u, mt.y >> 4, mt.y & 15u) / 15.0;
+            vec3 mb = vec3(mq.xy * 2.0 - 1.0, mq.z);
+            if (mb.z > 0.0 && fm > mq.w) {
+                float m = length(mb.xy);
+                vec3 bc = bg * 1.2 + far * 0.4;
+                bc *= 1.0 - 0.75 * smoothstep(0.6, 0.97, m);
+                bc += smoothstep(0.45, 0.75, m) * (1.0 - smoothstep(0.8, 0.97, m)) * max(0.0, -mb.y / max(m, 1e-3)) * (far * 2.0 + haze * 1.4);
+                bc += pow(max(0.0, 1.0 - length(mb.xy - vec2(-0.3, 0.4)) * 2.6), 3.0) * (haze * 3.0 + far * 2.5 + vec3(0.06, 0.055, 0.05));
+                col = mix(col, bc, mb.z);
+            }
+        }
+        vec2 dn = d.xy * 2.0;
+        float lod = max(0.0, log2(max(length(dFdx(dn)), length(dFdy(dn))) * uLensK * uRes.y * 0.5 + 1e-4) - 1.6);
         if (d.a > 0.002) {
             vec2 n = d.xy * 2.0 - 1.0;
             float h = d.z, m = length(n);
-            /* each drop a lens: a small, upside-down view of the street */
-            vec2 uvR = uv - n * uK * vec2(1.0 / asp, 1.0);
-            vec2 gx = dFdx(uvR), gy = dFdy(uvR);
-            vec3 thru = textureGrad(uS, uvR, gx * 1.6, gy * 1.6).rgb * 1.2 + bg * 0.18;
-            float rim = smoothstep(0.62, 1.0, m);
-            vec3 dc = thru * (1.0 - 0.8 * rim * rim);
-            /* a glint, up and to the left */
+            /* each drop a lens: a sharp, small, upside-down view of the street */
+            vec3 thru = lensview(uv, n, uLensK, asp, lod) * 1.85 + bg * 0.12;
+            /* towards the rim the light inside is reflected away: a dark
+             * band, then, just inside it on the underside, a bright crescent
+             * of the sky's light focused through the drop */
+            float rim = smoothstep(0.7, 0.97, m);
+            vec3 dc = thru * (1.0 - 0.78 * rim);
+            float cres = smoothstep(0.55, 0.8, m) * (1.0 - smoothstep(0.8, 0.93, m)) * smoothstep(0.1, 0.9, -n.y / max(m, 1e-3));
+            dc += cres * (far * 2.2 + haze * 1.4 + lensview(uv, -n * 0.5, uLensK, asp, 3.0) * 0.6);
+            /* glints: a hard one up and to the left, a soft sheen opposite */
             vec3 n3 = normalize(vec3(n * 1.3, max(h, 0.06)));
-            float sp = pow(max(dot(n3, normalize(vec3(-0.35, 0.55, 1.6))), 0.0), 70.0);
-            dc += sp * (haze * 1.5 + far * 1.2 + vec3(0.05, 0.045, 0.04));
+            float sp = pow(max(dot(n3, normalize(vec3(-0.35, 0.55, 1.6))), 0.0), 160.0);
+            float sp2 = pow(max(dot(n3, normalize(vec3(0.4, -0.5, 1.4))), 0.0), 18.0);
+            dc += sp * (1.6 + 3.0 * uFlash) * (haze * 4.0 + far * 3.0 + vec3(0.18, 0.17, 0.15)) + sp2 * 0.25 * (haze + far);
             col = mix(col, dc, d.a);
         }
         /* snow on the glass catches the light */
@@ -1530,13 +1682,13 @@ static const char *FS_COMP = "#version 330 core\n" GLSL(
         o = vec4(col, 1.0);
     });
 
-static GLuint p_street, p_light, p_blur, p_fill, p_drop, p_wipe, p_comp;
+static GLuint p_street, p_light, p_blur, p_fill, p_drop, p_wipe, p_comp, p_mist, tM;
 static GLuint vao_empty, vao_light, vbo_light, vao_drop, vbo_drop, tex_noise;
 /* render targets: S street (half, mips), B bokeh (half), T/Bl blur (quarter,
  * Bl with mips), F fog (quarter), D drops (full: normal + ice + depth) */
 static GLuint tS, fS, tB, fB, tT, fT, tBl, fBl, tF, fF, tD, tI, rbD, fD;
 static int tw_, th_;
-static float drop_inst[MAXD * 8];
+static float drop_inst[MAXD * 2 * 8];
 
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
@@ -1598,6 +1750,22 @@ static void fog_clear(float v) {
     glClear(GL_COLOR_BUFFER_BIT);
 }
 
+/* the mist's beads, at the window's size */
+static void mist_bake(void) {
+    if (tM) glDeleteTextures(1, &tM);
+    tM = mk_tex(W, H, GL_RG8, GL_RG, GL_UNSIGNED_BYTE, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    GLuint f = mk_fbo(tM);
+    glViewport(0, 0, W, H);
+    glBindVertexArray(vao_empty);
+    glUseProgram(p_mist);
+    glUniform1f(U(p_mist, "uPx"), H / 1080.0f);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &f);
+}
+
 /* (re)make the targets at the window's size */
 static void targets(void) {
     if (tw_ == W && th_ == H) return;
@@ -1631,6 +1799,7 @@ static void targets(void) {
     glDrawBuffers(2, bufs);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) die("incomplete framebuffer");
     fog_clear(0.3f);
+    mist_bake();
 }
 
 /* tileable value noise: r smooth fbm, g ridged, b fine crystals */
@@ -1693,13 +1862,14 @@ static void gl_init(void) {
     p_drop = mk_prog(VS_DROP, FS_DROP);
     p_wipe = mk_prog(VS_DROP, FS_WIPE);
     p_comp = mk_prog(VS, FS_COMP);
+    p_mist = mk_prog(VS, FS_MIST);
     glGenVertexArrays(1, &vao_empty);
     inst_vao(&vao_light, &vbo_light);
     inst_vao(&vao_drop, &vbo_drop);
     make_noise();
     glUseProgram(p_comp);
-    const char *names[] = {"uD", "uIce", "uS", "uBl", "uB", "uF", "uN"};
-    for (int i = 0; i < 7; i++) glUniform1i(U(p_comp, names[i]), i);
+    const char *names[] = {"uD", "uIce", "uS", "uBl", "uB", "uF", "uN", "uM"};
+    for (int i = 0; i < 8; i++) glUniform1i(U(p_comp, names[i]), i);
 }
 
 /* ---- weather-driven state per frame ---- */
@@ -2056,7 +2226,7 @@ static void fog_step(float dt) {
     glBindVertexArray(vao_empty);
     glEnable(GL_BLEND);
     glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA);
-    glBlendColor(0, 0, 0, 1 - expf(-dt / 22.0f));
+    glBlendColor(0, 0, 0, 1 - expf(-dt / 9.0f));
     glUseProgram(p_fill);
     glUniform4f(U(p_fill, "uVal"), target, 0, 0, 1);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -2074,10 +2244,34 @@ static void fog_step(float dt) {
         glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)n * 32, drop_inst, GL_STREAM_DRAW);
         glUseProgram(p_wipe);
         glUniform2f(U(p_wipe, "uScreen"), (float)W, (float)H);
-        glUniform1f(U(p_wipe, "uRScale"), 1.5f);
+        glUniform1f(U(p_wipe, "uRScale"), 0.9f);
         glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, n);
     }
     glDisable(GL_BLEND);
+}
+
+/* the films runners drag behind them, as instances of type 2 after the
+ * n already in drop_inst: a capsule per segment, thinning as it ages */
+static int film_inst(int n) {
+    for (int i = 0; i < nd && n < MAXD * 2 - NHIST; i++) {
+        Drop *d = &drops[i];
+        if (d->type || !d->nh) continue;
+        float px = d->x, py = d->y - d->r * 0.35f, wk = d->r * (d->run ? 0.5f : 0.34f);
+        float w0 = d->r * (d->run ? 0.4f : 0.3f);
+        for (int k = 0; k < d->nh; k++) {
+            float age = sim_t - d->ht[k];
+            if (age > FILM_LIFE) break;
+            float w = w0 * sqrtf(1 - age / FILM_LIFE);
+            float dx = d->hx[k] - px, dy = d->hy[k] - py, L = sqrtf(dx * dx + dy * dy);
+            if (wk < 0.6f * sc / DROP_SCALE || L < 0.5f) { px = d->hx[k]; py = d->hy[k]; wk = w; continue; }
+            float *p = &drop_inst[n++ * 8];
+            p[0] = (px + d->hx[k]) * 0.5f; p[1] = (py + d->hy[k]) * 0.5f;
+            p[2] = wk; p[3] = L * 0.5f;
+            p[4] = dx / L; p[5] = dy / L; p[6] = 2; p[7] = w / wk;   /* width at the far end, relative */
+            px = d->hx[k]; py = d->hy[k]; wk = w;
+        }
+    }
+    return n;
 }
 
 /* one simulation tick: weather, drops, fog */
@@ -2217,6 +2411,7 @@ static void render(GLuint target) {
         p[4] = l > 0 ? vx / l : 0; p[5] = l > 0 ? vy / l : 1;
         p[6] = d->type; p[7] = d->seed;
     }
+    n = film_inst(n);
     glBindFramebuffer(GL_FRAMEBUFFER, fD);
     glViewport(0, 0, W, H);
     float cn[4] = {0.5f, 0.5f, 0, 0}, ci[4] = {0, 0, 0, 0};
@@ -2242,14 +2437,16 @@ static void render(GLuint target) {
     glBindFramebuffer(GL_FRAMEBUFFER, target);
     glViewport(0, 0, W, H);
     glBindVertexArray(vao_empty);
-    GLuint tx[] = {tD, tI, tS, tBl, tB, tF, tex_noise};
-    for (int i = 6; i >= 0; i--) {
+    GLuint tx[] = {tD, tI, tS, tBl, tB, tF, tex_noise, tM};
+    for (int i = 7; i >= 0; i--) {
         glActiveTexture(GL_TEXTURE0 + i);
         glBindTexture(GL_TEXTURE_2D, tx[i]);
     }
     glUseProgram(p_comp);
     glUniform2f(U(p_comp, "uRes"), (float)W, (float)H);
     glUniform1f(U(p_comp, "uK"), 0.2f);
+    glUniform1f(U(p_comp, "uLensK"), 0.25f);
+    glUniform1f(U(p_comp, "uMist"), 1.0f);
     glUniform1f(U(p_comp, "uBlur"), mixf(0.3f, 1.3f, rainy));
     glUniform1f(U(p_comp, "uBokehGain"), 1.0f);
     glUniform1f(U(p_comp, "uFrost"), smooth(1.5f, -4.0f, w->temp));
@@ -2257,10 +2454,10 @@ static void render(GLuint target) {
     glUniform1f(U(p_comp, "uExpo"), mixf(1.1f, 1.0f, day));
     glUniform1f(U(p_comp, "uTime"), t);
     glUniform1f(U(p_comp, "uFogVeil"), 1.0f);
-    glActiveTexture(GL_TEXTURE7);
+    glActiveTexture(GL_TEXTURE8);              /* 0-7 are tx[] above */
     glBindTexture(GL_TEXTURE_2D, tA);
     glActiveTexture(GL_TEXTURE0);
-    glUniform1i(U(p_comp, "uA"), 7);
+    glUniform1i(U(p_comp, "uA"), 8);
     glUniform1f(U(p_comp, "uBloom"), mixf(1.0f, 0.4f, day));
     glUniform3f(U(p_comp, "uHaze"), mixf(0.034f, 0.074f, day), mixf(0.034f, 0.076f, day), mixf(0.038f, 0.080f, day));
     glDrawArrays(GL_TRIANGLES, 0, 3);
