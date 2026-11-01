@@ -26,8 +26,15 @@
  *     hypsometric tint from the palette's paper, woodland and highlight;
  *   - water below datum (which rises and falls a few metres, so the shores
  *     breathe), with engraved waterlines following the shore outwards;
- *   - rivers along their valleys, widening downstream; woodland stipple;
+ *   - rivers along their valleys, widening downstream; woodland stipple,
+ *     with a tree symbol here and there; wedge hachures on crags;
+ *   - a coastal vignette and engraved hatching inside every shore;
  *   - a faint kilometre grid; and paper grain over it all.
+ * And a map's furniture, invented but consistent (see "cartography"):
+ * streams traced downhill to the lakes and rivers, villages joined by roads
+ * routed through the valleys and over the passes (tracks and footpaths where
+ * they must climb), and place names: villages upright, water in italic,
+ * hills in small italic, districts in spaced capitals.
  * On the CPU the same terrain finds summits (spot heights with triangles)
  * and straight stretches of index contour to carry their height, set along
  * the line, readable side up, knocking a gap in the lines beneath. Round it:
@@ -227,7 +234,7 @@ static void sun_at(double t, float *az, float *el) {
  * sprites, shelf-packed into one R8 texture ---- */
 typedef struct { int x, y, w, h, bx, by; float adv; } Glyph;
 typedef struct { Glyph g[96]; float px; } Face;   /* ' '..'~', then 127 = middle dot */
-enum { F_NUM, F_SPOT, F_COORD, F_TITLE, F_SUB, F_SMALL, NF };
+enum { F_NUM, F_SPOT, F_COORD, F_TITLE, F_SUB, F_SMALL, F_TOWN, F_PLACE, F_WATER, F_HILL, F_REGION, NF };
 enum { SP_TRI, SP_ARROW, NSP };
 static Face fonts[NF];
 static Glyph sprites[NSP];
@@ -364,6 +371,12 @@ static void build_atlas(void) {
     load_font(&fonts[F_TITLE], "EB Garamond 12,serif", 25 * S);
     load_font(&fonts[F_SUB], "EB Garamond 12,serif:italic", 15.5f * S);
     load_font(&fonts[F_SMALL], "Linux Libertine O,serif", 12 * S);
+    /* place names */
+    load_font(&fonts[F_TOWN], "Linux Libertine O,serif", 17 * S);
+    load_font(&fonts[F_PLACE], "Linux Libertine O,serif", 13.5f * S);
+    load_font(&fonts[F_WATER], "Linux Libertine O,serif:italic", 15 * S);
+    load_font(&fonts[F_HILL], "Linux Libertine O,serif:italic", 12 * S);
+    load_font(&fonts[F_REGION], "Linux Libertine O,serif", 14 * S);
     make_sprites();
     make_walker_sprites();
 }
@@ -574,6 +587,7 @@ static struct {
     Rgb paper, paper2, margin, hi, lo, thin, index, water, waterink, wood, grid, frame, river;
     Rgb label, spot, tri, title, sub, panel;
     float a_thin, a_index, a_grid, a_wood, hi_k, lo_k;
+    Rgb road;                          /* road fill: carto_palette(), from the others */
 } P;
 
 /* the palettes: brass is the theme's own; the others are other kinds of map
@@ -656,6 +670,9 @@ static void palette(void) {
         P.panel = paper;
     }
 }
+
+/* the cartography's one colour of its own */
+static void carto_palette(void) { P.road = mixc(P.paper, P.label, 0.62f); }
 
 /* ---- GL ---- */
 #define GLSL(...) #__VA_ARGS__
@@ -748,6 +765,7 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
     uniform float aThin, aIndex, aGrid, aWood, kHi, kLo;
     uniform sampler2D uShade;                 /* the light: sun lit, cloud shadow */
     uniform float uT, kShadow, kCloud;
+    uniform vec3 cRoad, cSpot;                          /* cartography */
     out vec4 o;
 
     float Hh(vec2 w) { return texture(uH, (w + 0.5) / uN).r; }
@@ -866,7 +884,8 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
         vec2 g = 0.5 * vec2(Hh(w + ex) - Hh(w - ex), Hh(w + ey) - Hh(w - ey));   /* m per px */
         vec4 ax = Ax(w);
         float gl = max(length(g), 1e-4);
-        float knock = texelFetch(uMask, ivec2(gl_FragCoord.xy), 0).r;
+        vec4 mw = texelFetch(uMask, ivec2(gl_FragCoord.xy), 0);   /* r: knock-out; g, b, a: cartography */
+        float knock = max(mw.r, clamp(mw.b * 4.0, 0.0, 1.0));     /* roads clear a gap too */
 
         /* paper, tinted by height, and the hillshade: a broad gradient and
          * hollowness from four samples further out soften and deepen it */
@@ -900,6 +919,20 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
             vec2 ctr = (c + 0.25 + 0.5 * vec2(r01(uc, 1u), r01(uc, 2u))) * cs;
             float dot_ = clamp(0.8 * uS + 0.5 - length(ws - ctr), 0.0, 1.0);
             if (r01(uc, 3u) < dens) col = mix(col, cWood, dot_ * aWood * (1.0 - knock));
+        }
+
+        /* and in the thicker woods here and there a tree: a ring on a stalk,
+         * one at most to a 20 px world cell */
+        if (dens > 0.4) {
+            float ct = 20.0 * uS;
+            vec2 ws = sp + uOrgS, c = floor(ws / ct);
+            uvec2 uc = uvec2(ivec2(c) & 4095);
+            if (r01(uc, 13u) < 0.45 * smoothstep(0.4, 0.9, dens)) {
+                vec2 ctr = (c + 0.25 + 0.5 * vec2(r01(uc, 14u), r01(uc, 15u))) * ct;
+                float ring = cov(abs(length(ws - ctr) - 2.3 * uS), 0.9 * uS);
+                float stalk = cov(abs(ws.x - ctr.x), 0.9 * uS) * step(ctr.y + 2.3 * uS, ws.y) * step(ws.y, ctr.y + 5.5 * uS);
+                col = mix(col, cWood, max(ring, stalk) * min(1.0, aWood * 1.8) * (1.0 - knock));
+            }
         }
 
         /* kilometre grid */
@@ -944,6 +977,20 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
             }
         }
 
+        /* the coast: a vignette inside the shore and engraved hatching,
+         * level lines close in, thinning and parting further out */
+        if (wet > 0.0 && dsh > -40.0 * uS) {
+            float ds = -dsh / uS;
+            col = mix(col, cWaterInk, 0.16 * exp(-ds / 7.0) * wet);
+            float hp = 3.2 * uS, hy = (sp.y + uOrgS.y) / hp;  /* periods dividing uOrgS's */
+            float dh = abs(fract(hy) - 0.5) * hp;
+            float hx = (sp.x + uOrgS.x) / (40.0 * uS);
+            ivec2 hc = ivec2(floor(hy), floor(hx));
+            float run = mix(r01(uvec2(hc & 4095), 7u), r01(uvec2((hc + ivec2(0, 1)) & 4095), 7u), smoothstep(0.0, 1.0, fract(hx)));
+            float reach = 8.0 + 30.0 * run;
+            col = mix(col, cWaterInk, cov(dh, 0.55 * uS) * 0.45 * (1.0 - smoothstep(0.4 * reach, reach, ds)) * wet);
+        }
+
         /* contours, illuminated (Tanaka style): brighter and a touch bolder where the
          * slope faces the sun, darker and finer in its shade; intermediates
          * thin and then fade as they crowd, so steep ground stays legible;
@@ -980,6 +1027,25 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
         }
         col = mix(col, lidx, min(idx * aix, 1.0) * lines);
 
+        /* crags: wedge hachures down the steepest ground, one to a 5 px world
+         * cell, turned by the slope at the cell's middle */
+        if (slope > 0.75 && wet < 0.5) {
+            float cs = 5.0 * uS;
+            vec2 ws = sp + uOrgS, c = floor(ws / cs), wc = (c + 0.5) * cs - uOrgS + uOrgT;
+            vec2 gc = 0.5 * vec2(Hh(wc + ex) - Hh(wc - ex), Hh(wc + ey) - Hh(wc - ey));
+            float sc = length(gc) / uMpp, k = smoothstep(1.05, 1.6, sc);
+            uvec2 uc = uvec2(ivec2(c) & 4095);
+            if (k > 0.0 && r01(uc, 9u) < 0.2 + 0.8 * k) {
+                vec2 dir = gc / max(length(gc), 1e-5);       /* uphill */
+                vec2 rel = ws - (c + 0.5 + 0.3 * (vec2(r01(uc, 10u), r01(uc, 11u)) - 0.5)) * cs;
+                float al = dot(rel, dir), ac = abs(dot(rel, vec2(-dir.y, dir.x)));
+                float len = cs * (0.22 + 0.12 * k + 0.16 * r01(uc, 12u));
+                float wid = mix(0.25, 1.15, clamp(al / len * 0.5 + 0.5, 0.0, 1.0)) * uS;
+                float hach = cov(ac, wid) * (1.0 - smoothstep(len - 0.5, len + 0.5, abs(al)));
+                col = mix(col, cSpot, hach * 0.6 * k * (1.0 - knock));
+            }
+        }
+
         /* rivers: along their valleys, widening as they come down */
         if (abs(ax.x) < 0.06 && ax.w > 0.45) {
             vec2 gr = 0.5 * vec2(Ax(w + ex).x - Ax(w - ex).x, Ax(w + ey).x - Ax(w - ey).x);
@@ -988,6 +1054,15 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
             float ra = cov(dr, rw) * smoothstep(0.45, 0.75, ax.w) * (1.0 - wet) * (1.0 - knock);
             col = mix(col, cRiver, ra * 0.8);
         }
+
+        /* streams (G), roads (B: 0.25 the gap, 0.5 the casing, 1 the fill)
+         * and tracks and paths (A), stroked into the mask on the CPU; names
+         * knock them out */
+        float nk = 1.0 - mw.r;
+        col = mix(col, cRiver, mw.g * 0.9 * (1.0 - wet) * (1.0 - knock));
+        col = mix(col, cSpot, clamp(mw.b * 4.0 - 1.0, 0.0, 1.0) * 0.85 * nk);
+        col = mix(col, cRoad, clamp(mw.b * 2.0 - 1.0, 0.0, 1.0) * nk);
+        col = mix(col, cSpot, mw.a * 0.75 * nk);
 
         /* the shoreline itself */
         col = mix(col, cWaterInk, cov(abs(dsh), 1.1 * uS) * 0.8);
@@ -1052,11 +1127,13 @@ static const char *FS_QUAD = "#version 330 core\n" GLSL(
     void main() {
         if (vMode == 0) o = vec4(vCol.rgb, vCol.a * texture(uAtlas, vUV).r);
         else if (vMode == 1) o = vCol;
-        else {                                  /* knock-out: a rounded box, uv local px */
+        else if (vMode == 2) {                  /* knock-out: a rounded box, uv local px */
             vec2 q = abs(vUV) - vCol.xy + vCol.z;
             float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - vCol.z;
-            o = vec4(clamp(0.5 - d / 1.5, 0.0, 1.0));
+            o = vec4(clamp(0.5 - d / 1.5, 0.0, 1.0), 0.0, 0.0, 0.0);
         }
+        else                                    /* a stroke into the mask channels vCol */
+            o = vCol * clamp(vUV.y + 0.5 - abs(vUV.x), 0.0, 1.0);
     });
 
 static GLuint prog_bake, prog_map, prog_quad, vao, vao_q, vbo_q, tex_atlas;
@@ -1126,7 +1203,7 @@ static void targets(void) {
     static const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     glDrawBuffers(2, bufs);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) die("height framebuffer incomplete");
-    tex_mask = mk_tex(GL_R8, W, H, GL_RED, GL_UNSIGNED_BYTE, NULL, GL_NEAREST, GL_CLAMP_TO_EDGE);
+    tex_mask = mk_tex(GL_RGBA8, W, H, GL_RGBA, GL_UNSIGNED_BYTE, NULL, GL_NEAREST, GL_CLAMP_TO_EDGE);
     glGenFramebuffers(1, &fbo_mask);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_mask);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex_mask, 0);
@@ -1182,6 +1259,7 @@ static void gl_init(void) {
     u3(p, "cHi", P.hi); u3(p, "cLo", P.lo); u3(p, "cThin", P.thin); u3(p, "cIndex", P.index);
     u3(p, "cWater", P.water); u3(p, "cWaterInk", P.waterink); u3(p, "cWood", P.wood);
     u3(p, "cGrid", P.grid); u3(p, "cFrame", P.frame); u3(p, "cRiver", P.river);
+    u3(p, "cRoad", P.road); u3(p, "cSpot", P.spot);
     glUniform1f(U(p, "aThin"), P.a_thin); glUniform1f(U(p, "aIndex"), P.a_index);
     glUniform1f(U(p, "aGrid"), P.a_grid); glUniform1f(U(p, "aWood"), P.a_wood);
     glUniform1f(U(p, "kHi"), P.hi_k); glUniform1f(U(p, "kLo"), P.lo_k);
@@ -1239,6 +1317,666 @@ static int mx0, my0, mx1, my1;         /* the map's rectangle, px */
 
 typedef struct { float x, y, r; } Disc;
 
+/* ---- cartography: streams, settlements, roads and paths, place names ----
+ * All of it hangs off world cells (CELL, cached apart from the labels'),
+ * each a pure function of its cell, so nothing changes as the map drifts.
+ *   - streams: from a source in each cell, traced downhill until they reach
+ *     water, a river or a hollow, widening as they go;
+ *   - settlements on low, dry, gentle ground, a few blocks round a centre;
+ *   - ways: neighbouring settlements (a relative neighbourhood graph) joined
+ *     by the cheapest route over the ground on a coarse grid (A*, climbing
+ *     dear, height a little dear, water barred), which finds the valleys and
+ *     the passes; a route that has to go high becomes a track or a footpath;
+ *   - names, invented: settlements upright, water in italic (lakes, and
+ *     rivers by which level set they are), hills in small italic, regions in
+ *     spaced capitals; lakes named (up to four) per 7x7 cells,
+ *     a district per 4x4.
+ * Streams, roads and paths go into the mask's G, B and A channels (R stays
+ * the labels' knock-out; a road's B has three levels, gap, casing and fill)
+ * and FS_MAP inks them, so where they overlap they merge. Live, cells are built a few ms a frame,
+ * nearest first; offscreen, all at once. */
+typedef struct { float x, y, w; } Pt;                  /* world px; half width or alpha */
+typedef struct { int kind, n; Pt *p; } Way;
+enum { W_MAIN, W_ROAD, W_TRACK, W_PATH };
+typedef struct { int cx, cy, ok, has, size; double x, y; } Settle;
+typedef struct { int cx, cy, ok, nst, nw, river; Pt *st; Way w[8]; double rx, ry; float ra; char rname[32]; } Carto;
+typedef struct { int rx, ry, ok, lake; double lx[4], ly[4]; char lname[4][32]; } Tract;
+#define SK 64
+#define CCK 32
+#define RK 8
+#define RG 7                                           /* cells per region */
+static Settle settles[SK * SK];
+static Carto cartos[CCK * CCK];
+static Tract regions[RK * RK];
+
+static const char *const NM_A[] = {
+    "Ash", "Brack", "Thorn", "Hal", "Kel", "Mar", "Os", "Ral", "Sker", "Wen", "Gar", "Lang", "Bor", "Fen", "Hawk",
+    "Cal", "Dun", "Ell", "Gris", "Har", "Kirk", "Lof", "Mel", "Nor", "Pen", "Rook", "Sel", "Wray", "Ulls", "War",
+    "Yew", "Bran", "Cold", "Stan", "Whit", "Black", "Red", "Hart", "Swin", "Ald", "Brath", "Cray", "Esk", "Hest",
+    "Lune", "Moss", "Ry", "Sty", "Thirl", "Wast", "Bar", "Dent", "Gis", "Haw", "Ing", "Kes", "Lin", "Mun", "Ned",
+    "Ock", "Peel", "Rav", "Scar", "Tod", "Ulf", "Wyth", "Gow", "Arn", "Bleas", "Cop", "Dal", "Sca", "Grise"};
+static const char *const NM_TOWN[] = {
+    "by", "thwaite", "ton", "ham", "wick", "dale", "ford", "ley", "stead", "holme", "bury", "thorpe",
+    "side", "garth", "with", "burn", "worth", "field", "bridge", "beck", "ing", "sett", "hope", "wood"};
+#define NMN(a) ((uint32_t)(sizeof(a) / sizeof(a[0])))
+
+/* an invented name from a hash: 0 settlement, 1 lake, 2 river, 3 hill, 4 high
+ * region, 5 low region, 6 wooded region */
+static void name_make(uint32_t h, int kind, char *out, int n) {
+    const char *a = NM_A[h % NMN(NM_A)];
+    uint32_t v = h / NMN(NM_A);
+    char lo[24];
+    snprintf(lo, sizeof lo, "%s", a);
+    for (char *p = lo; *p; p++) *p = (char)tolower((unsigned char)*p);
+    switch (kind) {
+    case 0: snprintf(out, (size_t)n, "%s%s", a, NM_TOWN[v % NMN(NM_TOWN)]); break;
+    case 1: {
+        static const char *f[] = {"%swater", "%s Water", "%smere", "%s Mere", "%s Tarn", "%s Reservoir", "Loch %s"};
+        snprintf(out, (size_t)n, f[v % 7], a);
+        break;
+    }
+    case 2: {
+        static const char *e[] = {"", "e", "en", "ey", "an"};
+        const char *s = a[strlen(a) - 1] == 'e' || a[strlen(a) - 1] == 'y' ? "" : e[v % 5];
+        snprintf(out, (size_t)n, "River %s%s", a, s);
+        break;
+    }
+    case 3: {
+        static const char *f[] = {"%s Pike", "%s Fell", "High %s", "%s Crag", "%s Knott", "%s Howe", "%s Edge", "%s Top"};
+        snprintf(out, (size_t)n, f[v % 8], a);
+        break;
+    }
+    default: {
+        static const char *hi[] = {"%s FELLS", "%s MOOR", "HIGH %s", "%s FELL"};
+        static const char *low[] = {"%s MOSS", "%s COMMON", "VALE OF %s", "%sDALE"};
+        static const char *wd[] = {"%s FOREST", "%s CHASE", "%s WOODS"};
+        char up[24];
+        snprintf(up, sizeof up, "%s", a);
+        for (char *p = up; *p; p++) *p = (char)toupper((unsigned char)*p);
+        if (kind == 4) snprintf(out, (size_t)n, hi[v % 4], up);
+        else if (kind == 5) snprintf(out, (size_t)n, low[v % 4], up);
+        else snprintf(out, (size_t)n, wd[v % 3], up);
+    }
+    }
+    (void)lo;
+}
+
+/* the settlement in a cell, if any: the gentlest of a few low dry spots */
+static Settle *settle_get(int cx, int cy) {
+    Settle *s = &settles[posmod(cy, SK) * SK + posmod(cx, SK)];
+    if (s->ok && s->cx == cx && s->cy == cy) return s;
+    memset(s, 0, sizeof *s);
+    s->ok = 1; s->cx = cx; s->cy = cy;
+    uint32_t h = hash2(cx, cy, 900 + opt_seed * 13);
+    if ((h & 0xff) > 100) return s;
+    double best = 1e9;
+    float bh = 0;
+    for (int k = 0; k < 6; k++) {
+        uint32_t q = hash2(cx, cy, 910 + k + opt_seed * 13);
+        double x = (cx + 0.12 + 0.76 * (q & 0xffff) / 65536.0) * CELL, y = (cy + 0.12 + 0.76 * (q >> 16) / 65536.0) * CELL;
+        float t = T(x, y);
+        if (t < WATER_MAX + 6 || t > 320) continue;
+        double gx, gy;
+        grad(x, y, &gx, &gy);
+        double sl = sqrt(gx * gx + gy * gy) / MPP, c = sl * 5 + t / 400;
+        if (sl < 0.14 && c < best) { best = c; s->x = x; s->y = y; bh = t; }
+    }
+    if (best > 1e8) return s;
+    s->has = 1;
+    s->size = ((h >> 8) & 7) == 0 && bh < 150 ? 2 : (h >> 11) & 1 ? 1 : 0;
+    return s;
+}
+
+/* Douglas-Peucker: drop the points within tol px of the line; returns n */
+static int dp_keep(const Pt *p, unsigned char *keep, int a, int b, float tol) {
+    float dx = p[b].x - p[a].x, dy = p[b].y - p[a].y, l = fmaxf(sqrtf(dx * dx + dy * dy), 1e-6f), worst = 0;
+    int wi = -1;
+    for (int i = a + 1; i < b; i++) {
+        float d = fabsf((p[i].x - p[a].x) * dy - (p[i].y - p[a].y) * dx) / l;
+        if (d > worst) { worst = d; wi = i; }
+    }
+    if (wi < 0 || worst < tol) return 0;
+    keep[wi] = 1;
+    return 1 + dp_keep(p, keep, a, wi, tol) + dp_keep(p, keep, wi, b, tol);
+}
+static int simplify(Pt *p, int n, float tol) {
+    if (n < 3) return n;
+    unsigned char *keep = calloc((size_t)n, 1);
+    keep[0] = keep[n - 1] = 1;
+    dp_keep(p, keep, 0, n - 1, tol);
+    int m = 0;
+    for (int i = 0; i < n; i++)
+        if (keep[i]) p[m++] = p[i];
+    free(keep);
+    return m;
+}
+
+/* the cheapest route from a to b over the ground on a grid; 0 if none */
+typedef struct { float f; int i; } Hn;
+static void hpush(Hn *hp, int *n, Hn v) {
+    int i = (*n)++;
+    while (i && hp[(i - 1) / 2].f > v.f) { hp[i] = hp[(i - 1) / 2]; i = (i - 1) / 2; }
+    hp[i] = v;
+}
+static Hn hpop(Hn *hp, int *n) {
+    Hn top = hp[0], v = hp[--*n];
+    int i = 0;
+    for (;;) {
+        int c = 2 * i + 1;
+        if (c >= *n) break;
+        if (c + 1 < *n && hp[c + 1].f < hp[c].f) c++;
+        if (hp[c].f >= v.f) break;
+        hp[i] = hp[c]; i = c;
+    }
+    hp[i] = v;
+    return top;
+}
+static int route(double ax, double ay, double bx, double by, Way *out, float *maxh) {
+    double G = 9 * S, L = hypot(bx - ax, by - ay), pad = fmax(0.35 * L, 60 * S);
+    double x0 = fmin(ax, bx) - pad, y0 = fmin(ay, by) - pad;
+    int nx = (int)((fabs(bx - ax) + 2 * pad) / G) + 2, ny = (int)((fabs(by - ay) + 2 * pad) / G) + 2, N = nx * ny;
+    float *ht = malloc(sizeof(float) * N * 2), *gs = ht + N;
+    int *from = malloc(sizeof(int) * N);
+    Hn *hp = malloc(sizeof(Hn) * N * 16);
+    unsigned char *closed = calloc((size_t)N, 1);
+    for (int i = 0; i < N; i++) { ht[i] = NAN; gs[i] = 1e30f; }
+    int si = (int)lround((ax - x0) / G) + nx * (int)lround((ay - y0) / G);
+    int gi_ = (int)lround((bx - x0) / G) + nx * (int)lround((by - y0) / G);
+    int gx_ = gi_ % nx, gy_ = gi_ / nx, sx_ = si % nx, sy_ = si / nx;
+    int nh = 0, found = 0;
+    float dm = (float)(G * MPP);
+    gs[si] = 0; from[si] = -1;
+    hpush(hp, &nh, (Hn){0, si});
+    while (nh) {
+        Hn u = hpop(hp, &nh);
+        if (closed[u.i]) continue;
+        closed[u.i] = 1;
+        if (u.i == gi_) { found = 1; break; }
+        int ux = u.i % nx, uy = u.i / nx;
+        if (isnan(ht[u.i])) ht[u.i] = T(x0 + ux * G, y0 + uy * G);
+        for (int k = 0; k < 16; k++) {                 /* kings' and knights' moves */
+            static const int dx[16] = {1, -1, 0, 0, 1, 1, -1, -1, 2, 2, -2, -2, 1, 1, -1, -1};
+            static const int dy[16] = {0, 0, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 2, -2, 2, -2};
+            int vx = ux + dx[k], vy = uy + dy[k];
+            if (vx < 0 || vy < 0 || vx >= nx || vy >= ny) continue;
+            int v = vy * nx + vx;
+            if (closed[v]) continue;
+            if (isnan(ht[v])) ht[v] = T(x0 + vx * G, y0 + vy * G);
+            int nearend = abs(vx - gx_) + abs(vy - gy_) <= 2 || abs(vx - sx_) + abs(vy - sy_) <= 2;
+            if (ht[v] < WATER_MAX + 1.5f && !nearend) continue;
+            float d = k < 4 ? dm : k < 8 ? dm * 1.41421f : dm * 2.23607f, gr = fabsf(ht[v] - ht[u.i]) / d / 0.07f;
+            float c = gs[u.i] + d * (1 + gr * gr + fmaxf(ht[v], 0) / 500);
+            if (c < gs[v]) {
+                gs[v] = c; from[v] = u.i;
+                float hx = (float)((vx - gx_) * G * MPP), hy = (float)((vy - gy_) * G * MPP);
+                hpush(hp, &nh, (Hn){c + 1.25f * sqrtf(hx * hx + hy * hy), v});
+                if (nh >= N * 16 - 16) nh = 0;          /* give up */
+            }
+        }
+    }
+    int n = 0;
+    if (found) {
+        for (int i = gi_; i >= 0; i = from[i]) n++;
+        if (gs[gi_] > 6 * L * MPP + 3000) found = 0;   /* too dear: no way */
+    }
+    if (found) {
+        /* the grid path, its ends at the settlements, eased off the grid,
+         * then Chaikin thrice */
+        Pt *p = malloc(sizeof(Pt) * (size_t)n);
+        int k = n;
+        float mh = 0;
+        for (int i = gi_; i >= 0; i = from[i]) {
+            k--;
+            p[k].x = (float)(x0 + (i % nx) * G); p[k].y = (float)(y0 + (i / nx) * G);
+            if (ht[i] > mh) mh = ht[i];
+        }
+        p[0].x = (float)ax; p[0].y = (float)ay; p[n - 1].x = (float)bx; p[n - 1].y = (float)by;
+        for (int r = 0; r < 5; r++) {
+            Pt prev = p[0];
+            for (int i = 1; i + 1 < n; i++) {
+                Pt cur = p[i];
+                p[i].x = 0.25f * prev.x + 0.5f * cur.x + 0.25f * p[i + 1].x;
+                p[i].y = 0.25f * prev.y + 0.5f * cur.y + 0.25f * p[i + 1].y;
+                prev = cur;
+            }
+        }
+        for (int r = 0; r < 3 && n > 2; r++) {
+            Pt *q = malloc(sizeof(Pt) * (size_t)(2 * n));
+            int m = 0;
+            q[m++] = p[0];
+            for (int i = 0; i + 1 < n; i++) {
+                q[m++] = (Pt){0.75f * p[i].x + 0.25f * p[i + 1].x, 0.75f * p[i].y + 0.25f * p[i + 1].y, 0};
+                q[m++] = (Pt){0.25f * p[i].x + 0.75f * p[i + 1].x, 0.25f * p[i].y + 0.75f * p[i + 1].y, 0};
+            }
+            q[m++] = p[n - 1];
+            free(p); p = q; n = m;
+        }
+        n = simplify(p, n, 0.2f);
+        out->p = p; out->n = n; *maxh = mh;
+    }
+    free(ht); free(from); free(hp); free(closed);
+    return found;
+}
+
+/* a stream from (x, y) downhill: points with w = half width; returns count */
+static int trace_stream(double x, double y, Pt **out) {
+    int cap = 256, n = 0;
+    Pt *p = malloc(sizeof(Pt) * (size_t)cap);
+    double step = 2.5 * S, len = 0, dx = 0, dy = 0;
+    float h = T(x, y), lowest = h;
+    int flat = 0, end = 0, spill = 0, stall = 0;
+    double lowlen = 0;
+    for (int i = 0; i < 420 && !end; i++) {
+        double gx, gy;
+        grad(x, y, &gx, &gy);
+        double gl = sqrt(gx * gx + gy * gy);
+        if (spill) {                                   /* across a hollow: straight on */
+            if (++spill > 50) { end = 2; break; }
+        } else if (gl > 1e-3) {
+            double ex = -gx / gl, ey = -gy / gl;
+            if (i) { ex += 0.6 * dx; ey += 0.6 * dy; }
+            double el = hypot(ex, ey);
+            if (el < 1e-6) break;
+            dx = ex / el; dy = ey / el;
+            flat = 0;
+        } else if (++flat > 24 || !i) { end = 2; break; }
+        x += dx * step; y += dy * step; len += step;
+        h = T(x, y);
+        if (h > lowest + 12) { end = 2; break; }      /* a hollow it can't spill from */
+        if (h < lowest - 0.3f) { lowest = h; lowlen = len; spill = stall = 0; }
+        else if (!spill && (h > lowest + 1.5f || ++stall > 24)) spill = 1;
+        if (h < -2) end = 1;                           /* into the water */
+        else if (!(i & 3)) {
+            float g[4];
+            terrain((float)(x * MPP) + seed_x, (float)(y * MPP) + seed_z, g);
+            if (fabsf(g[1]) < 0.012f && g[3] > 0.5f) end = 1;   /* into a river */
+        }
+        if ((i & 1) || end) {
+            if (n == cap) p = realloc(p, sizeof(Pt) * (size_t)(cap *= 2));
+            p[n++] = (Pt){(float)x, (float)y, (float)len};
+        }
+    }
+    /* drawn from a little way below the source; lost in a hollow, only down
+     * to its lowest point, and only if it's run far by then */
+    if (end != 1) {
+        while (n && p[n - 1].w > lowlen) n--;
+        if (lowlen < 170 * S) n = 0;
+    }
+    if (len < 110 * S) n = 0;
+    for (int i = 0; i < n; i++) {
+        float l = p[i].w;
+        p[i].w = S * (0.35f + 0.7f * smoothstep(0, 520 * S, l)) * (l < 30 * S ? -1 : 1);
+    }
+    n = simplify(p, n, 0.25f);
+    *out = p;
+    return n;
+}
+
+/* a point on a river in the cell, if one runs through it, the way it runs
+ * and its name (by which level set it is) */
+static int river_spot(int cx, int cy, double *ox_, double *oy_, float *oa, char *buf, int n) {
+    double x = (cx + 0.5) * CELL, y = (cy + 0.5) * CELL;
+    float g[4];
+    int ok = 0;
+    for (int it = 0; it < 6; it++) {           /* Newton onto rv = 0 */
+        terrain((float)(x * MPP) + seed_x, (float)(y * MPP) + seed_z, g);
+        float e[4], f2[4];
+        terrain((float)((x + 1) * MPP) + seed_x, (float)(y * MPP) + seed_z, e);
+        terrain((float)(x * MPP) + seed_x, (float)((y + 1) * MPP) + seed_z, f2);
+        double rx = e[1] - g[1], ry = f2[1] - g[1], r2 = rx * rx + ry * ry;
+        if (r2 < 1e-14) break;
+        double k = g[1] / r2;
+        if (fabs(k) * sqrt(r2) > CELL * 0.5) break;
+        x -= k * rx; y -= k * ry;
+        if (fabsf(g[1]) < 1e-4f) { ok = 1; break; }
+    }
+    if (!ok || g[3] < 0.7f || g[0] < WATER_MAX + 2) return 0;
+    if (x < cx * CELL || x >= (cx + 1) * CELL || y < cy * CELL || y >= (cy + 1) * CELL) return 0;
+    float e[4];
+    terrain((float)((x + 1) * MPP) + seed_x, (float)(y * MPP) + seed_z, e);
+    float f2[4];
+    terrain((float)(x * MPP) + seed_x, (float)((y + 1) * MPP) + seed_z, f2);
+    float a = atan2f(-(e[1] - g[1]), f2[1] - g[1]);   /* along the river */
+    if (a > (float)M_PI / 2) a -= (float)M_PI;
+    if (a <= -(float)M_PI / 2) a += (float)M_PI;
+    /* which river: the level set's index */
+    float wx = fbm((float)(x * MPP + seed_x) / 6000, (float)(y * MPP + seed_z) / 6000, 3, 71) - 0.5f;
+    float wz = fbm((float)(x * MPP + seed_x) / 6000 + 5.2f, (float)(y * MPP + seed_z) / 6000 + 1.3f, 3, 72) - 0.5f;
+    float X = (float)(x * MPP + seed_x) + wx * 2000, Z = (float)(y * MPP + seed_z) + wz * 2000;
+    float qx = X + (fbm(X / 4200 + 3.1f, Z / 4200 - 7.7f, 3, 91) - 0.5f) * 2600;
+    float qz = Z + (fbm(X / 4200 - 1.9f, Z / 4200 + 4.4f, 3, 92) - 0.5f) * 2600;
+    int id = (int)lroundf((0.6f * qx + 0.8f * qz) / 6000);
+    name_make(hash2(id, 0, 1400 + opt_seed * 5), 2, buf, n);
+    *ox_ = x; *oy_ = y; *oa = a;
+    return 1;
+}
+
+static void carto_build(Carto *c, int cx, int cy) {
+    free(c->st);
+    for (int i = 0; i < c->nw; i++) free(c->w[i].p);
+    memset(c, 0, sizeof *c);
+    c->cx = cx; c->cy = cy; c->ok = 1;
+    /* streams, from hashed sources high enough to run somewhere, one after
+     * another with a w = 0 point between */
+    for (int k = 0; k < 3; k++) {
+        uint32_t h = hash2(cx, cy, 700 + k + opt_seed * 11);
+        double x = (cx + 0.1 + 0.8 * ((h >> 8) & 0xfff) / 4096.0) * CELL, y = (cy + 0.1 + 0.8 * (h >> 20) / 4096.0) * CELL;
+        if (T(x, y) < 40) continue;
+        Pt *p;
+        int n = trace_stream(x, y, &p);
+        if (!n) { free(p); continue; }
+        c->st = realloc(c->st, sizeof(Pt) * (size_t)(c->nst + n + 1));
+        memcpy(c->st + c->nst, p, sizeof(Pt) * (size_t)n);
+        c->nst += n;
+        c->st[c->nst++] = (Pt){0, 0, 0};
+        free(p);
+    }
+    /* a river through it, for a name */
+    if (!(hash2(cx, cy, 1300) & 1)) c->river = river_spot(cx, cy, &c->rx, &c->ry, &c->ra, c->rname, sizeof c->rname);
+    /* ways to the neighbours this cell's settlement owns */
+    Settle *a = settle_get(cx, cy);
+    if (!a->has) return;
+    for (int by = cy - 3; by <= cy + 3; by++)
+        for (int bx = cx - 3; bx <= cx + 3; bx++) {
+            if (by < cy || (by == cy && bx <= cx) || c->nw == 8) continue;
+            Settle *b = settle_get(bx, by);
+            if (!b->has) continue;
+            double ab = hypot(b->x - a->x, b->y - a->y);
+            if (ab > 3.1 * CELL) continue;
+            int rng = 1;
+            for (int qy = cy - 4; qy <= cy + 4 && rng; qy++)
+                for (int qx = cx - 4; qx <= cx + 4 && rng; qx++) {
+                    Settle *q = settle_get(qx, qy);
+                    if (!q->has || q == a || q == b) continue;
+                    if (hypot(q->x - a->x, q->y - a->y) < ab && hypot(q->x - b->x, q->y - b->y) < ab) rng = 0;
+                }
+            if (!rng) continue;
+            Way *w = &c->w[c->nw];
+            float mh;
+            if (!route(a->x, a->y, b->x, b->y, w, &mh)) continue;
+            w->kind = mh > 300 ? W_PATH : mh > 190 ? W_TRACK : a->size + b->size >= 3 ? W_MAIN : W_ROAD;
+            c->nw++;
+        }
+}
+
+static Carto *carto_get(int cx, int cy, int build) {
+    Carto *c = &cartos[posmod(cy, CCK) * CCK + posmod(cx, CCK)];
+    if (!c->ok || c->cx != cx || c->cy != cy) {
+        if (!build) return NULL;
+        carto_build(c, cx, cy);
+    }
+    return c;
+}
+
+/* lake labels: the deepest water with room round it, then the next deepest
+ * well away from those, up to four */
+static Tract *region_get(int rx, int ry) {
+    Tract *r = &regions[posmod(ry, RK) * RK + posmod(rx, RK)];
+    if (r->ok && r->rx == rx && r->ry == ry) return r;
+    memset(r, 0, sizeof *r);
+    r->ok = 1; r->rx = rx; r->ry = ry;
+    double R = RG * (double)CELL, x0 = rx * R, y0 = ry * R;
+    struct { float t; double x, y; } c[144];
+    int nc = 0;
+    for (int j = 0; j < 12; j++)
+        for (int i = 0; i < 12; i++) {
+            double x = x0 + (i + 0.5) * R / 12, y = y0 + (j + 0.5) * R / 12;
+            float t = T(x, y);
+            if (t > -6) continue;
+            int room = 1;
+            for (int k = 0; k < 6 && room; k++)
+                if (T(x + 90 * S * cos(k * M_PI / 3), y + 35 * S * sin(k * M_PI / 3)) > -1) room = 0;
+            if (room) { c[nc].t = t; c[nc].x = x; c[nc++].y = y; }
+        }
+    for (int i = 1; i < nc; i++)
+        for (int j = i; j > 0 && c[j].t < c[j - 1].t; j--) { __typeof__(c[0]) s = c[j]; c[j] = c[j - 1]; c[j - 1] = s; }
+    for (int i = 0; i < nc && r->lake < 4; i++) {
+        int far = 1;
+        for (int k = 0; k < r->lake && far; k++) far = hypot(c[i].x - r->lx[k], c[i].y - r->ly[k]) > 650 * S;
+        if (!far) continue;
+        r->lx[r->lake] = c[i].x; r->ly[r->lake] = c[i].y;
+        name_make(hash2(rx * 4 + r->lake, ry, 1100 + opt_seed * 5), 1, r->lname[r->lake], sizeof r->lname[0]);
+        r->lake++;
+    }
+    return r;
+}
+/* a district's name, if it has one, and where it goes: per 4x4 cells */
+static int district(int rx, int ry, double *x, double *y, char *buf, int n) {
+    uint32_t h = hash2(rx, ry, 1200 + opt_seed * 5);
+    if ((h & 7) > 3) return 0;
+    *x = (rx + 0.25 + 0.5 * ((h >> 3) & 0xfff) / 4096.0) * 4 * CELL;
+    *y = (ry + 0.25 + 0.5 * (h >> 20) / 4096.0) * 4 * CELL;
+    float g[4];
+    terrain((float)(*x * MPP) + seed_x, (float)(*y * MPP) + seed_z, g);
+    int kind = g[0] > 360 ? 4 : g[2] > 0.6f && g[0] > 20 ? 6 : g[0] > 30 && g[0] < 220 ? 5 : -1;
+    if (kind < 0) return 0;
+    name_make(hash2(rx, ry, 1250 + opt_seed * 5), kind, buf, n);
+    return 1;
+}
+
+/* AA strokes into the mask, uv = (px across, half width), colour = channels */
+static void mseg(float x0, float y0, float x1, float y1, float hw, const float ch[4]) {
+    float dx = x1 - x0, dy = y1 - y0, l = sqrtf(dx * dx + dy * dy);
+    if (l < 1e-3f) return;
+    dx /= l; dy /= l;
+    float e = hw * 0.7f + 0.5f, s = hw + 1;
+    float q[8] = {x0 - dx * e - dy * s, y0 - dy * e + dx * s, x1 + dx * e - dy * s, y1 + dy * e + dx * s,
+                  x1 + dx * e + dy * s, y1 + dy * e - dx * s, x0 - dx * e + dy * s, y0 - dy * e - dx * s};
+    float t[8] = {s, hw, s, hw, -s, hw, -s, hw};
+    quad(&mk, q, t, ch, 3);
+}
+/* a polyline at screen offset (ox, oy): dashes on/off px (on = 0: solid) */
+static void mline(const Pt *p, int n, double ox, double oy, float hw, float on, float off, const float ch[4]) {
+    float ph_ = 0;
+    for (int i = 0; i + 1 < n; i++) {
+        float x0 = (float)(p[i].x - ox), y0 = (float)(p[i].y - oy), x1 = (float)(p[i + 1].x - ox), y1 = (float)(p[i + 1].y - oy);
+        float l = hypotf(x1 - x0, y1 - y0);
+        if (fmaxf(x0, x1) < mx0 - 20 || fminf(x0, x1) > mx1 + 20 || fmaxf(y0, y1) < my0 - 20 || fminf(y0, y1) > my1 + 20) {
+            ph_ = on > 0 ? fmodf(ph_ + l, on + off) : 0;
+            continue;
+        }
+        if (on <= 0) { mseg(x0, y0, x1, y1, hw, ch); continue; }
+        float a = 0;
+        while (a < l) {
+            float r = fmaxf(ph_ < on ? on - ph_ : on + off - ph_, 0.05f), b = fminf(l, a + r);
+            if (b <= a) break;
+            if (ph_ < on && b - a > 0.3f)
+                mseg(x0 + (x1 - x0) * a / l, y0 + (y1 - y0) * a / l, x0 + (x1 - x0) * b / l, y0 + (y1 - y0) * b / l, hw, ch);
+            ph_ = fmodf(ph_ + (b - a), on + off);
+            a = b;
+        }
+    }
+}
+
+/* the streams, ways and settlement blocks round the view */
+static void build_carto(double ox, double oy) {
+    int M = 4;
+    int cx0 = (int)floor((ox + mx0) / CELL) - M, cx1 = (int)floor((ox + mx1) / CELL) + M;
+    int cy0 = (int)floor((oy + my0) / CELL) - M, cy1 = (int)floor((oy + my1) / CELL) + M;
+    /* build: everything offscreen; live, nearest the middle first, ~4 ms */
+    int missing = 0;
+    for (int cy = cy0; cy <= cy1 && !missing; cy++)
+        for (int cx = cx0; cx <= cx1 && !missing; cx++) missing = !carto_get(cx, cy, 0);
+    double t0 = now(), budget = opt_shot || opt_bench ? 1e9 : 0.004;
+    double mx = (ox + W * 0.5) / CELL, my = (oy + H * 0.5) / CELL;
+    int rings = (int)fmax(fmax(mx - cx0, cx1 + 1 - mx), fmax(my - cy0, cy1 + 1 - my)) + 1;
+    for (int ring = 0; missing && ring <= rings && now() - t0 < budget; ring++)
+        for (int cy = cy0; cy <= cy1; cy++)
+            for (int cx = cx0; cx <= cx1; cx++) {
+                int d = (int)fmax(fabs(cx + 0.5 - mx), fabs(cy + 0.5 - my));
+                if (d == ring && !carto_get(cx, cy, 0) && now() - t0 < budget) carto_get(cx, cy, 1);
+            }
+    static const float CH_ST[4] = {0, 1, 0, 0}, CH_RD[4] = {0, 0, 1, 0}, CH_PT[4] = {0, 0, 0, 1};
+    static const float CH_KN[4] = {0, 0, 0.25f, 0}, CH_RD2[4] = {0, 0, 0.5f, 0};
+    for (int cy = cy0; cy <= cy1; cy++)
+        for (int cx = cx0; cx <= cx1; cx++) {
+            Carto *c = carto_get(cx, cy, 0);
+            if (!c) continue;
+            /* the streams, fading in from their sources */
+            for (int i = 0; i + 1 < c->nst; i++) {
+                const Pt *a = &c->st[i], *b = &c->st[i + 1];
+                if (a->w == 0 || b->w == 0) continue;
+                float x0 = (float)(a->x - ox), y0 = (float)(a->y - oy), x1 = (float)(b->x - ox), y1 = (float)(b->y - oy);
+                if (fmaxf(x0, x1) < mx0 - 8 || fminf(x0, x1) > mx1 + 8 || fmaxf(y0, y1) < my0 - 8 || fminf(y0, y1) > my1 + 8) continue;
+                float ch[4] = {0, a->w < 0 ? 0.5f : 1, 0, 0};
+                mseg(x0, y0, x1, y1, fabsf(b->w), a->w < 0 ? ch : CH_ST);
+            }
+            for (int i = 0; i < c->nw; i++) {
+                const Way *w = &c->w[i];
+                switch (w->kind) {
+                case W_MAIN:
+                    mline(w->p, w->n, ox, oy, 2.9f * S, 0, 0, CH_KN);
+                    mline(w->p, w->n, ox, oy, 2.1f * S, 0, 0, CH_RD2);
+                    mline(w->p, w->n, ox, oy, 1.3f * S, 0, 0, CH_RD);
+                    break;
+                case W_ROAD:
+                    mline(w->p, w->n, ox, oy, 2.2f * S, 0, 0, CH_KN);
+                    mline(w->p, w->n, ox, oy, 1.5f * S, 0, 0, CH_RD2);
+                    mline(w->p, w->n, ox, oy, 0.75f * S, 0, 0, CH_RD);
+                    break;
+                case W_TRACK:
+                    mline(w->p, w->n, ox, oy, 0.65f * S, 7 * S, 3.5f * S, CH_PT);
+                    break;
+                default:
+                    mline(w->p, w->n, ox, oy, 0.6f * S, 2.6f * S, 2.6f * S, CH_PT);
+                }
+            }
+        }
+    /* settlements: a few blocks round the centre, more for a bigger place */
+    float bc[4];
+    rgba(bc, P.spot, 0.9f);
+    for (int cy = cy0 + M - 1; cy <= cy1 - M + 1; cy++)
+        for (int cx = cx0 + M - 1; cx <= cx1 - M + 1; cx++) {
+            Settle *s = settle_get(cx, cy);
+            if (!s->has) continue;
+            int nb = s->size == 2 ? 11 : s->size == 1 ? 6 : 3;
+            float rad = (s->size == 2 ? 13 : s->size == 1 ? 8 : 5) * S;
+            for (int k = 0; k < nb; k++) {
+                uint32_t q = hash2(cx * 31 + k, cy, 950 + opt_seed);
+                float a = (q & 0xff) / 256.0f * 6.2832f, r = rad * sqrtf(((q >> 8) & 0xff) / 256.0f);
+                float bx = (float)(s->x - ox) + r * cosf(a), by = (float)(s->y - oy) + r * sinf(a);
+                float hw = (1.6f + 1.4f * ((q >> 16) & 0xff) / 256.0f) * S, hh = hw * 0.65f;
+                float an = (q >> 24) / 256.0f * 1.5708f, co = cosf(an), si = sinf(an);
+                float lx[4] = {-hw, hw, hw, -hw}, ly[4] = {-hh, -hh, hh, hh}, qq[8], tt[8] = {0};
+                for (int j = 0; j < 4; j++) { qq[2 * j] = bx + lx[j] * co - ly[j] * si; qq[2 * j + 1] = by + lx[j] * si + ly[j] * co; }
+                quad(&ov, qq, tt, bc, 1);
+                knock(bx, by, an, hw, hh);
+            }
+        }
+}
+
+/* room for a box (centre, angle, w x h) among the placed discs, bar any
+ * centred within claim_skip.r of claim_skip (a name's own spot height); take
+ * it if so */
+static Disc claim_skip;
+static int claim(Disc *pl, int *np, int cap, float x, float y, float ang, float w, float h) {
+    int n = (int)ceilf(w / h) + 1;
+    if (*np + n > cap) return 0;
+    float co = cosf(ang), si = sinf(ang), r = h * 0.75f;
+    for (int i = 0; i < n; i++) {
+        float t = n > 1 ? (i / (float)(n - 1) - 0.5f) * (w - h) : 0, dx = x + t * co, dy = y + t * si;
+        if (dx < mx0 + 12 * S || dx > mx1 - 12 * S || dy < my0 + 12 * S || dy > my1 - 12 * S) return 0;
+        for (int k = 0; k < *np; k++)
+            if (hypotf(dx - pl[k].x, dy - pl[k].y) < r + pl[k].r + 3 * S &&
+                hypotf(pl[k].x - claim_skip.x, pl[k].y - claim_skip.y) >= claim_skip.r) return 0;
+    }
+    for (int i = 0; i < n; i++) {
+        float t = n > 1 ? (i / (float)(n - 1) - 0.5f) * (w - h) : 0;
+        pl[(*np)++] = (Disc){x + t * co, y + t * si, r};
+    }
+    return 1;
+}
+
+/* place names, after the spot heights and before the contour labels */
+static void place_names(double ox, double oy, Disc *pl, int *np, int cap) {
+    float sc[4], wc[4], gc[4], hc[4];
+    rgba(sc, P.spot, 0.95f); rgba(wc, P.waterink, 0.95f); rgba(gc, P.frame, 0.9f); rgba(hc, P.spot, 0.75f);
+    char buf[48];
+    /* settlements biggest first, then lakes, rivers, hills; districts last */
+    int cx0 = (int)floor((ox + mx0) / CELL), cx1 = (int)floor((ox + mx1) / CELL);
+    int cy0 = (int)floor((oy + my0) / CELL), cy1 = (int)floor((oy + my1) / CELL);
+    for (int pass = 2; pass >= 0; pass--)
+        for (int cy = cy0; cy <= cy1; cy++)
+            for (int cx = cx0; cx <= cx1; cx++) {
+                Settle *s = settle_get(cx, cy);
+                if (!s->has || s->size != pass) continue;
+                name_make(hash2(cx, cy, 990 + opt_seed * 3), 0, buf, sizeof buf);
+                const Face *f = &fonts[pass == 2 ? F_TOWN : pass == 1 ? F_PLACE : F_SMALL];
+                float tw = text_w(f, buf, 0), th = cap_h(f), rad = (pass == 2 ? 15 : pass == 1 ? 10 : 7) * S;
+                float x = (float)(s->x - ox), y = (float)(s->y - oy);
+                /* right, left, above, below */
+                float ax[4] = {x + rad + 4 * S + tw * 0.5f, x - rad - 4 * S - tw * 0.5f, x, x};
+                float ay[4] = {y, y, y - rad - 4 * S - th * 0.5f, y + rad + 4 * S + th * 0.5f};
+                for (int k = 0; k < 4; k++)
+                    if (claim(pl, np, cap, ax[k], ay[k], 0, tw + 4 * S, th + 6 * S)) {
+                        text(&ov, f, buf, ax[k], ay[k], 0, 0.5f, th * 0.5f, 0, sc);
+                        knock(ax[k], ay[k], 0, tw * 0.5f + 2 * S, th * 0.5f + 2.5f * S);
+                        break;
+                    }
+            }
+    int rx0 = (int)floor(((ox + mx0) / CELL - 0) / RG), rx1 = (int)floor((ox + mx1) / CELL / RG);
+    int ry0 = (int)floor((oy + my0) / CELL / RG), ry1 = (int)floor((oy + my1) / CELL / RG);
+    for (int ry = ry0; ry <= ry1; ry++)
+        for (int rx = rx0; rx <= rx1; rx++) {
+            Tract *r = region_get(rx, ry);
+            for (int i = 0; i < r->lake; i++) {
+                const Face *f = &fonts[F_WATER];
+                float tr = roundf(2 * S), tw = text_w(f, r->lname[i], tr), th = cap_h(f);
+                float x = (float)(r->lx[i] - ox), y = (float)(r->ly[i] - oy);
+                if (claim(pl, np, cap, x, y, 0, tw + 6 * S, th + 6 * S))
+                    text(&ov, f, r->lname[i], x, y, 0, 0.5f, th * 0.5f, tr, wc);
+            }
+        }
+    /* rivers: a point on each river in view, named by its level set */
+    for (int cy = cy0; cy <= cy1; cy++)
+        for (int cx = cx0; cx <= cx1; cx++) {
+            Carto *cc = carto_get(cx, cy, 0);
+            if (!cc || !cc->river) continue;
+            double x = cc->rx, y = cc->ry;
+            float a = cc->ra;
+            snprintf(buf, sizeof buf, "%s", cc->rname);
+            const Face *f = &fonts[F_WATER];
+            float tr = roundf(1.5f * S), tw = text_w(f, buf, tr), th = cap_h(f);
+            /* beside the water, not on it */
+            float off = th * 0.5f + 8 * S, nx = -sinf(a), ny = cosf(a);
+            float px = (float)(x - ox) - nx * off, py = (float)(y - oy) - ny * off;
+            if (claim(pl, np, cap, px, py, a, tw + 6 * S, th + 5 * S)) {
+                text(&ov, f, buf, px, py, a, 0.5f, th * 0.5f, tr, wc);
+                knock(px, py, a, tw * 0.5f + 2 * S, th * 0.5f + 2 * S);
+            }
+        }
+    /* hills: the higher spot heights, named in small italic beneath */
+    for (int cy = (int)floor((oy + my0) / CELL); cy <= (int)floor((oy + my1) / CELL); cy++)
+        for (int cx = (int)floor((ox + mx0) / CELL); cx <= (int)floor((ox + mx1) / CELL); cx++) {
+            Cell *c = cell_get(cx, cy, 0);
+            if (!c || !c->spot || c->sv < 380 || (hash2(cx, cy, 1500 + opt_seed) & 3) == 0) continue;
+            name_make(hash2(cx, cy, 1600 + opt_seed * 5), 3, buf, sizeof buf);
+            const Face *f = &fonts[F_HILL];
+            float tw = text_w(f, buf, 0), th = cap_h(f);
+            float x = (float)(c->sx - ox), y = (float)(c->sy - oy) + 8 * S + th * 0.5f + 3 * S;
+            claim_skip = (Disc){x + 14 * S, (float)(c->sy - oy), 20 * S};
+            int ok = claim(pl, np, cap, x + tw * 0.5f - 4 * S, y, 0, tw + 4 * S, th + 4 * S);
+            claim_skip.r = 0;
+            if (ok) {
+                text(&ov, f, buf, x - 4 * S, y, 0, 0, th * 0.5f, 0, hc);
+                knock(x + tw * 0.5f - 4 * S, y, 0, tw * 0.5f + 2 * S, th * 0.5f + 2 * S);
+            }
+        }
+    /* regions: spaced capitals, overprinted lightly */
+    for (int ry = (int)floor((oy + my0) / CELL / 4); ry <= (int)floor((oy + my1) / CELL / 4); ry++)
+        for (int rx = (int)floor((ox + mx0) / CELL / 4); rx <= (int)floor((ox + mx1) / CELL / 4); rx++) {
+            double gx, gy;
+            if (!district(rx, ry, &gx, &gy, buf, sizeof buf)) continue;
+            const Face *f = &fonts[F_REGION];
+            float tr = roundf(f->px * 0.55f), tw = text_w(f, buf, tr), th = cap_h(f);
+            float x = (float)(gx - ox), y = (float)(gy - oy);
+            if (claim(pl, np, cap, x, y, 0, tw + 8 * S, th + 8 * S)) {
+                text(&ov, f, buf, x, y, 0, 0.5f, th * 0.5f, tr, gc);
+                knock(x, y, 0, tw * 0.5f + 3 * S, th * 0.5f + 2 * S);
+            }
+        }
+}
+
 static void build_features(double ox, double oy) {
     float lc[4], sc[4], tc[4];
     rgba(lc, P.label, 0.95f); rgba(sc, P.spot, 0.85f); rgba(tc, P.tri, 0.95f);
@@ -1269,9 +2007,11 @@ static void build_features(double ox, double oy) {
         for (int j = i; j > 0 && f[j].pri < f[j - 1].pri; j--) {
             __typeof__(f[0]) t = f[j]; f[j] = f[j - 1]; f[j - 1] = t;
         }
-    Disc placed[MAXF];
-    int np = 0;
-    for (int i = 0; i < nf; i++) {
+    Disc placed[2 * MAXF];
+    int np = 0, named = 0;
+    for (int i = 0; i <= nf; i++) {
+        if (!named && (i == nf || f[i].kind == 1)) { place_names(ox, oy, placed, &np, MAXF); named = 1; }
+        if (i == nf || np >= 2 * MAXF) break;
         float x = (float)(f[i].x - ox), y = (float)(f[i].y - oy);
         Cell *c = f[i].c;
         char buf[16];
@@ -1529,6 +2269,7 @@ static void render(double t, GLuint target) {
     /* the overlay and the knock-outs */
     ov.n = mk.n = 0;
     build_walker(t, ox, oy);
+    build_carto(ox, oy);
     build_features(ox, oy);
     ov_split = ov.n;
     build_margin(ox, oy);
@@ -1541,7 +2282,7 @@ static void render(double t, GLuint target) {
 
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_mask);
     glViewport(0, 0, W, H);
-    glClearColor(0, 0, 0, 1);
+    glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
     glEnable(GL_BLEND);
     glBlendEquation(GL_MAX);
@@ -1776,6 +2517,7 @@ int main(int argc, char **argv) {
     MPP = 6.5f / S;
     CELL = 190 * S;
     palette();
+    carto_palette();
     build_atlas();
     gl_init();
 
