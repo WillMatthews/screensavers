@@ -7,7 +7,7 @@ BAG=$STATE/lock-saver-bag
 read -r -a bag 2>/dev/null < "$BAG" || bag=()
 if ((${#bag[@]} == 0)); then
     last=$(tail -n1 "$STATE/lock-saver.log" 2>/dev/null | awk '{print $NF}')
-    mapfile -t bag < <(shuf -e pipes maze flightsim)
+    mapfile -t bag < <(shuf -e pipes maze flightsim stir)
     [[ ${bag[0]} == "$last" ]] && bag=("${bag[@]:1}" "${bag[0]}")
 fi
 echo "${bag[@]:1}" > "$BAG"
