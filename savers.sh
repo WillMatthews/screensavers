@@ -6,7 +6,7 @@
 SAVERS=(pipes maze flightsim stir splitflap gauges contours clockwork nightsky steam)
 
 # kept and buildable, but out of the rotation while they're being worked on
-BENCHED=(marbling rain)
+BENCHED=(marbling)
 
 # savers that take --epoch/--layout/--output and treat all outputs as one wall
 SPANNING=(flightsim stir nightsky marbling splitflap gauges clockwork)
