@@ -21,6 +21,19 @@
  * from swaylock's start time —, battery, uptime) come from stir's engine and
  * refresh every minute. $N, $H, $S, $D and *starred* words are set in the keyword colour (gold, in brass).
  *
+ * Wide screens get the table above; portrait ones (taller than wide) a tall
+ * board: a big clock on top, time / destination / status, and each row's
+ * remarks on a smaller line beneath, as many rows as the height takes.
+ *
+ * Spanning outputs: run one instance per output with the same --seed and
+ * --epoch, plus --layout (every output's logical rect, "x,y,w,h;...") and
+ * --output (which one this is), as for flightsim. The output under the
+ * middle of the layout shows DEPARTURES; the others the same station's
+ * ARRIVALS, or (portrait first) a PLATFORM board: a big clock, the next
+ * departure in big flaps and where it calls. The timetable runs off the seed
+ * and the time since the epoch alone, so every board changes at the same
+ * moments, and they all turn over together as the minute changes.
+ *
  * Each module is two instanced quads: the module at rest (top half of the
  * letter coming, bottom half of the letter going) and, while it turns, the
  * flap falling over the hinge, in perspective, front face lit from above,
@@ -76,6 +89,10 @@ static uint32_t opt_seed;
 static const char *opt_shot;
 static double opt_at = -1;             /* --shot / --bench: from this many seconds in */
 static int off_w = 1920, off_h = 1080;
+static double opt_epoch;               /* CLOCK_REALTIME seconds the board starts at */
+#define MAX_OUT 16
+static float span[MAX_OUT][4];         /* x, y, w, h of each output (logical) */
+static int span_n, span_me = -1;
 
 /* ---- what the board says ----
  * Tokens: $N name, $H host, $T time now, $S locked since, $D how long locked,
@@ -95,13 +112,11 @@ static const char *ENTRIES[][3] = {
     {"KEYBOARD", "IDLE", "SINCE $S"},
     {"THIS SCREEN", "LOCKED", "KEYS WON'T HELP"},
     {"THE FANS", "SPINNING", "ALL IS WELL"},
-    {"$N", "EXPECTED", "SHORTLY-ISH"},
     {"THE BUILD", "RUNNING", "PROBABLY"},
     {"ALL TABS", "UNCHANGED", "AS $N LEFT THEM"},
     {"BATTERY", "$B", "HOLDING UP"},
     {"$H", "UP $UP", "IN NO HURRY"},
     {"NOTES", "ON PAPER", "PAPER STILL WORKS"},
-    {"THE CHAIR", "VACANT", "NEGOTIABLE"},
     {"MESSAGES", "QUEUED", "WHEN NOTICED"},
     {"$H", "GUARDING", "THE DESK"},
     {"FISHING", "DEPARTED", "METAPHORICALLY"},
@@ -126,10 +141,67 @@ static const char *ENTRIES[][3] = {
     {"LOCKED SINCE", "$S", "STILL LOCKED"},
     {"THE PLANT", "WATERED", "PROBABLY"},
     {"INBOX", "HOLDING", "WAITING ON $N"},
+    {"THE SHOPS", "ON TIME", "MILK, BREAD"},
+    {"ELSEWHERE", "DEPARTED", "NOT FAR"},
 };
 #define NENTRY ((int)(sizeof ENTRIES / sizeof *ENTRIES))
 
-/* the notice under the board, up to two lines */
+/* arrivals: from (12), status (9), remarks (18) */
+static const char *ARRIVALS[][3] = {
+    {"A DECISION", "EXPECTED", "AFTER LUNCH"},
+    {"THE KETTLE", "ARRIVED", "TEA ON BOARD"},
+    {"LUNCH", "LANDED", "FULL"},
+    {"A PARCEL", "DELAYED", "NOBODY AT DESK"},
+    {"FRESH IDEAS", "EXPECTED", "AFTER COFFEE"},
+    {"A CHAT", "OVERRUN", "STILL CHATTING"},
+    {"$N", "EN ROUTE", "FROM THE KITCHEN"},
+    {"THE WEEKEND", "EXPECTED", "NOT SOON ENOUGH"},
+    {"INSPIRATION", "DELAYED", "SIGNAL FAILURE"},
+    {"THE BUILD", "ARRIVED", "ALL GREEN"},
+    {"A REPLY", "EXPECTED", "WHEN $N RETURNS"},
+    {"$N", "SIGHTED", "NEAR THE KETTLE"},
+    {"THE LIFT", "ARRIVED", "EMPTY"},
+    {"SNACKS", "CANCELLED", "ALREADY EATEN"},
+    {"A GOOD IDEA", "INBOUND", "IN THE SHOWER"},
+    {"THE MEETING", "OVERRUN", "BY 20 MIN"},
+    {"THE SUN", "DELAYED", "BEHIND CLOUDS"},
+    {"MONDAY", "EXPECTED", "UNFORTUNATELY"},
+    {"$N'S FOCUS", "INBOUND", "VIA COFFEE"},
+    {"BISCUITS", "ARRIVED", "FORM A QUEUE"},
+    {"$H", "WAITING", "PATIENTLY"},
+    {"THE CAT", "EXPECTED", "ON THE KEYBOARD"},
+    {"PIZZA", "EXPECTED", "8 MIN AWAY"},
+    {"A WAVE", "RECEIVED", "WAVE BACK"},
+    {"HOT WATER", "ARRIVED", "AT 100 C"},
+    {"SECOND WIND", "DELAYED", "STILL WINDING"},
+    {"TEA BREAK", "ENDING", "BACK SHORTLY"},
+    {"SOME QUIET", "ARRIVED", "ENJOY IT"},
+    {"THE MUSE", "DELAYED", "TRY AGAIN LATER"},
+    {"CLARITY", "EXPECTED", "AFTER A WALK"},
+    {"THE POST", "ARRIVED", "MOSTLY LEAFLETS"},
+    {"A NEW TAB", "EXPECTED", "WHAT'S ONE MORE"},
+    {"GOOD NEWS", "EN ROUTE", "STAY TUNED"},
+    {"THE COFFEE", "ARRIVED", "TOO HOT"},
+    {"$N'S MUG", "ARRIVED", "EMPTY AGAIN"},
+    {"THE NEXT BUS", "DELAYED", "AS USUAL"},
+    {"THE ANSWER", "EXPECTED", "42, ALLEGEDLY"},
+    {"A SECOND CUP", "BOARDING", "AT THE KETTLE"},
+};
+#define NARRIVAL ((int)(sizeof ARRIVALS / sizeof *ARRIVALS))
+
+/* where the next train calls on its way (the platform board), up to 16 */
+static const char *STOPS[] = {
+    "THE HALLWAY", "THE STAIRS", "THE KITCHEN", "THE CORRIDOR", "RECEPTION",
+    "THE LIFT", "THE CAR PARK", "THE WATER COOLER", "THE BIG WINDOW", "SOMEONE'S DESK",
+    "THE PRINT ROOM", "THE BREAK ROOM", "THE GARDEN", "THE CORNER SHOP", "THE BAKERY",
+    "THE POST ROOM", "THE BIKE SHED", "THE LANDING", "THE FRONT DOOR", "THE SOFA",
+    "THE NOTICEBOARD", "THE CUPBOARD", "THE BISCUIT TIN", "THE FRUIT BOWL", "THE SUNNY BENCH",
+    "THE STATIONERY", "THE COAT HOOKS", "THE MAIL ROOM", "THE OLD PRINTER", "A LONG CHAT",
+};
+#define NSTOPS ((int)(sizeof STOPS / sizeof *STOPS))
+
+/* the notices under the boards, a few lines each: one deck per board, so
+ * screens side by side don't say the same thing */
 static const char *NOTICES[] = {
     "This is $N's computer. $N is *away*.",
     "$H is locked. Pressing keys won't help, but it won't hurt either.",
@@ -144,7 +216,6 @@ static const char *NOTICES[] = {
     "All the tabs are exactly where $N left them.",
     "Unattended computer. Attended desk plant.",
     "$N will be right back. Define 'right'.",
-    "Please mind the gap between the chair and the desk.",
     "Delays are expected. $N apologises for any inconvenience.",
     "This service is locked. Please stand clear of the keyboard.",
     "Lost property: one $N. If found, please return to $H.",
@@ -166,7 +237,64 @@ static const char *NOTICES[] = {
 };
 #define NNOTICE ((int)(sizeof NOTICES / sizeof *NOTICES))
 
+static const char *ARR_NOTICES[] = {
+    "$N is expected back *shortly*.",
+    "Passengers meeting $N, please wait by the desk.",
+    "Welcome back, $N. Probably soon.",
+    "Arrival times are estimates. Very rough estimates.",
+    "$N's return is delayed by an interesting conversation.",
+    "$H has been waiting since $S.",
+    "The desk plant is expecting $N.",
+    "On arrival, please unlock with a password.",
+    "Tickets please. Or a password.",
+    "Arrivals from the kitchen may be carrying *tea*.",
+    "Delays are due to a nice chat in the corridor.",
+    "$N will arrive at the desk, hopefully with a biscuit.",
+    "No arrivals reported for $D.",
+    "The chair is being kept warm. Well, warm-ish.",
+    "Expected: $N. Also expected: more email.",
+    "Please allow $N to unlock before boarding.",
+};
+#define NARRNOTE ((int)(sizeof ARR_NOTICES / sizeof *ARR_NOTICES))
+
+static const char *PLAT_NOTICES[] = {
+    "Please stand behind the yellow line.",
+    "The next service is $N, eventually.",
+    "Please keep your belongings with you. And your password.",
+    "This platform is for $N only.",
+    "Please mind the gap between the chair and the desk.",
+    "Stand clear. The screen is locked.",
+    "Refreshments are available at the kettle.",
+    "Do not leave luggage unattended. Or laptops.",
+    "Platform alterations are possible at short notice.",
+    "$H is guarding the desk. Please do not approach.",
+    "The quiet coach is the whole office.",
+    "Smoking is not permitted anywhere on $H.",
+    "Today is $DATE. Trains are running *roughly* to time.",
+    "Tea trolley service is suspended until $N returns.",
+    "Please hold the handrail. And the mug.",
+};
+#define NPLATNOTE ((int)(sizeof PLAT_NOTICES / sizeof *PLAT_NOTICES))
+
 static void die(const char *what) { fprintf(stderr, "splitflap: %s\n", what); exit(1); }
+
+static double wallclock(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+/* "x,y,w,h;x,y,w,h;..." */
+static void parse_layout(const char *str) {
+    for (span_n = 0; span_n < MAX_OUT; span_n++) {
+        float *r = span[span_n];
+        int used = 0;
+        if (sscanf(str, "%f,%f,%f,%f%n", &r[0], &r[1], &r[2], &r[3], &used) != 4 || r[2] <= 0 || r[3] <= 0)
+            break;
+        str += used;
+        if (*str == ';') str++;
+    }
+}
 
 static double now(void) {
     struct timespec ts;
@@ -332,21 +460,23 @@ static int expand(const char *m, char *out, unsigned char *col, int cap) {
 }
 
 static int status_colour(const char *s) {
-    static const char *sage[] = {"ON TIME", "BOARDING", "DEPARTED", "SAFE", "WATERED"};
-    static const char *amber[] = {"DELAYED", "CANCELLED", "JAMMED", "NO REPLY"};
+    static const char *sage[] = {"ON TIME", "BOARDING", "DEPARTED", "SAFE", "WATERED", "ARRIVED", "LANDED", "EN ROUTE", "INBOUND", "RECEIVED"};
+    static const char *amber[] = {"DELAYED", "CANCELLED", "JAMMED", "NO REPLY", "OVERRUN"};
     for (size_t i = 0; i < sizeof sage / sizeof *sage; i++) if (!strcmp(s, sage[i])) return INK_SAGE;
     for (size_t i = 0; i < sizeof amber / sizeof *amber; i++) if (!strcmp(s, amber[i])) return INK_AMBER;
-    if (!strcmp(s, "AWAY") || !strcmp(s, "LOCKED")) return INK_GOLD;
+    if (!strcmp(s, "AWAY") || !strcmp(s, "LOCKED") || !strcmp(s, "EXPECTED") || !strcmp(s, "SIGHTED")) return INK_GOLD;
     return -1;
 }
 
 /* ---- glyph atlas: every glyph at each size the board uses, in one R8
- * texture. A slot is a size: cells of cw x ch, the capitals centred in the
- * cell so the split runs through their middle. ---- */
-enum { SLOT_FLAP, SLOT_CLOCK, SLOT_TITLE, SLOT_LABEL, SLOT_N };
-static struct { int x, y, cw, ch; } slot[SLOT_N];
+ * texture. A slot is a size: cells of cw x ch, `cols` to a row, the capitals
+ * centred in the cell so the split runs through their middle. ---- */
+enum { SLOT_FLAP, SLOT_CLOCK, SLOT_TITLE, SLOT_LABEL, SLOT_SMALL, SLOT_BIG, SLOT_N };
+static struct { int x, y, cw, ch, cols; } slot[SLOT_N];
+static int sgap[SLOT_N];                /* gap between the modules of a field */
 static unsigned char *atlas;
-static int atlas_w, atlas_h;
+static int atlas_w, atlas_h, atlas_dirty;
+#define ATLAS_MAXW 4096
 static FT_Library ft;
 static FT_Face face;
 static float cap_ratio, adv_ratio;     /* cap height and advance per pixel of font size */
@@ -386,18 +516,38 @@ static void atlas_slot(int s, float cap) {
         if (FT_Load_Char(face, code, FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT)) continue;
         FT_GlyphSlot gs = face->glyph;
         int adv = (int)(gs->advance.x >> 6);
-        int x0 = slot[s].x + g * cw + (cw - adv) / 2 + gs->bitmap_left;
-        int y0 = slot[s].y + base - gs->bitmap_top;
-        if (g == G_TRAIN) y0 = slot[s].y + (ch - (int)gs->bitmap.rows) / 2;   /* icons: centred */
+        int cx = slot[s].x + g % slot[s].cols * cw, cy = slot[s].y + g / slot[s].cols * ch;
+        int x0 = cx + (cw - adv) / 2 + gs->bitmap_left;
+        int y0 = cy + base - gs->bitmap_top;
+        if (g == G_TRAIN) y0 = cy + (ch - (int)gs->bitmap.rows) / 2;   /* icons: centred */
         for (unsigned y = 0; y < gs->bitmap.rows; y++)
             for (unsigned x = 0; x < gs->bitmap.width; x++) {
                 int ax = x0 + (int)x, ay = y0 + (int)y;
-                if (ax < slot[s].x + g * cw || ax >= slot[s].x + (g + 1) * cw || ay < slot[s].y || ay >= slot[s].y + ch) continue;
+                if (ax < cx || ax >= cx + cw || ay < cy || ay >= cy + ch) continue;
                 unsigned char v = gs->bitmap.buffer[y * gs->bitmap.pitch + x];
                 unsigned char *d = &atlas[(size_t)ay * atlas_w + ax];
                 if (v > *d) *d = v;
             }
     }
+}
+
+/* every slot sized (cw, ch): stack them, a slot wrapping its glyphs onto as
+ * many rows as it needs, and draw them in */
+static void atlas_build(const float cap[SLOT_N]) {
+    atlas_w = 0;
+    for (int s = 0; s < SLOT_N; s++) if (slot[s].cw * NGLYPH > atlas_w) atlas_w = slot[s].cw * NGLYPH;
+    if (atlas_w > ATLAS_MAXW) atlas_w = ATLAS_MAXW;
+    atlas_h = 0;
+    for (int s = 0; s < SLOT_N; s++) {
+        slot[s].cols = atlas_w / slot[s].cw;
+        if (slot[s].cols > NGLYPH) slot[s].cols = NGLYPH;
+        slot[s].x = 0; slot[s].y = atlas_h;
+        atlas_h += (NGLYPH + slot[s].cols - 1) / slot[s].cols * slot[s].ch + 1;
+    }
+    free(atlas);
+    atlas = calloc((size_t)atlas_w * atlas_h, 1);
+    for (int s = 0; s < SLOT_N; s++) atlas_slot(s, cap[s]);
+    atlas_dirty = 1;
 }
 
 /* ---- the board: modules, grouped into fields ---- */
@@ -419,17 +569,30 @@ typedef struct { int first, len; } Field;
 
 enum { TCOL_TIME, TCOL_DEST, TCOL_STATUS, TCOL_REM, NTCOL };
 static const int TCOL_W[NTCOL] = {5, 12, 9, 18};
-static const char *TCOL_NAME[NTCOL] = {"TIME", "DESTINATION", "STATUS", "REMARKS"};
-#define MAXROWS 14
+#define MAXROWS 26
+#define MAXNOTE 4
+#define MAXSTOP 8
+#define STOP_W 16
 
-static Field f_clock[2], f_date, f_row[MAXROWS][NTCOL], f_notice[2];
-static int nrows;                       /* table rows, sized to the screen */
-static int fw, fh, fgx, rowp;           /* module size, gap between modules, row pitch */
-static int cwid, chgt;                  /* clock module size */
+/* Which board this is. Alone it's the departures; spanning several outputs
+ * (--layout) the front one is, and the others show the same station's
+ * arrivals, or (on a portrait screen) the platform: a big clock and the next
+ * train in detail. */
+enum { ROLE_DEP, ROLE_ARR, ROLE_PLAT };
+static int role;
+static const char *TITLES[] = {"DEPARTURES", "ARRIVALS", "PLATFORM"};
+static const char *TCOL_NAME[2][NTCOL] = {{"TIME", "DESTINATION", "STATUS", "REMARKS"}, {"TIME", "FROM", "STATUS", "REMARKS"}};
+static int tall;                        /* the narrow table: remarks on a small line under each row */
+static int plat_no;                     /* the platform board's number */
+
+static Field f_clock[2], f_date, f_row[MAXROWS][NTCOL], f_notice[MAXNOTE];
+static Field f_platno, f_next[NTCOL], f_stop[MAXSTOP][2];
+static int nrows, nnote, nstop;         /* table rows, notice lines, calling points: sized to the screen */
+static int fw, fh, fgx;                 /* module size, gap between modules */
 
 /* painted things: signs (text) and solid rounded rects (trays, rules) */
 typedef struct { float x, y, w, h; int kind, a, b, c; float r; } Paint;
-static Paint paint[1024];
+static Paint paint[4096];
 static int npaint;
 
 static void add_rect(float x, float y, float w, float h, int ink, float radius) {
@@ -448,34 +611,107 @@ static float add_text(float x, float y, int sl, int ink, const char *s) {
     return x - x0;
 }
 
-static Field add_field(int x, int y, int len, int sl, int w, const char *seq) {
+static int field_w(int len, int sl) { return len * slot[sl].cw + (len - 1) * sgap[sl]; }
+
+/* a field of modules in a tray */
+static Field add_field(int x, int y, int len, int sl, const char *seq) {
     Field f = {nmod, len};
     if (nmod + len > capmod) mods = realloc(mods, (size_t)(capmod = (nmod + len) * 2) * sizeof *mods);
     for (int i = 0; i < len; i++) {
         Mod *m = &mods[nmod++];
         memset(m, 0, sizeof *m);
-        m->x = (short)(x + i * (w + fgx)); m->y = (short)y;
+        m->x = (short)(x + i * (slot[sl].cw + sgap[sl])); m->y = (short)y;
         m->sl = (unsigned char)sl;
         m->seq = seq; m->ns = (unsigned char)strlen(seq);
         m->step = 0.052f * (0.88f + 0.24f * frand());
     }
+    float pad = sgap[sl] * 0.9f + 2;
+    add_rect(x - pad, y - pad, field_w(len, sl) + 2 * pad, slot[sl].ch + 2 * pad, INK_TRAY, pad * 1.3f);
     return f;
 }
 
-static int field_w(int len, int w) { return len * w + (len - 1) * fgx; }
+static void add_rule(float x, float y, float w) { add_rect(x, y, w, fmaxf(1.0f, roundf(fh * 0.03f)), INK_BRASS, 0); }
+static void add_label(float x, float y, const char *s) { add_text(x, y - slot[SLOT_LABEL].ch * 0.5f, SLOT_LABEL, INK_DIM, s); }
 
-/* the tray a field of modules sits in */
-static void add_tray(Field f, int w, int h) {
-    float pad = fgx * 0.9f + 2;
-    add_rect(mods[f.first].x - pad, mods[f.first].y - pad, field_w(f.len, w) + 2 * pad, h + 2 * pad, INK_TRAY, pad * 1.3f);
+/* every size from the module pitch (module + gap, px) and the clock's height */
+static void sizes(float pitch, float clock_h) {
+    fw = (int)lroundf(pitch * 0.87f);
+    fgx = (int)lroundf(pitch) - fw;
+    if (fgx < 2) fgx = 2;
+    fh = (int)lroundf(fw * 1.45f);
+    slot[SLOT_FLAP].cw = fw; slot[SLOT_FLAP].ch = fh; sgap[SLOT_FLAP] = fgx;
+    int sw = (int)lroundf(fw * 0.66f);
+    slot[SLOT_SMALL].cw = sw; slot[SLOT_SMALL].ch = (int)lroundf(sw * 1.45f); sgap[SLOT_SMALL] = fgx * 2 / 3 > 2 ? fgx * 2 / 3 : 2;
+    int bw = (int)lroundf(fw * 1.5f);
+    slot[SLOT_BIG].cw = bw; slot[SLOT_BIG].ch = (int)lroundf(bw * 1.45f); sgap[SLOT_BIG] = (int)lroundf(fgx * 1.5f);
+    int chgt = (int)lroundf(clock_h), cwid = (int)lroundf(chgt * 0.66f);
+    slot[SLOT_CLOCK].cw = cwid; slot[SLOT_CLOCK].ch = chgt;
+    sgap[SLOT_CLOCK] = (int)lroundf(cwid * 0.045f) > fgx ? (int)lroundf(cwid * 0.045f) : fgx;
+    float cap_title = fh * 0.68f, cap_label = fh * 0.27f;
+    slot[SLOT_TITLE].cw = (int)lroundf(cap_title / cap_ratio * adv_ratio * 1.08f); slot[SLOT_TITLE].ch = (int)lroundf(cap_title * 1.8f);
+    slot[SLOT_LABEL].cw = (int)lroundf(cap_label / cap_ratio * adv_ratio * 1.25f); slot[SLOT_LABEL].ch = (int)lroundf(cap_label * 2.2f);
+    float cap[SLOT_N];
+    cap[SLOT_FLAP] = fh * 0.55f; cap[SLOT_CLOCK] = chgt * 0.55f; cap[SLOT_TITLE] = cap_title; cap[SLOT_LABEL] = cap_label;
+    cap[SLOT_SMALL] = slot[SLOT_SMALL].ch * 0.55f; cap[SLOT_BIG] = slot[SLOT_BIG].ch * 0.55f;
+    atlas_build(cap);
 }
 
-/* lay the board out for W x H: modules sized to fit the table across ~90% of
- * the width, as many rows as the height allows */
-static void layout(void) {
-    uint32_t keep = rng;
-    rng = opt_seed * 2654435761u | 1;
-    nmod = 0; npaint = 0;
+/* the clock's height for a given width, and its width as laid out */
+static float clock_h_for(float w, float pitch) { return (w - 2 * pitch * 0.13f) / (0.66f * 5.1f); }
+static int clock_w(void) {
+    int cw = slot[SLOT_CLOCK].cw;
+    return 4 * cw + 2 * sgap[SLOT_CLOCK] + 2 * (int)lroundf(cw * 0.55f);
+}
+
+/* HH:MM, two trays and a painted colon, top left at x, y */
+static void add_clock(int x, int y) {
+    int cw = slot[SLOT_CLOCK].cw, g = sgap[SLOT_CLOCK], colon = 2 * (int)lroundf(cw * 0.55f);
+    f_clock[0] = add_field(x, y, 2, SLOT_CLOCK, DIGITS);
+    f_clock[1] = add_field(x + 2 * cw + g + colon, y, 2, SLOT_CLOCK, DIGITS);
+    add_text(x + 2 * cw + g + (colon - cw) * 0.5f, (float)y, SLOT_CLOCK, INK_GOLD, ":");
+}
+
+/* the sign: the train, the board's name, and under it the station, in a box
+ * hbox tall; returns where it ends (the name or the station under it) */
+static float add_sign(float x, float y, float hbox, const char *title) {
+    char sub[96];
+    snprintf(sub, sizeof sub, "%s \1 AWAY SERVICES", host);
+    float ty = y + hbox * 0.5f - slot[SLOT_TITLE].ch * 0.62f;
+    x += add_text(x, ty, SLOT_TITLE, INK_GOLD, "\2") + slot[SLOT_TITLE].cw * 0.35f;
+    float end = x + add_text(x, ty, SLOT_TITLE, INK_CREAM, title);
+    float send = x + add_text(x, y + hbox - slot[SLOT_LABEL].ch * 0.75f, SLOT_LABEL, INK_DIM, sub);
+    return fmaxf(end, send);
+}
+
+/* how wide add_sign draws */
+static float sign_w(const char *title) {
+    char sub[96];
+    snprintf(sub, sizeof sub, "%s \1 AWAY SERVICES", host);
+    return slot[SLOT_TITLE].cw * 1.35f + fmaxf(strlen(title) * slot[SLOT_TITLE].cw, strlen(sub) * slot[SLOT_LABEL].cw);
+}
+
+/* the notice: nnote full-width lines */
+static void add_notice(int x0, int bw, int y, int rowp) {
+    int nlen = (bw + fgx) / (fw + fgx);
+    int nx = x0 + (bw - field_w(nlen, SLOT_FLAP)) / 2;
+    for (int i = 0; i < nnote; i++) f_notice[i] = add_field(nx, y + i * rowp, nlen, SLOT_FLAP, FLAPS);
+}
+static int notice_h(int rowp) { return nnote * rowp - (rowp - fh); }
+
+/* the table's columns: x of each from the board's left, and its width */
+static int table_cols(int ncol, float colgap, int colx[NTCOL]) {
+    int x = 0;
+    for (int c = 0; c < ncol; c++) {
+        colx[c] = x;
+        x += field_w(TCOL_W[c], SLOT_FLAP) + (int)lroundf(colgap * (fw + fgx)) + fgx;
+    }
+    return colx[ncol - 1] + field_w(TCOL_W[ncol - 1], SLOT_FLAP);
+}
+
+/* The wide table: time, destination, status, remarks across the screen,
+ * modules sized to fit it across ~90% of the width, the clock and date at
+ * the right of the header, as many rows as the height allows. */
+static void layout_wide(void) {
     int tw = 0;
     for (int c = 0; c < NTCOL; c++) tw += TCOL_W[c];
     float colgap = 1.1f;                                 /* between columns, in module pitches */
@@ -483,100 +719,227 @@ static void layout(void) {
     /* height: header ~2.4 rows, labels, at least 6 rows, notice 2 + gaps */
     float rp_max = 0.92f * H / (2.6f + 0.9f + 6 + 0.7f + 2.2f);
     if (pitch * 0.87f * 1.45f * 1.24f > rp_max) pitch = rp_max / (0.87f * 1.45f * 1.24f);
-    fw = (int)lroundf(pitch * 0.87f);
-    fgx = (int)lroundf(pitch) - fw;
-    if (fgx < 2) fgx = 2;
-    fh = (int)lroundf(fw * 1.45f);
-    rowp = fh + (int)lroundf(fh * 0.24f);
-    chgt = (int)lroundf(fh * 1.9f);
-    cwid = (int)lroundf(chgt * 0.66f);
+    sizes(pitch, lroundf(lroundf(pitch * 0.87f) * 1.45f) * 1.9f);
+    int rowp = fh + (int)lroundf(fh * 0.24f), chgt = slot[SLOT_CLOCK].ch;
+    nnote = 2;
 
-    /* the atlas for these sizes */
-    slot[SLOT_FLAP].cw = fw; slot[SLOT_FLAP].ch = fh;
-    slot[SLOT_CLOCK].cw = cwid; slot[SLOT_CLOCK].ch = chgt;
-    float cap_title = chgt * 0.36f, cap_label = fh * 0.27f;
-    slot[SLOT_TITLE].cw = (int)lroundf(cap_title / cap_ratio * adv_ratio * 1.08f); slot[SLOT_TITLE].ch = (int)lroundf(cap_title * 1.8f);
-    slot[SLOT_LABEL].cw = (int)lroundf(cap_label / cap_ratio * adv_ratio * 1.25f); slot[SLOT_LABEL].ch = (int)lroundf(cap_label * 2.2f);
-    atlas_w = atlas_h = 0;
-    for (int s = 0; s < SLOT_N; s++) {
-        slot[s].x = 0; slot[s].y = atlas_h;
-        atlas_h += slot[s].ch + 1;
-        if (slot[s].cw * NGLYPH > atlas_w) atlas_w = slot[s].cw * NGLYPH;
-    }
-    free(atlas);
-    atlas = calloc((size_t)atlas_w * atlas_h, 1);
-    atlas_slot(SLOT_FLAP, fh * 0.55f);
-    atlas_slot(SLOT_CLOCK, chgt * 0.55f);
-    atlas_slot(SLOT_TITLE, cap_title);
-    atlas_slot(SLOT_LABEL, cap_label);
-
-    /* columns */
-    int colx[NTCOL], bw;
-    int x = 0;
-    for (int c = 0; c < NTCOL; c++) {
-        colx[c] = x;
-        x += field_w(TCOL_W[c], fw) + (int)lroundf(colgap * (fw + fgx)) + fgx;
-    }
-    bw = colx[NTCOL - 1] + field_w(TCOL_W[NTCOL - 1], fw);
+    int colx[NTCOL];
+    int bw = table_cols(NTCOL, colgap, colx);
     int x0 = (W - bw) / 2;
 
     /* vertical: header, labels, rows, notice; rows fill what's left */
     int head = chgt, lab = (int)lroundf(fh * 0.95f), gap1 = (int)lroundf(fh * 0.55f), gap2 = (int)lroundf(fh * 0.7f);
-    int notice = 2 * rowp - (rowp - fh);
-    int avail = (int)(0.9f * H) - head - gap1 - lab - gap2 - notice;
+    int avail = (int)(0.9f * H) - head - gap1 - lab - gap2 - notice_h(rowp);
     nrows = (avail + (rowp - fh)) / rowp;
-    if (nrows > 10) nrows = 10;
+    if (nrows > 12) nrows = 12;
     if (nrows < 4) nrows = 4;
-    int total = head + gap1 + lab + nrows * rowp - (rowp - fh) + gap2 + notice;
+    int total = head + gap1 + lab + nrows * rowp - (rowp - fh) + gap2 + notice_h(rowp);
     int y = (H - total) / 2;
 
     /* header: the sign on the left, date and clock on the right */
-    int cx = x0 + bw - (4 * cwid + 2 * fgx + 2 * (int)lroundf(cwid * 0.55f));
-    f_clock[0] = add_field(cx, y, 2, SLOT_CLOCK, cwid, DIGITS);
-    int cx2 = cx + 2 * cwid + fgx + 2 * (int)lroundf(cwid * 0.55f);
-    f_clock[1] = add_field(cx2, y, 2, SLOT_CLOCK, cwid, DIGITS);
-    add_tray(f_clock[0], cwid, chgt);
-    add_tray(f_clock[1], cwid, chgt);
-    add_text(cx + 2 * cwid + fgx + (2 * (int)lroundf(cwid * 0.55f) - cwid) * 0.5f - fgx * 0.5f, (float)y, SLOT_CLOCK, INK_GOLD, ":");
+    int cx = x0 + bw - clock_w();
+    add_clock(cx, y);
     int dlen = 10;
-    int dx = cx - (int)lroundf(1.4f * (fw + fgx)) - field_w(dlen, fw);
-    f_date = add_field(dx, y + chgt - fh, dlen, SLOT_FLAP, fw, FLAPS);
-    add_tray(f_date, fw, fh);
-
-    char sub[96];
-    snprintf(sub, sizeof sub, "%s \1 AWAY SERVICES", host);
-    float tx = (float)x0;
-    float ty = y + chgt * 0.5f - slot[SLOT_TITLE].ch * 0.62f;
-    tx += add_text(tx, ty, SLOT_TITLE, INK_GOLD, "\2") + slot[SLOT_TITLE].cw * 0.35f;
-    float title_x = tx;
-    add_text(tx, ty, SLOT_TITLE, INK_CREAM, "DEPARTURES");
-    add_text(title_x, y + chgt - slot[SLOT_LABEL].ch * 0.75f, SLOT_LABEL, INK_DIM, sub);
+    f_date = add_field(cx - (int)lroundf(1.4f * (fw + fgx)) - field_w(dlen, SLOT_FLAP), y + chgt - fh, dlen, SLOT_FLAP, FLAPS);
+    add_sign((float)x0, (float)y, (float)chgt, TITLES[role]);
     y += head + gap1;
 
     /* column labels and a brass rule under them */
-    for (int c = 0; c < NTCOL; c++)
-        add_text((float)x0 + colx[c] - (slot[SLOT_LABEL].cw - fw * 0.0f) * 0.0f, y + lab * 0.5f - slot[SLOT_LABEL].ch * 0.5f - fh * 0.08f,
-                 SLOT_LABEL, INK_DIM, TCOL_NAME[c]);
-    add_rect((float)x0, (float)(y + lab - 1), (float)bw, fmaxf(1.0f, roundf(fh * 0.03f)), INK_BRASS, 0);
+    for (int c = 0; c < NTCOL; c++) add_label((float)x0 + colx[c], y + lab * 0.5f - fh * 0.08f, TCOL_NAME[role == ROLE_ARR][c]);
+    add_rule((float)x0, (float)(y + lab - 1), (float)bw);
     y += lab + (int)lroundf(fh * 0.35f);
 
-    /* the departures */
     for (int r = 0; r < nrows; r++, y += rowp)
-        for (int c = 0; c < NTCOL; c++) {
-            f_row[r][c] = add_field(x0 + colx[c], y, TCOL_W[c], SLOT_FLAP, fw, c == TCOL_TIME ? TIMES : FLAPS);
-            add_tray(f_row[r][c], fw, fh);
-        }
+        for (int c = 0; c < NTCOL; c++)
+            f_row[r][c] = add_field(x0 + colx[c], y, TCOL_W[c], SLOT_FLAP, c == TCOL_TIME ? TIMES : FLAPS);
     y += gap2 - (rowp - fh);
 
-    /* the notice: two full-width lines */
-    add_rect((float)x0, (float)(y - gap2 / 2), (float)bw, fmaxf(1.0f, roundf(fh * 0.03f)), INK_BRASS, 0);
-    y += (int)lroundf(fh * 0.2f);
-    int nlen = (bw + fgx) / (fw + fgx);
-    int nx = x0 + (bw - field_w(nlen, fw)) / 2;
-    for (int i = 0; i < 2; i++) {
-        f_notice[i] = add_field(nx, y + i * rowp, nlen, SLOT_FLAP, fw, FLAPS);
-        add_tray(f_notice[i], fw, fh);
+    add_rule((float)x0, (float)(y - gap2 / 2), (float)bw);
+    add_notice(x0, bw, y + (int)lroundf(fh * 0.2f), rowp);
+}
+
+/* The tall table, for portrait screens: a big clock on top, then time,
+ * destination and status, each row's remarks on a smaller line under it,
+ * and as many rows as fit; the notice in three lines at the foot. */
+static void layout_tall(void) {
+    float colgap = 1.1f, tw = TCOL_W[0] + TCOL_W[1] + TCOL_W[2] + 2 * colgap;
+    float pitch = 0.92f * W / tw, clock_h = 0;
+    nnote = 3;
+    /* shrink until at least four rows fit under the clock */
+    for (int it = 0; it < 60; it++, pitch *= 0.97f) {
+        float f = roundf(roundf(pitch * 0.87f) * 1.45f), s = roundf(roundf(pitch * 0.87f * 0.66f) * 1.45f);
+        float frac = fminf(0.95f, fmaxf(0.7f, 0.78f + ((float)H / W - 1.78f) * 0.3f));
+        clock_h = fminf(clock_h_for(frac * tw * pitch, pitch), 0.17f * H);
+        float fixed = clock_h + f * (0.7f + 1.9f + 0.55f + 0.95f + 0.35f + 0.9f) + 3 * f * 1.24f - f * 0.24f;
+        float entry = f * 1.14f + s + f * 0.5f;
+        if ((0.94f * H - fixed) / entry >= 4) break;
     }
+    sizes(pitch, clock_h);
+    int rowp = fh + (int)lroundf(fh * 0.24f), chgt = slot[SLOT_CLOCK].ch, sh = slot[SLOT_SMALL].ch;
+    int sub_off = fh + (int)lroundf(fh * 0.14f), entry = sub_off + sh + (int)lroundf(fh * 0.5f);
+    int colx[NTCOL];
+    int bw = table_cols(3, colgap, colx);
+    colx[TCOL_REM] = colx[TCOL_DEST];
+    int x0 = (W - bw) / 2;
+
+    int hbox = (int)lroundf(fh * 1.9f), lab = (int)lroundf(fh * 0.95f);
+    int gclock = (int)lroundf(fh * 0.7f), gsign = (int)lroundf(fh * 0.55f), gnote = (int)lroundf(fh * 0.9f);
+    int fixed = chgt + gclock + hbox + gsign + lab + (int)lroundf(fh * 0.35f) + gnote + notice_h(rowp);
+    nrows = ((int)(0.94f * H) - fixed + (entry - sh - sub_off)) / entry;
+    if (nrows > MAXROWS) nrows = MAXROWS;
+    if (nrows < 3) nrows = 3;
+    int total = fixed + nrows * entry - (entry - sub_off - sh);
+    int y = (H - total) / 2;
+
+    add_clock(x0 + (bw - clock_w()) / 2, y);
+    y += chgt + gclock;
+    add_sign((float)x0, (float)y, (float)hbox, TITLES[role]);
+    int dlen = 10;
+    f_date = add_field(x0 + bw - field_w(dlen, SLOT_FLAP), y + hbox - fh, dlen, SLOT_FLAP, FLAPS);
+    y += hbox + gsign;
+
+    for (int c = 0; c < 3; c++) add_label((float)x0 + colx[c], y + lab * 0.5f - fh * 0.08f, TCOL_NAME[role == ROLE_ARR][c]);
+    add_rule((float)x0, (float)(y + lab - 1), (float)bw);
+    y += lab + (int)lroundf(fh * 0.35f);
+
+    for (int r = 0; r < nrows; r++, y += entry) {
+        for (int c = 0; c < 3; c++)
+            f_row[r][c] = add_field(x0 + colx[c], y, TCOL_W[c], SLOT_FLAP, c == TCOL_TIME ? TIMES : FLAPS);
+        f_row[r][TCOL_REM] = add_field(x0 + colx[TCOL_REM], y + sub_off, TCOL_W[TCOL_REM], SLOT_SMALL, FLAPS);
+    }
+    y -= entry - sub_off - sh;
+    add_rule((float)x0, (float)(y + gnote / 2), (float)bw);
+    add_notice(x0, bw, y + gnote, rowp);
+}
+
+/* The platform: the next train in big flaps, where it calls, and a big
+ * clock. Portrait: one column, clock on top. Landscape: clock and sign on
+ * the left, the train on the right. */
+/* the train block at x0, y: returns its height */
+static int plat_train(int x0, int y, int bw, int rowp, int gap) {
+    int y0 = y, lab = (int)lroundf(fh * 0.9f), colgap = (int)lroundf(1.1f * (fw + fgx)) + fgx;
+    add_label((float)x0, y + lab * 0.45f, "NEXT TRAIN");
+    y += lab;
+    f_next[TCOL_TIME] = add_field(x0, y, TCOL_W[TCOL_TIME], SLOT_BIG, TIMES);
+    f_next[TCOL_DEST] = add_field(x0 + field_w(TCOL_W[TCOL_TIME], SLOT_BIG) + colgap * 3 / 2, y, TCOL_W[TCOL_DEST], SLOT_BIG, FLAPS);
+    y += slot[SLOT_BIG].ch + (int)lroundf(fh * 0.4f);
+    f_next[TCOL_STATUS] = add_field(x0, y, TCOL_W[TCOL_STATUS], SLOT_FLAP, FLAPS);
+    f_next[TCOL_REM] = add_field(x0 + field_w(TCOL_W[TCOL_STATUS], SLOT_FLAP) + colgap, y, TCOL_W[TCOL_REM], SLOT_FLAP, FLAPS);
+    y += fh + gap;
+    add_label((float)x0, y + lab * 0.45f, "CALLING AT");
+    y += lab;
+    /* the route: a brass line down the left, a stop on it for each row */
+    int lx = x0 + fw / 2, sx = x0 + (int)lroundf(1.5f * (fw + fgx));
+    float lw = fmaxf(2.0f, roundf(fh * 0.07f));
+    add_rect(lx - lw / 2, y + fh * 0.5f, lw, (float)(rowp * (nstop - 1)), INK_BRASS, lw / 2);
+    for (int i = 0; i < nstop; i++) {
+        float d = fh * (i == nstop - 1 ? 0.42f : 0.28f);
+        add_rect(lx - d / 2, y + i * rowp + fh * 0.5f - d / 2, d, d, i == nstop - 1 ? INK_GOLD : INK_BRASS, d / 2);
+        f_stop[i][0] = add_field(sx, y + i * rowp, TCOL_W[TCOL_TIME], SLOT_FLAP, TIMES);
+        f_stop[i][1] = add_field(sx + field_w(TCOL_W[TCOL_TIME], SLOT_FLAP) + colgap, y + i * rowp, STOP_W, SLOT_FLAP, FLAPS);
+    }
+    (void)bw;
+    return y + nstop * rowp - (rowp - fh) - y0;
+}
+static int plat_train_h(int rowp, int gap) {
+    int lab = (int)lroundf(fh * 0.9f);
+    return 2 * lab + slot[SLOT_BIG].ch + (int)lroundf(fh * 0.4f) + fh + gap + nstop * rowp - (rowp - fh);
+}
+
+static void layout_platform(void) {
+    float colgap = 1.1f, tw = TCOL_W[0] + TCOL_W[1] + TCOL_W[2] + 2 * colgap;   /* the width of a tall table */
+    int land = W > H * 1.15f;
+    nnote = land ? 2 : 3;
+    float pitch, clock_h;
+    if (!land) {
+        pitch = 0.92f * W / tw;
+        /* shrink until three stops fit */
+        for (int it = 0; it < 60; it++, pitch *= 0.97f) {
+            float f = roundf(roundf(pitch * 0.87f) * 1.45f);
+            clock_h = fminf(clock_h_for(0.9f * tw * pitch, pitch), 0.2f * H);
+            float fixed = clock_h + f * (0.5f + 1 + 0.8f + 1.9f + 0.9f + 1.8f + 3.2f + 1.0f + 1.0f + 3.5f);
+            if ((0.94f * H - fixed) / (f * 1.24f) >= 3) break;
+        }
+    } else {
+        /* the right column a tall table wide, the left as wide again */
+        pitch = 0.9f * W / (tw * 1.9f);
+        float hp = 0.9f * H / (0.87f * 1.45f * (2 * 0.9f + 2.2f + 0.4f + 1 + 0.9f + 4 * 1.24f + 1.0f + 2 * 1.24f));
+        if (pitch > hp) pitch = hp;
+        clock_h = fminf(clock_h_for(0.8f * tw * 0.9f * pitch, pitch), 0.32f * H);
+    }
+    sizes(pitch, clock_h);
+    int rowp = fh + (int)lroundf(fh * 0.24f), chgt = slot[SLOT_CLOCK].ch, hbox = (int)lroundf(fh * 1.9f);
+    int colx[NTCOL];
+    int bw = table_cols(3, colgap, colx);
+    int gnote = (int)lroundf(fh * 0.9f), gap = (int)lroundf(fh * 0.7f);
+    int dlen = 10;
+
+    if (!land) {
+        int x0 = (W - bw) / 2;
+        /* stops fill the height, up to MAXSTOP-1; what's left opens the gaps */
+        int head = chgt + fh / 2 + fh + gap + hbox;
+        nstop = 0;
+        int fixed = head + gap + plat_train_h(rowp, gap) + gnote + notice_h(rowp);
+        nstop = ((int)(0.94f * H) - fixed) / rowp;
+        if (nstop > MAXSTOP - 1) nstop = MAXSTOP - 1;
+        if (nstop < 2) nstop = 2;
+        fixed = head + gap + plat_train_h(rowp, gap) + gnote + notice_h(rowp);
+        int slack = (int)(0.94f * H) - fixed, extra = slack > 0 ? slack / 4 : 0;
+        if (extra > fh * 2) extra = fh * 2;
+        int total = fixed + 3 * extra;
+        int y = (H - total) / 2;
+        add_clock(x0 + (bw - clock_w()) / 2, y);
+        y += chgt + fh / 2;
+        f_date = add_field(x0 + (bw - field_w(dlen, SLOT_FLAP)) / 2, y, dlen, SLOT_FLAP, FLAPS);
+        y += fh + gap + extra;
+        add_sign((float)x0, (float)y, (float)hbox, TITLES[ROLE_PLAT]);
+        f_platno = add_field(x0 + bw - slot[SLOT_BIG].cw, y + (hbox - slot[SLOT_BIG].ch) / 2, 1, SLOT_BIG, DIGITS);
+        y += hbox;
+        add_rule((float)x0, y + (gap + extra) * 0.5f, (float)bw);
+        y += gap + extra;
+        y += plat_train(x0, y, bw, rowp, gap);
+        add_rule((float)x0, (float)(y + (gnote + extra) / 2), (float)bw);
+        add_notice(x0, bw, y + gnote + extra, rowp);
+        return;
+    }
+    /* landscape: the left column the clock, date and sign; the right the train */
+    int gut = (int)lroundf(3 * (fw + fgx));
+    nstop = 0;
+    nstop = ((int)(0.9f * H) - plat_train_h(rowp, gap) - gnote - notice_h(rowp)) / rowp;
+    if (nstop > MAXSTOP - 1) nstop = MAXSTOP - 1;
+    if (nstop < 2) nstop = 2;
+    int lw = clock_w() > field_w(dlen, SLOT_FLAP) ? clock_w() : field_w(dlen, SLOT_FLAP);
+    int tot_w = lw + gut + bw, x0 = (W - tot_w) / 2, rx = x0 + lw + gut;
+    int rh = plat_train_h(rowp, gap) + gnote + notice_h(rowp);
+    int ry = (H - rh) / 2;
+    int lh = chgt + fh / 2 + fh + gap * 2 + hbox;
+    int ly = (H - lh) / 2;
+    add_clock(x0 + (lw - clock_w()) / 2, ly);
+    ly += chgt + fh / 2;
+    f_date = add_field(x0 + (lw - field_w(dlen, SLOT_FLAP)) / 2, ly, dlen, SLOT_FLAP, FLAPS);
+    ly += fh + gap * 2;
+    /* the sign and the number, centred under the clock */
+    float pgap = slot[SLOT_TITLE].cw * 0.8f, sw = sign_w(TITLES[ROLE_PLAT]) + pgap + slot[SLOT_BIG].cw;
+    float sx = x0 + (lw - sw) / 2;
+    add_sign(sx, (float)ly, (float)hbox, TITLES[ROLE_PLAT]);
+    f_platno = add_field((int)(sx + sw - slot[SLOT_BIG].cw), ly + (hbox - slot[SLOT_BIG].ch) / 2, 1, SLOT_BIG, DIGITS);
+    add_rect(rx - gut * 0.5f, (float)ry, fmaxf(1.0f, roundf(fh * 0.03f)), (float)rh, INK_BRASS, 0);
+    ry += plat_train(rx, ry, bw, rowp, gap);
+    add_rule((float)rx, (float)(ry + gnote / 2), (float)bw);
+    add_notice(rx, bw, ry + gnote, rowp);
+}
+
+static void layout(void) {
+    uint32_t keep = rng;
+    rng = opt_seed * 2654435761u | 1;
+    nmod = 0; npaint = 0;
+    nrows = nstop = 0;
+    memset(f_row, 0, sizeof f_row); memset(f_next, 0, sizeof f_next); memset(f_stop, 0, sizeof f_stop);
+    memset(&f_platno, 0, sizeof f_platno);
+    tall = W < H * 1.05f;
+    if (role == ROLE_PLAT) layout_platform();
+    else if (tall) layout_tall();
+    else layout_wide();
     rng = keep;
 }
 
@@ -594,7 +957,7 @@ static void mod_target(Mod *m, int idx, int col, double t, double start, int sna
             m->cur = (unsigned char)((m->cur + k + 1) % m->ns);
             m->ccol = k + 1 == m->n ? m->tcol : INK_CREAM;
             m->t0 += (k + 1) * (double)m->step;
-            start = m->t0;
+            if (start < m->t0) start = m->t0;
         }
         m->n = 0;                                   /* (not started yet: never mind) */
     }
@@ -626,29 +989,91 @@ static int board_busy(double t) {
     return busy;
 }
 
-/* ---- what's on the board ---- */
-static int row_entry[MAXROWS];          /* rows 2..: an ENTRIES index; 0 and 1 are live */
-static int notice_cur = -1;
-static int deck[NENTRY], ndeck, ndeal;
-static int ndeck_n, deck_n[NNOTICE], ndeal_n;
+/* ---- the station: every board's timetable. It runs off the seed and the
+ * time since --epoch alone (its own random streams, nothing to do with the
+ * screen), so every instance on every output keeps the same timetable, and
+ * all the boards change at the same moments. ---- */
+static float rnd(uint32_t *s) {
+    *s ^= *s << 13; *s ^= *s >> 17; *s ^= *s << 5;
+    return (*s >> 8) * (1.0f / 16777216.0f);
+}
 
-static int entry_ok(int e) {
+/* the trains on a board, the next first */
+#define QN 24
+typedef struct {
+    const char *(*ent)[3];
+    int deck[64], ndeck, ndeal;
+    uint32_t r;
+    int q[QN];
+} Queue;
+static Queue qdep, qarr;
+
+static int entry_fits(const char *const e[3]) {
     char buf[128];
     unsigned char col[128];
     for (int k = 0; k < 3; k++)
-        if (!expand(ENTRIES[e][k], buf, col, sizeof buf) || (int)strlen(buf) > TCOL_W[k + 1]) return 0;
+        if (!expand(e[k], buf, col, sizeof buf) || (int)strlen(buf) > TCOL_W[k + 1]) return 0;
     return 1;
 }
 
-/* the notice wrapped onto two lines; 0 if it doesn't fit */
-static int notice_wrap(int i, char out[2][256], unsigned char cols[2][256]) {
+static int queue_deal(Queue *Q) {
+    for (int tries = 0; tries < 2 * Q->ndeck; tries++) {
+        if (Q->ndeal >= Q->ndeck) {                 /* reshuffle */
+            for (int i = Q->ndeck - 1; i > 0; i--) { int j = (int)(rnd(&Q->r) * (i + 1)); if (j > i) j = i; int s = Q->deck[i]; Q->deck[i] = Q->deck[j]; Q->deck[j] = s; }
+            Q->ndeal = 0;
+        }
+        int e = Q->deck[Q->ndeal++], on = 0;
+        for (int i = 0; i < QN; i++) on |= Q->q[i] == e;
+        if (!on) return e;
+    }
+    return Q->deck[0];
+}
+
+static void queue_init(Queue *Q, const char *(*ent)[3], int n, uint32_t salt) {
+    Q->ent = ent;
+    Q->r = (opt_seed ^ salt) * 2654435761u | 1;
+    Q->ndeck = 0;
+    for (int e = 0; e < n && Q->ndeck < 64; e++) if (entry_fits(ent[e])) Q->deck[Q->ndeck++] = e;
+    if (!Q->ndeck) die("nothing fits on the board");
+    Q->ndeal = Q->ndeck;
+    for (int i = 0; i < QN; i++) Q->q[i] = -1;
+    for (int i = 0; i < QN; i++) Q->q[i] = queue_deal(Q);
+}
+
+/* a change: the first train leaves and the rest move up (*shift), or one or
+ * two of the first six are replaced; returns which places changed */
+static unsigned queue_step(Queue *Q, uint32_t *r, int *shift) {
+    float x = rnd(r);
+    *shift = x < 0.45f;
+    if (*shift) {
+        for (int i = 0; i + 1 < QN; i++) Q->q[i] = Q->q[i + 1];
+        Q->q[QN - 1] = -1;
+        Q->q[QN - 1] = queue_deal(Q);
+        return ~0u;
+    }
+    unsigned mask = 0;
+    for (int j = 0, k = x < 0.8f ? 1 : 2; j < k; j++) {
+        int i = (int)(rnd(r) * 6);
+        if (i > 5) i = 5;
+        Q->q[i] = -1;
+        Q->q[i] = queue_deal(Q);
+        mask |= 1u << i;
+    }
+    return mask;
+}
+
+/* this board's notices */
+static struct { const char **msg; int deck[64], ndeck, ndeal, cur; uint32_t r; } notes;
+
+/* a notice wrapped onto the notice lines; 0 if it doesn't fit */
+static int notice_wrap(int i, char out[MAXNOTE][256], unsigned char cols[MAXNOTE][256]) {
     char buf[512];
     unsigned char col[512];
     int len = f_notice[0].len;
-    if (!expand(NOTICES[i], buf, col, sizeof buf)) return 0;
-    memset(out, 0, 2 * 256);
+    if (!expand(notes.msg[i], buf, col, sizeof buf)) return 0;
+    memset(out, 0, MAXNOTE * 256);
     int n = (int)strlen(buf), p = 0;
-    for (int line = 0; line < 2; line++) {
+    for (int line = 0; line < nnote; line++) {
         while (buf[p] == ' ') p++;
         int e = p + len < n ? p + len : n;
         if (e < n) {                                /* break at a space */
@@ -665,73 +1090,150 @@ static int notice_wrap(int i, char out[2][256], unsigned char cols[2][256]) {
     return p >= n;
 }
 
-static int deal_entry(void) {
-    for (int tries = 0; tries < 2 * NENTRY; tries++) {
-        if (ndeal >= ndeck) {                       /* reshuffle */
-            for (int i = ndeck - 1; i > 0; i--) { int j = (int)(frand() * (i + 1)); if (j > i) j = i; int s = deck[i]; deck[i] = deck[j]; deck[j] = s; }
-            ndeal = 0;
+static int notes_next(void) {
+    char a[MAXNOTE][256];
+    unsigned char c[MAXNOTE][256];
+    for (int tries = 0; tries < 2 * notes.ndeck; tries++) {
+        if (notes.ndeal >= notes.ndeck) {
+            for (int i = notes.ndeck - 1; i > 0; i--) { int j = (int)(rnd(&notes.r) * (i + 1)); if (j > i) j = i; int s = notes.deck[i]; notes.deck[i] = notes.deck[j]; notes.deck[j] = s; }
+            notes.ndeal = 0;
+            if (notes.ndeck > 1 && notes.deck[0] == notes.cur) { int s = notes.deck[0]; notes.deck[0] = notes.deck[1]; notes.deck[1] = s; }
         }
-        int e = deck[ndeal++], on = 0;
-        for (int r = 2; r < nrows; r++) on |= row_entry[r] == e;
-        if (!on) return e;
+        int i = notes.deck[notes.ndeal++];
+        if (notice_wrap(i, a, c)) return i;
     }
-    return deck[0];
+    return notes.cur;
 }
 
-static int deal_notice(void) {
-    if (ndeal_n >= ndeck_n) {
-        for (int i = ndeck_n - 1; i > 0; i--) { int j = (int)(frand() * (i + 1)); if (j > i) j = i; int s = deck_n[i]; deck_n[i] = deck_n[j]; deck_n[j] = s; }
-        ndeal_n = 0;
-        if (ndeck_n > 1 && deck_n[0] == notice_cur) { int s = deck_n[0]; deck_n[0] = deck_n[1]; deck_n[1] = s; }
-    }
-    return deck_n[ndeal_n++];
+/* the timetable: the boards come up at T_START, then every 10-15 s a change
+ * (the same moment on every board), every 18-26 s a new notice */
+#define T_START 0.6
+static uint32_t ev_r, nt_r;
+static double ev_next, nt_next;
+static double epoch;                    /* wall-clock seconds at t = 0 */
+static int started;
+static long last_min = -1;
+
+static void station_init(void) {
+    char buf[512];
+    unsigned char col[512];
+    queue_init(&qdep, ENTRIES, NENTRY, 0x0DE9A27Eu);
+    queue_init(&qarr, ARRIVALS, NARRIVAL, 0x0A7712EDu);
+    static const char **msgs[] = {NOTICES, ARR_NOTICES, PLAT_NOTICES};
+    static const int nmsg[] = {NNOTICE, NARRNOTE, NPLATNOTE};
+    notes.msg = msgs[role];
+    notes.ndeck = 0;
+    for (int i = 0; i < nmsg[role] && notes.ndeck < 64; i++) if (expand(notes.msg[i], buf, col, sizeof buf)) notes.deck[notes.ndeck++] = i;
+    if (!notes.ndeck) die("no notice to show");
+    notes.ndeal = notes.ndeck;
+    notes.r = (opt_seed ^ (0x7E571CEu + (uint32_t)role)) * 2654435761u | 1;
+    notes.cur = -1;
+    notes.cur = notes_next();
+    ev_r = (opt_seed ^ 0xC10C4u) * 0x9E3779B1u | 1;
+    nt_r = (opt_seed ^ 0x40717Eu) * 0x9E3779B1u | 1;
+    ev_next = T_START + 9 + 3 * rnd(&ev_r);
+    nt_next = T_START + 15 + 4 * rnd(&nt_r);
+    plat_no = 1 + (int)((opt_seed >> 4) % 9);
+    started = 0;
+    last_min = -1;
 }
 
-static void decks_init(void) {
-    char a[2][256];
-    unsigned char c[2][256];
-    ndeck = ndeck_n = 0;
-    for (int e = 0; e < NENTRY; e++) if (entry_ok(e)) deck[ndeck++] = e;
-    for (int i = 0; i < NNOTICE; i++) if (notice_wrap(i, a, c)) deck_n[ndeck_n++] = i;
-    if (!ndeck || !ndeck_n) die("nothing fits on the board");
-    ndeal = ndeck; ndeal_n = ndeck_n;
-}
+/* ---- what's on this board ---- */
+static int now_min(void) { return now_tm.tm_hour * 60 + now_tm.tm_min; }
+/* the q-th departure: on the next five minutes on; arrivals four after */
+static int dep_min(int q) { return ((now_min() + 4) / 5 * 5 + 5 * (q + 1)) % (24 * 60); }
+static int arr_min(int q) { int m = now_min() + 1; return ((m + 4) / 5 * 5 + 4 + 5 * q) % (24 * 60); }
 
 /* show row r (start: when its first module goes) */
 static void row_apply(int r, double t, double start, int snap) {
     char buf[NTCOL][128];
     unsigned char col[NTCOL][128];
     memset(col, 0, sizeof col);
-    if (r == 0) {
+    memset(buf, 0, sizeof buf);
+    if (role == ROLE_DEP && r == 0) {
         snprintf(buf[0], 128, "%.5s", d_since);
         expand("$N", buf[1], col[1], 128);
         snprintf(buf[2], 128, "AWAY");
         expand("SINCE $S", buf[3], col[3], 128);
-    } else if (r == 1) {
+    } else if (role == ROLE_DEP && r == 1) {
         snprintf(buf[0], 128, "%s", d_now);
         expand("$H", buf[1], col[1], 128);
         snprintf(buf[2], 128, "LOCKED");
         expand("$D", buf[3], col[3], 128);
+    } else if (role == ROLE_ARR && r == 0) {
+        snprintf(buf[0], 128, "--:--");
+        expand("$N", buf[1], col[1], 128);
+        snprintf(buf[2], 128, "EXPECTED");
+        expand("AWAY $D", buf[3], col[3], 128);
+        if ((int)strlen(buf[3]) > TCOL_W[TCOL_REM]) expand("ANY MINUTE NOW", buf[3], col[3], 128);
+    } else if (role == ROLE_ARR && r == 1) {
+        snprintf(buf[0], 128, "%.5s", d_since);
+        snprintf(buf[1], 128, "THE CHAIR");
+        snprintf(buf[2], 128, "VACANT");
+        expand("SINCE $S", buf[3], col[3], 128);
     } else {
-        /* the next departures, five minutes apart */
-        int m = now_tm.tm_hour * 60 + now_tm.tm_min;
-        m = ((m + 4) / 5 * 5 + 5 * (r - 1)) % (24 * 60);
+        Queue *Q = role == ROLE_ARR ? &qarr : &qdep;
+        int m = role == ROLE_ARR ? arr_min(r - 2) : dep_min(r - 2);
         snprintf(buf[0], 128, "%02d:%02d", m / 60, m % 60);
         for (int k = 0; k < 3; k++)
-            if (!expand(ENTRIES[row_entry[r]][k], buf[k + 1], col[k + 1], 128)) buf[k + 1][0] = 0;
+            if (!expand(Q->ent[Q->q[r - 2]][k], buf[k + 1], col[k + 1], 128)) buf[k + 1][0] = 0;
     }
+    if (tall)                                       /* the remarks line, quieter */
+        for (int i = 0; i < 128; i++) if (col[3][i] == INK_CREAM) col[3][i] = INK_DIM;
     int sc = status_colour(buf[2]);
     for (int c = 0; c < NTCOL; c++) {
-        double s = start + (c ? (mods[f_row[r][c].first].x - mods[f_row[r][0].first].x) / (double)(fw + fgx) * 0.028 : 0);
-        set_field(f_row[r][c], buf[c], c == TCOL_TIME ? NULL : col[c], c == TCOL_TIME ? INK_CREAM : c == TCOL_STATUS && sc >= 0 ? sc : -1, t, s, snap);
+        Field f = f_row[r][c];
+        if (!f.len) continue;
+        double s = start + (mods[f.first].x - mods[f_row[r][0].first].x) / (double)(fw + fgx) * 0.028;
+        set_field(f, buf[c], c == TCOL_TIME ? NULL : col[c], c == TCOL_TIME ? INK_CREAM : c == TCOL_STATUS && sc >= 0 ? sc : -1, t, s, snap);
+    }
+}
+
+/* the platform: the first departure, and where it calls */
+static void plat_apply(double t, double start, int snap) {
+    char buf[NTCOL][128], tm[8];
+    unsigned char col[NTCOL][128];
+    memset(col, 0, sizeof col);
+    int e = qdep.q[0], m = dep_min(0);
+    snprintf(buf[0], 128, "%02d:%02d", m / 60, m % 60);
+    for (int k = 0; k < 3; k++)
+        if (!expand(ENTRIES[e][k], buf[k + 1], col[k + 1], 128)) buf[k + 1][0] = 0;
+    int sc = status_colour(buf[2]);
+    char pn[2] = {(char)('0' + plat_no), 0};
+    set_field(f_platno, pn, NULL, INK_GOLD, t, start, snap);
+    set_field(f_next[TCOL_TIME], buf[0], NULL, INK_CREAM, t, start + 0.05, snap);
+    set_field(f_next[TCOL_DEST], buf[1], col[1], -1, t, start + 0.2, snap);
+    set_field(f_next[TCOL_STATUS], buf[2], col[2], sc, t, start + 0.4, snap);
+    set_field(f_next[TCOL_REM], buf[3], col[3], -1, t, start + 0.55, snap);
+    /* the route: stops picked from the train (so the same train always calls
+     * at the same places), a minute or three apart, ending where it's going */
+    uint32_t h = (((uint32_t)e + 1) * 2654435761u ^ (opt_seed * 0x85EBCA6Bu)) | 1;
+    int used[NSTOPS];
+    memset(used, 0, sizeof used);
+    for (int i = 0; i < nstop; i++) {
+        m = (m + 1 + (int)(rnd(&h) * 3)) % (24 * 60);
+        snprintf(tm, sizeof tm, "%02d:%02d", m / 60, m % 60);
+        const char *name = buf[1];
+        unsigned char *nc = col[1];
+        static unsigned char cream[128];
+        if (i < nstop - 1) {
+            int s = (int)(rnd(&h) * NSTOPS) % NSTOPS;
+            while (used[s]) s = (s + 1) % NSTOPS;
+            used[s] = 1;
+            name = STOPS[s];
+            nc = cream;
+        }
+        double s0 = start + 0.7 + i * 0.1;
+        set_field(f_stop[i][0], tm, NULL, INK_CREAM, t, s0, snap);
+        set_field(f_stop[i][1], name, nc, -1, t, s0 + 0.2, snap);
     }
 }
 
 static void notice_apply(double t, double start, int snap) {
-    char l[2][256];
-    unsigned char c[2][256];
-    if (notice_cur < 0 || !notice_wrap(notice_cur, l, c)) return;
-    for (int i = 0; i < 2; i++) set_field(f_notice[i], l[i], c[i], -1, t, start + i * 0.12, snap);
+    char l[MAXNOTE][256];
+    unsigned char c[MAXNOTE][256];
+    if (notes.cur < 0 || !notice_wrap(notes.cur, l, c)) return;
+    for (int i = 0; i < nnote; i++) set_field(f_notice[i], l[i], c[i], -1, t, start + i * 0.12, snap);
 }
 
 static void clock_apply(double t, double start, int snap) {
@@ -743,63 +1245,58 @@ static void clock_apply(double t, double start, int snap) {
 
 static void board_apply(double t, double start, double row_gap, int snap) {
     clock_apply(t, start, snap);
+    if (role == ROLE_PLAT) plat_apply(t, start + 0.2, snap);
     for (int r = 0; r < nrows; r++) row_apply(r, t, start + 0.2 + r * row_gap, snap);
-    notice_apply(t, start + 0.3 + nrows * row_gap, snap);
+    notice_apply(t, start + 0.3 + (role == ROLE_PLAT ? 6 : nrows) * row_gap, snap);
 }
 
-/* the timetable: the board comes up at T_START, then every 10-15 s a change */
-#define T_START 0.6
-static double next_change, next_notice;
-static int started, last_min = -1;
-
-static void board_init(void) {
-    decks_init();
-    for (int r = 2; r < MAXROWS; r++) row_entry[r] = -1;
-    for (int r = 2; r < MAXROWS; r++) row_entry[r] = deal_entry();
-    notice_cur = deal_notice();
-    started = 0;
-    last_min = -1;
+/* the station's next change, at `at`; shown on this board if `show` */
+static void station_change(double t, double at, int show) {
+    int sd, sa;
+    unsigned md = queue_step(&qdep, &ev_r, &sd);
+    unsigned ma = queue_step(&qarr, &ev_r, &sa);
+    if (!show) return;
+    if (role == ROLE_PLAT) {
+        if (md & 1) plat_apply(t, at, 0);
+        return;
+    }
+    unsigned mask = role == ROLE_ARR ? ma : md;
+    int shift = role == ROLE_ARR ? sa : sd;
+    for (int r = 2, j = 0; r < nrows; r++)
+        if (mask & (1u << (r - 2))) row_apply(r, t, at + (shift ? (r - 2) * 0.14 : j++ * 0.3), 0);
 }
 
-static void board_update(double t, int snap) {
-    time_t wall = time(NULL);
-    if (wall / 60 != last_min) {                    /* the minute turned: live details */
+/* bring the board up to time t (seconds since the epoch) */
+static void board_update(double t) {
+    double wall = epoch + t;
+    long mn = (long)floor(wall / 60);
+    if (mn != last_min) {                           /* the minute turned: live details */
         int first = last_min < 0;
-        last_min = (int)(wall / 60);
-        live_update(wall);
-        if (started && !first) board_apply(t, t, 0.09, 0);
-    }
-    if (!started && (t >= T_START || snap)) {
-        started = 1;
-        board_apply(t, snap ? t : T_START, 0.16, snap);
-        next_change = t + 9 + 3 * frand();
-        next_notice = t + 15 + 4 * frand();
-    }
-    if (!started) return;
-    if (t >= next_change) {
-        float r = frand();
-        if (r < 0.45f) {                            /* the top one leaves: the rest move up */
-            for (int i = 2; i + 1 < nrows; i++) row_entry[i] = row_entry[i + 1];
-            row_entry[nrows - 1] = -1;
-            row_entry[nrows - 1] = deal_entry();
-            for (int i = 2; i < nrows; i++) row_apply(i, t, t + (i - 2) * 0.14, 0);
-        } else {                                    /* one or two change */
-            int k = r < 0.8f ? 1 : 2;
-            for (int j = 0; j < k; j++) {
-                int i = 2 + (int)(frand() * (nrows - 2));
-                if (i >= nrows) i = nrows - 1;
-                row_entry[i] = -1;
-                row_entry[i] = deal_entry();
-                row_apply(i, t, t + j * 0.3, 0);
-            }
+        last_min = mn;
+        live_update((time_t)wall);
+        if (started && !first) {
+            double at = mn * 60.0 - epoch;          /* the moment it turned, the same everywhere */
+            board_apply(t, at < t - 0.5 ? t : at, 0.09, 0);
         }
-        next_change = t + 10 + 5 * frand();
     }
-    if (t >= next_notice) {
-        notice_cur = deal_notice();
-        notice_apply(t, t, 0);
-        next_notice = t + 18 + 8 * frand();
+    int show = started;
+    for (; ev_next <= t; ev_next += 10 + 5 * rnd(&ev_r)) station_change(t, ev_next, show);
+    for (; nt_next <= t; nt_next += 18 + 8 * rnd(&nt_r)) {
+        notes.cur = notes_next();
+        if (show) notice_apply(t, nt_next, 0);
     }
+    if (!started && t >= T_START) {                 /* (late, e.g. restarted: from now) */
+        started = 1;
+        board_apply(t, t > T_START + 1 ? t : T_START, 0.16, 0);
+    }
+}
+
+/* when board_update next has something to do */
+static double board_next(void) {
+    double m = (last_min + 1) * 60.0 - epoch;
+    if (ev_next < m) m = ev_next;
+    if (nt_next < m) m = nt_next;
+    return m;
 }
 
 /* after a resize: lay out again and show everything as it stands */
@@ -851,7 +1348,8 @@ static const char *VS = "#version 330 core\n" GLSL(
 static const char *FS = "#version 330 core\n" GLSL(
     uniform sampler2D uAtlas;
     uniform vec2 uAtlasSize;
-    uniform vec4 uSlot[4];          /* x, y, cw, ch */
+    uniform vec4 uSlot[6];          /* x, y, cw, ch */
+    uniform float uCols[6];         /* glyphs to a row */
     uniform vec3 uInk[7];
     uniform vec3 uFlap[4];          /* card: top outer, top at the split, bottom outer, bottom at the split */
     uniform vec3 uPin[2];           /* axle pin: shaded, lit */
@@ -862,9 +1360,11 @@ static const char *FS = "#version 330 core\n" GLSL(
     float box(vec2 p, vec2 b, float r) { vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }
 
     float glyph(int g, vec2 l) {
-        vec4 s = uSlot[int(vMore.z)];
+        int sl = int(vMore.z);
+        vec4 s = uSlot[sl];
+        int cols = int(uCols[sl]);
         l = clamp(l, vec2(0.5), s.zw - 0.5);
-        return texture(uAtlas, (s.xy + vec2(float(g) * s.z, 0.0) + l) / uAtlasSize).r;
+        return texture(uAtlas, (s.xy + vec2(float(g % cols), float(g / cols)) * s.zw + l) / uAtlasSize).r;
     }
 
     /* one half of a module's card at l (module px, y down), premultiplied */
@@ -1066,6 +1566,9 @@ static void atlas_upload(void) {
     for (int i = 0; i < SLOT_N; i++) { s[4 * i] = (float)slot[i].x; s[4 * i + 1] = (float)slot[i].y; s[4 * i + 2] = (float)slot[i].cw; s[4 * i + 3] = (float)slot[i].ch; }
     glUseProgram(prog);
     glUniform4fv(glGetUniformLocation(prog, "uSlot"), SLOT_N, s);
+    float cols[SLOT_N];
+    for (int i = 0; i < SLOT_N; i++) cols[i] = (float)slot[i].cols;
+    glUniform1fv(glGetUniformLocation(prog, "uCols"), SLOT_N, cols);
     glUniform2f(glGetUniformLocation(prog, "uAtlasSize"), (float)atlas_w, (float)atlas_h);
 }
 
@@ -1120,7 +1623,7 @@ static void render(double t, GLuint target) {
     glUniform2f(glGetUniformLocation(prog_bg, "uRes"), (float)W, (float)H);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
-    if (tex_w != atlas_w || tex_h != atlas_h || !tex_w) atlas_upload();
+    if (atlas_dirty) { atlas_dirty = 0; atlas_upload(); }
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(prog);
@@ -1218,10 +1721,37 @@ static int wl_poll(int timeout_ms) {
     return !wl.closed;
 }
 
+/* Which board this output shows. Without --layout: the departures. With
+ * it, the output under the middle of the layout (flightsim's front one)
+ * shows the departures; the others, in order, the platform (portrait
+ * screens first) and the arrivals (landscape first), alternating once each
+ * has been taken. */
+static int pick_role(void) {
+    if (span_me < 0) return ROLE_DEP;
+    float x0 = 1e9f, x1 = -1e9f;
+    for (int i = 0; i < span_n; i++) { x0 = fminf(x0, span[i][0]); x1 = fmaxf(x1, span[i][0] + span[i][2]); }
+    float mx = (x0 + x1) / 2;
+    int mid = 0;
+    for (int i = 0; i < span_n; i++)
+        if (span[i][0] <= mx && mx < span[i][0] + span[i][2]) { mid = i; break; }
+    if (span_me == mid) return ROLE_DEP;
+    int taken[3] = {1, 0, 0}, k = 0, r = ROLE_ARR;
+    for (int i = 0; i < span_n && i <= span_me; i++) {
+        if (i == mid) continue;
+        r = span[i][3] > span[i][2] ? ROLE_PLAT : ROLE_ARR;
+        if (taken[r]) r = r == ROLE_PLAT ? ROLE_ARR : ROLE_PLAT;
+        if (taken[r]) r = k % 2 ? ROLE_PLAT : ROLE_ARR;
+        taken[r] = 1;
+        k++;
+    }
+    return r;
+}
+
 static void usage(void) {
     fprintf(stderr,
         "usage: splitflap [--window | --root | --layer] [--seed N] [--name NAME] [--font FONTCONFIG-PATTERN]\n"
-        "                 [--palette brass|classic|blue|led]\n"
+        "                 [--palette brass|classic|blue|led] [--epoch UNIXTIME]\n"
+        "                 [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
         "                 [--shot FILE.ppm | --bench FRAMES] [--size WxH] [--at SECONDS]\n");
     exit(1);
 }
@@ -1252,6 +1782,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-bench") && i + 1 < argc) opt_bench = atoi(argv[++i]);
         else if (!strcmp(a, "-size") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &off_w, &off_h) != 2 || off_w < 64 || off_h < 64) usage(); }
         else if (!strcmp(a, "-at") && i + 1 < argc) opt_at = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-epoch") && i + 1 < argc) opt_epoch = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-layout") && i + 1 < argc) parse_layout(argv[++i]);
+        else if (!strcmp(a, "-output") && i + 1 < argc) span_me = atoi(argv[++i]);
         else if (!strcmp(a, "-palette") && i + 1 < argc) {
             const char *n = argv[++i];
             for (opt_pal = 0; opt_pal < NPAL && strcmp(n, PALETTES[opt_pal].name); opt_pal++) {}
@@ -1260,6 +1793,8 @@ int main(int argc, char **argv) {
         else usage();
     }
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
+    if (span_me >= span_n) span_me = -1;
+    role = pick_role();
     rng = opt_seed | 1;
     /* the palette: from the seed (its own hash, so the timetable is the same
      * whichever palette it's drawn in) unless asked for */
@@ -1309,8 +1844,9 @@ int main(int argc, char **argv) {
     live_update(time(NULL));
     gl_init();
     int lw = W, lh = H;
+    epoch = opt_epoch ? opt_epoch : offscreen ? (double)time(NULL) : wallclock();
     layout();
-    board_init();
+    station_init();
 
     if (offscreen) {
         GLuint tex, fbo;
@@ -1321,8 +1857,8 @@ int main(int argc, char **argv) {
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
         /* run the timetable up to --at */
-        for (double t = 0; t < opt_at; t += 1.0 / 60) board_update(t, 0);
-        board_update(opt_at, 0);
+        for (double t = 0; t < opt_at; t += 1.0 / 60) board_update(t);
+        board_update(opt_at);
         if (opt_shot) {
             render(opt_at, fbo);
             glFinish();
@@ -1337,7 +1873,7 @@ int main(int argc, char **argv) {
         glGenQueries(1, &q);
         for (int i = 0; i < opt_bench; i++) {
             double f0 = now(), t = opt_at + (i + 1) / 60.0;
-            board_update(t, 0);
+            board_update(t);
             glBeginQuery(GL_TIME_ELAPSED, q);
             render(t, fbo);
             glEndQuery(GL_TIME_ELAPSED);
@@ -1355,7 +1891,6 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    double t0 = now();
     int dirty = 2;
     for (;;) {
         if (opt_layer) {
@@ -1377,15 +1912,21 @@ int main(int argc, char **argv) {
                 return 0;
             }
         }
-        double t = now(), el = t - t0;
+        /* the board runs off the wall clock from the epoch, so instances on
+         * other outputs turn their flaps at the same moments */
+        double t = now(), el = wallclock() - epoch;
         if (W != lw || H != lh) { lw = W; lh = H; board_relayout(el); }
-        board_update(el, 0);
-        /* nothing turning and nothing to redraw: sleep, waking for events */
+        board_update(el);
+        /* nothing turning and nothing to redraw: sleep until the next change
+         * is due (a second at most), waking for events */
         if (!board_busy(el) && !dirty && started) {
-            if (opt_layer) { if (!wl_poll(100)) return 0; }
+            int ms = (int)ceil((board_next() - el) * 1000);
+            if (ms > 1000) ms = 1000;
+            if (ms < 1) ms = 1;
+            if (opt_layer) { if (!wl_poll(ms)) return 0; }
             else {
                 struct pollfd pf = {ConnectionNumber(dpy), POLLIN, 0};
-                poll(&pf, 1, 100);
+                poll(&pf, 1, ms);
             }
             continue;
         }
