@@ -30,6 +30,15 @@
  * --shot FILE.ppm [--at SECONDS] [--size WxH] for one frame offscreen and
  * --bench N for timing.
  *
+ * Spanning: run one instance per monitor with the same --seed and --epoch,
+ * --layout (every output's logical rect) and --output = this one's index.
+ * The movement already keeps the wall clock, so every instance shows the
+ * same tick; each gets its own camera, its path run off the shared epoch.
+ * The output under the middle of the layout holds the whole movement and
+ * the dial; the others, left to right, take turns at close-ups of the
+ * escapement (balance, lever, escape wheel) and of the train and barrel.
+ * On a portrait screen the camera backs off to keep the same width in view.
+ *
  * Keys (window mode): q / Escape quit.
  */
 #define _DEFAULT_SOURCE
@@ -64,6 +73,14 @@ static const char *opt_shot;
 static double opt_at = 0;                  /* camera-path time to start at */
 static int off_w = 1920, off_h = 1080;
 static float opt_scale = 0;                /* render scale; 0 = adapt to the frame budget */
+static double opt_epoch;                   /* CLOCK_REALTIME seconds the camera path starts at */
+
+/* ---- spanning: one instance per output, each with its own camera ---- */
+#define MAX_OUT 8
+static float span[MAX_OUT][4];             /* x, y, w, h of each output (logical) */
+static int span_n, span_me = -1;
+enum { R_ALL, R_FRONT, R_ESCAPEMENT, R_TRAIN };
+static int role = R_ALL;                   /* R_ALL: one screen, the camera tours everything */
 
 static void die(const char *what) { fprintf(stderr, "clockwork: %s\n", what); exit(1); }
 
@@ -73,15 +90,22 @@ static double now(void) {
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
-/* local wall-clock time, in seconds since local midnight */
-static double clock_now(void) {
+/* local time at unix time u, in seconds since local midnight */
+static double clock_at(double u) {
+    struct tm tm;
+    time_t s = (time_t)floor(u);
+    localtime_r(&s, &tm);
+    return tm.tm_hour * 3600.0 + tm.tm_min * 60.0 + tm.tm_sec + (u - floor(u));
+}
+
+static double wallclock(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    struct tm tm;
-    time_t s = ts.tv_sec;
-    localtime_r(&s, &tm);
-    return tm.tm_hour * 3600.0 + tm.tm_min * 60.0 + tm.tm_sec + ts.tv_nsec * 1e-9;
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
+
+/* local wall-clock time, in seconds since local midnight */
+static double clock_now(void) { return clock_at(wallclock()); }
 
 static uint32_t rng;
 static float frand(void) {
@@ -1038,30 +1062,48 @@ static const Poi POIS[] = {
     {{12, 14, 9}, 88, 8},          /* the train */
     {{-19, -12, 12}, 92, 12},      /* barrel and ratchet */
     {{-14, 25, 11}, 50, 11},       /* the balance close up */
+    /* only on the side screens, spanning: */
+    {{1, 26, 10}, 40, 10},         /* escape wheel and pallets */
+    {{15, 15, 9}, 56, 9},          /* third and fourth wheels meshing */
+    {{-19, -13, 7}, 58, 7},        /* the ratchet and click */
+    {{8, 10, 9}, 64, 9},           /* the train, closer than the tour's view of it */
 };
 #define NPOI ((int)(sizeof POIS / sizeof *POIS))
 static int poi_order[64];
 static float cam_ph[6];
 
+/* Which views each role tours: the lone screen all six of the originals;
+ * spanning, the front one stays on the whole movement and the dial while
+ * the others hold close-ups of the escapement and of the train and barrel. */
 static void camera_init(void) {
+    static const int all[] = {0, 1, 2, 3, 4, 5}, front[] = {0, 2}, esc[] = {1, 6, 5}, train[] = {9, 7, 4, 8};
+    const int *pool = role == R_FRONT ? front : role == R_ESCAPEMENT ? esc : role == R_TRAIN ? train : all;
+    int np = role == R_FRONT ? 2 : role == R_ESCAPEMENT ? 3 : role == R_TRAIN ? 4 : 6;
     int n = 0;
     for (int round = 0; n < 64; round++) {
         int o[NPOI];
-        for (int i = 0; i < NPOI; i++) o[i] = i;
-        for (int i = NPOI - 1; i > 0; i--) { int j = (int)(frand() * (i + 1)); if (j > i) j = i; int t = o[i]; o[i] = o[j]; o[j] = t; }
-        for (int i = 0; i < NPOI && n < 64; i++) {
+        for (int i = 0; i < np; i++) o[i] = pool[i];
+        for (int i = np - 1; i > 0; i--) { int j = (int)(frand() * (i + 1)); if (j > i) j = i; int t = o[i]; o[i] = o[j]; o[j] = t; }
+        for (int i = 0; i < np && n < 64; i++) {
             if (n && o[i] == poi_order[n - 1]) continue;
             poi_order[n++] = o[i];
         }
         (void)round;
     }
-    poi_order[0] = 0;   /* open on the whole movement */
-    if (poi_order[1] == 0) poi_order[1] = 2;
+    if (role == R_ALL) {
+        poi_order[0] = 0;   /* open on the whole movement */
+        if (poi_order[1] == 0) poi_order[1] = 2;
+    } else if (role == R_FRONT) {
+        for (int i = 0; i < 64; i++) poi_order[i] = i % 2 ? 2 : 0;
+    }
     for (int i = 0; i < 6; i++) cam_ph[i] = frand() * (float)TAU;
 }
 
 static void camera_at(double t, float *eye, float *tgt, float *focus) {
     const double seg = 34, glide = 10;
+    /* spanning, the side screens change views at other moments than the front */
+    if (role == R_ESCAPEMENT) t += 11;
+    if (role == R_TRAIN) t += 22;
     double s = t / seg;
     int k = (int)floor(s);
     double f = (s - k) * seg - (seg - glide);
@@ -1071,6 +1113,9 @@ static void camera_at(double t, float *eye, float *tgt, float *focus) {
     float u = (float)f;
     for (int i = 0; i < 3; i++) tgt[i] = a->tgt[i] + (b->tgt[i] - a->tgt[i]) * u;
     float dist = expf(logf(a->dist) + (logf(b->dist) - logf(a->dist)) * u);
+    /* the field of view is vertical: on a portrait screen, back off so the
+     * same width shows (the whole movement, not a slice of it) */
+    if (W < H) dist *= (float)H / W;
     float fz = a->focus_z + (b->focus_z - a->focus_z) * u;
     float az = 0.5f * sinf((float)(t * TAU / 83) + cam_ph[0]) + 0.16f * sinf((float)(t * TAU / 31) + cam_ph[1]);
     float el = 0.14f + 0.26f * sinf((float)(t * TAU / 67) + cam_ph[2]) + 0.06f * sinf((float)(t * TAU / 23) + cam_ph[3]);
@@ -1822,11 +1867,45 @@ static int wl_poll(void) {
 
 static void usage(void) {
     fprintf(stderr,
-        "usage: clockwork [--window | --root | --layer] [--seed N] [--scale X]\n"
+        "usage: clockwork [--window | --root | --layer] [--seed N] [--scale X] [--epoch UNIXTIME]\n"
+        "                 [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
         "                 [--shot FILE.ppm | --bench FRAMES] [--size WxH] [--at SECONDS]\n"
         "  --scale X   fixed render scale (default: adapts to the frame budget)\n"
         "  --at S      start the camera path S seconds in\n");
     exit(1);
+}
+
+/* "x,y,w,h;x,y,w,h;..." */
+static void parse_layout(const char *str) {
+    for (span_n = 0; span_n < MAX_OUT; span_n++) {
+        float *r = span[span_n];
+        int used = 0;
+        if (sscanf(str, "%f,%f,%f,%f%n", &r[0], &r[1], &r[2], &r[3], &used) != 4 || r[2] <= 0 || r[3] <= 0)
+            break;
+        str += used;
+        if (*str == ';') str++;
+    }
+}
+
+/* Spanning, the output under the middle of the layout is the front one and
+ * shows the whole movement; the rest, left to right, take turns at the
+ * escapement and the train. */
+static int pick_role(void) {
+    if (span_me < 0) return R_ALL;
+    float x0 = 1e9f, x1 = -1e9f;
+    for (int i = 0; i < span_n; i++) { x0 = fminf(x0, span[i][0]); x1 = fmaxf(x1, span[i][0] + span[i][2]); }
+    float mx = (x0 + x1) / 2;
+    int front = 0;
+    for (int i = 0; i < span_n; i++)
+        if (span[i][0] <= mx && mx < span[i][0] + span[i][2]) { front = i; break; }
+    if (span_me == front) return R_FRONT;
+    int rank = 0;
+    for (int i = 0; i < span_n; i++) {
+        if (i == front || i == span_me) continue;
+        if (span[i][0] < span[span_me][0] || (span[i][0] == span[span_me][0] && (span[i][1] < span[span_me][1] ||
+                                               (span[i][1] == span[span_me][1] && i < span_me)))) rank++;
+    }
+    return rank % 2 ? R_TRAIN : R_ESCAPEMENT;
 }
 
 static void save_ppm(const char *path) {
@@ -1854,8 +1933,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-bench") && i + 1 < argc) opt_bench = atoi(argv[++i]);
         else if (!strcmp(a, "-size") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &off_w, &off_h) != 2) usage(); }
         else if (!strcmp(a, "-at") && i + 1 < argc) opt_at = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-epoch") && i + 1 < argc) opt_epoch = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "-layout") && i + 1 < argc) parse_layout(argv[++i]);
+        else if (!strcmp(a, "-output") && i + 1 < argc) span_me = atoi(argv[++i]);
         else usage();
     }
+    if (span_me >= span_n) span_me = -1;
+    role = pick_role();
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
     rng = opt_seed * 2654435761u | 1;
     for (int i = 0; i < 4; i++) frand();
@@ -1906,7 +1990,9 @@ int main(int argc, char **argv) {
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
         render_scale = opt_scale > 0 ? opt_scale : default_scale();
-        double t0c = clock_now();
+        /* with --epoch, the moment --at seconds after it, so that separate
+         * instances' shots match */
+        double t0c = opt_epoch ? clock_at(opt_epoch + opt_at) : clock_now();
         render(t0c, opt_at, 1.0 / 60, fbo);
         glFinish();
         if (opt_shot) {
@@ -1968,7 +2054,9 @@ int main(int argc, char **argv) {
             }
         }
         glBeginQuery(GL_TIME_ELAPSED, q[qn]);
-        render(c0 + t, opt_at + (t - t0), t - last > 0.1 ? 1.0 / 60 : t - last, 0);
+        /* spanning, the camera paths all run off the shared epoch */
+        double ct = opt_epoch ? opt_at + (wallclock() - opt_epoch) : opt_at + (t - t0);
+        render(c0 + t, ct, t - last > 0.1 ? 1.0 / 60 : t - last, 0);
         glEndQuery(GL_TIME_ELAPSED);
         qn = (qn + 1) % 3;
         last = t;
