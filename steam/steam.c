@@ -404,6 +404,30 @@ static void sky_init(double wt) {
 
 /* ---- the simulation ---- */
 static double last_read;
+
+/* the fireman fires a round now and then (more often when she's worked
+ * hard): the firehole doors open for a few seconds and the cab fills with
+ * the fire's light. A function of time alone, so every output agrees. */
+static uint32_t thash(long n, int salt) {
+    uint32_t h = (uint32_t)n * 0x9e3779b9u ^ (uint32_t)salt * 0x85ebca6bu ^ opt_seed * 0xc2b2ae35u;
+    h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15;
+    return h;
+}
+static float fire_door(double t) {
+    float best = 0;
+    for (long k = (long)floor(t / 28) - 1; k <= (long)floor(t / 28); k++) {
+        float a = (thash(k, 31) & 0xffff) / 65536.0f, b = (thash(k, 32) & 0xffff) / 65536.0f;
+        if (b > 0.45f + 0.5f * tr.load_s) continue;
+        double t0 = k * 28.0 + a * 20, len = 4.5 + 3 * b;
+        double u = t - t0;
+        if (u < 0 || u > len) continue;
+        /* open, a shovelful at a time (the doors close a little between), then shut */
+        float o = sstepf(0, 0.5f, (float)u) * sstepf((float)len, (float)len - 0.6f, (float)u);
+        o *= 0.75f + 0.25f * cosf((float)u * 2 * (float)M_PI / 1.3f);
+        if (o > best) best = o;
+    }
+    return best;
+}
 static int sim_started;
 static void physics(double dt) {
     float load = clampf(sens.load, 0, 1);
@@ -469,10 +493,8 @@ static void advance(double t, double wt) {
 }
 
 /* ---- drawing ---- */
-static GLuint p_obj, p_ter, p_tree, p_sky, p_down, p_up, p_post, p_shadow, p_tree_pre, p_ter_pre;
+static GLuint p_obj, p_ter, p_tree, p_sky, p_down, p_up, p_post, p_shadow, p_tree_pre, p_ter_pre, p_wire;
 static GLuint vao_full;
-static GMesh g_tree;
-static GLuint vao_tree;
 
 /* the canvas (see setup_view), and this output's slice of it */
 static float cam_cx, cam_cy, cam_f, view_x, view_y, view_w, view_h, lay_x0, lay_y0, lay_w, lay_h, front_w, front_h;
@@ -560,7 +582,7 @@ static void set_common(GLuint p) {
     glUniform3fv(UL(p, "uFogCol"), 1, fog_col);
     glUniform1f(UL(p, "uFogDen"), fog_den);
     glUniform1f(UL(p, "uMistY"), mist_y);
-    glUniform1f(UL(p, "uMistDen"), sky.weather == 3 ? 0.012f : 0.004f);
+    glUniform1f(UL(p, "uMistDen"), sky.weather == 3 ? 0.006f : 0.0018f);
     glUniform1f(UL(p, "uTime"), (float)fmod(t_now, 1000.0));
     glUniform3f(UL(p, "uWOff"), (float)fmod(cam.p[0], 4096.0), (float)cam.p[1], (float)fmod(cam.p[2], 4096.0));
     glUniform4fv(UL(p, "uPL"), MAXPL, &pl[0][0]);
@@ -612,67 +634,12 @@ static char fs_buf[1 << 17];
 #define FSRC(a, b) (snprintf(fs_buf, sizeof fs_buf, "%s%s%s%s", HDR, GL_COMMON, a, b), fs_buf)
 #include "smoke.h"
 
-/* the tree mesh: a conifer (material 0) and a broadleaf crown (material 1), unit height */
-static void trees_init(void) {
-    static Mesh m;
-    mb_begin(&m);
-    mb->mat = 0;
-    M4 up = m4rotx(-(float)M_PI / 2);
-    for (int k = 0; k < 4; k++) {
-        float y0 = 0.12f + k * 0.2f, r = 0.3f - k * 0.06f;
-        float pr[] = {0, y0, r, y0, r * 0.75f, y0 + 0.08f, 0, y0 + 0.36f};
-        mb->xf = up;
-        mb_lathe(pr, 4, 9, 0, 2 * (float)M_PI);
-    }
-    {
-        float pr[] = {0.025f, 0, 0.025f, 0.2f};
-        mb->xf = up;
-        mb_lathe(pr, 2, 5, 0, 2 * (float)M_PI);
-    }
-    mb->mat = 1;
-    {
-        float pr[18];
-        for (int i = 0; i < 9; i++) {
-            float a = (float)M_PI * i / 8;
-            pr[2 * i] = 0.36f * sinf(a) * (1 + 0.12f * sinf(a * 5));
-            pr[2 * i + 1] = 0.58f - 0.4f * cosf(a);
-        }
-        mb->xf = up;
-        mb_lathe(pr, 9, 11, 0, 2 * (float)M_PI);
-        float tr2[] = {0.035f, 0, 0.035f, 0.3f};
-        mb_lathe(tr2, 2, 5, 0, 2 * (float)M_PI);
-    }
-    mb->xf = m4id();
-    gm_upload(&g_tree, &m);
-    glGenVertexArrays(1, &vao_tree);
-    glBindVertexArray(vao_tree);
-    glBindBuffer(GL_ARRAY_BUFFER, g_tree.vbo);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, VF * sizeof(float), (void *)0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, VF * sizeof(float), (void *)(3 * sizeof(float)));
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, VF * sizeof(float), (void *)(6 * sizeof(float)));
-    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, VF * sizeof(float), (void *)(8 * sizeof(float)));
-    for (int i = 0; i < 6; i++) glEnableVertexAttribArray((GLuint)i);
-    glVertexAttribDivisor(4, 1);
-    glVertexAttribDivisor(5, 1);
-}
-
 static int tile_visible(const Tile *t) {
     double size = TROOT / (1 << t->level);
     float hx = (float)(size / 2), hy = (t->hmax - t->hmin) / 2 + 15;
     return visible((float)(t->ox + size / 2 - cam.p[0]), (float)((t->hmax + t->hmin) / 2 - cam.p[1]), (float)(t->oz + size / 2 - cam.p[2]), sqrtf(2 * hx * hx + hy * hy));
 }
-static void draw_trees(GLuint p) {
-    glBindVertexArray(vao_tree);
-    for (int i = 0; i < ndraw; i++) {
-        Tile *t = drawlist[i];
-        if (!t->ntree || !tile_visible(t)) continue;
-        glUniform3f(UL(p, "uTileO"), (float)(t->ox - cam.p[0]), (float)(-cam.p[1]), (float)(t->oz - cam.p[2]));
-        glBindBuffer(GL_ARRAY_BUFFER, t->tree_vbo);
-        glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)0);
-        glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)(4 * sizeof(float)));
-        glDrawArraysInstanced(GL_TRIANGLES, 0, g_tree.n, t->ntree);
-    }
-}
+#include "trees.h"
 
 /* the valve gear and rods for one side (s = +1 / -1), the engine's frame f */
 static void draw_motion(GLuint p, const Frame *f, int s) {
@@ -832,12 +799,12 @@ static void render(GLuint target) {
     /* light and air */
     float ml = 0.3f + 0.7f * sky.lit;
     float cl = sky.weather == 0 ? 1.0f : 0.5f;
-    moon_col[0] = 0.30f * ml * cl; moon_col[1] = 0.34f * ml * cl; moon_col[2] = 0.45f * ml * cl;
-    sky_col[0] = 0.010f + 0.012f * ml; sky_col[1] = 0.013f + 0.016f * ml; sky_col[2] = 0.022f + 0.028f * ml;
-    gnd_col[0] = 0.004f; gnd_col[1] = 0.0045f; gnd_col[2] = 0.005f;
-    fog_col[0] = 0.008f + 0.010f * ml; fog_col[1] = 0.011f + 0.013f * ml; fog_col[2] = 0.018f + 0.022f * ml;
+    moon_col[0] = 0.42f * ml * cl; moon_col[1] = 0.48f * ml * cl; moon_col[2] = 0.62f * ml * cl;
+    sky_col[0] = 0.005f + 0.006f * ml; sky_col[1] = 0.007f + 0.008f * ml; sky_col[2] = 0.012f + 0.016f * ml;
+    gnd_col[0] = 0.002f; gnd_col[1] = 0.0022f; gnd_col[2] = 0.0025f;
+    fog_col[0] = 0.006f + 0.008f * ml; fog_col[1] = 0.008f + 0.010f * ml; fog_col[2] = 0.013f + 0.017f * ml;
     fog_den = sky.weather == 3 ? 1 / 700.0f : sky.weather == 1 ? 1 / 1300.0f : sky.weather == 2 ? 1 / 1000.0f : 1 / 3000.0f;
-    mist_y = (float)(-16 - cam.p[1]);
+    mist_y = (float)(-22 - cam.p[1]);
     flick = 0.6f * sinf((float)t_now * 7.3f) * sinf((float)t_now * 3.1f + 1) + 0.4f * sinf((float)t_now * 13.7f + 2);
 
     /* lights: the fire under the engine and in the cab, the lamps; the carriages' windows */
@@ -846,7 +813,9 @@ static void render(GLuint target) {
     double wp[3];
     float fi = tr.fire * (0.85f + 0.15f * flick);
     fpt(&f0, 0, 0.45f, -3.3f, wp); add_light(wp, 1.3f, 4.0f * fi, 1.3f * fi, 0.3f * fi);
-    fpt(&f0, 0, 2.9f, -4.4f, wp); add_light(wp, 1.3f, 5.0f * fi, 1.8f * fi, 0.5f * fi);
+    float door = fire_door(t_now);
+    float ci = fi * (0.6f + 3.2f * door * (0.85f + 0.3f * flick));
+    fpt(&f0, 0, 2.6f, -3.7f, wp); add_light(wp, 0.9f + 1.4f * door, 3.2f * ci, 1.0f * ci, 0.22f * ci);
     for (int s = -1; s <= 1; s += 2) { fpt(&f0, s * 0.87f, 1.48f, 7.7f, wp); add_light(wp, 1.0f, 0.8f, 0.68f, 0.45f); }
     {
         Frame ft = veh_frame(1 + tr.ncoach);
@@ -915,6 +884,9 @@ static void render(GLuint target) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
     draw_train(p_obj, 1);
+    set_common(p_wire);
+    glUniform1f(UL(p_wire, "uPixAng"), 1.0f / (cam_f * render_scale));
+    lineside_wires(p_wire);
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
 
@@ -1033,6 +1005,7 @@ static void gl_init(void) {
     p_ter = mk_prog("terrain", VS_TER, FSRC(FS_TER, ""));
     p_tree = mk_prog("tree", VS_TREE, FSRC(FS_TREE, ""));
     p_tree_pre = mk_prog("tree_pre", VS_TREE, FSRC(FS_NONE, ""));
+    p_wire = mk_prog("wire", VS_OBJ, FSRC(FS_WIRE, ""));
     p_ter_pre = mk_prog("ter_pre", VS_TER, FSRC(FS_NONE, ""));
     p_sky = mk_prog("sky", VS_FULL, FSRC(FS_SKY, ""));
     p_down = mk_prog("down", VS_FULL, FSRC(FS_DOWN, ""));

@@ -9,7 +9,7 @@
 /* ---- chunks of track and poles ---- */
 #define CHUNK 64.0
 #define MAXCHUNK 72
-typedef struct { long k; int live, lod; double o[3]; GMesh mesh; unsigned used; } Chunk;
+typedef struct { long k; int live, lod; double o[3]; GMesh mesh, wires; unsigned used; } Chunk;
 static Chunk chunks[MAXCHUNK];
 static int pole_side = 1;
 #define SA_ROWS_F 8.0f
@@ -42,7 +42,8 @@ static int on_viaduct(double z) {
 }
 
 static void chunk_build(Chunk *c) {
-    static Mesh m;
+    static Mesh m, mw;
+    mw.n = 0; mw.xf = m4id(); mw.mat = PM_IRON;
     mb_begin(&m);
     double z0 = c->k * CHUNK;
     line_pt(z0, 0, 0, c->o);
@@ -125,14 +126,18 @@ static void chunk_build(Chunk *c) {
                         V3 q0 = vlerp(p0, p1, u0), q1 = vlerp(p0, p1, u1);
                         q0.y -= 0.55f * 4 * u0 * (1 - u0);
                         q1.y -= 0.55f * 4 * u1 * (1 - u1);
-                        float w = 0.007f;
-                        mb_quad(vadd(q0, v3(0, -w, 0)), vadd(q1, v3(0, -w, 0)), vadd(q1, v3(0, w, 0)), vadd(q0, v3(0, w, 0)));
-                        mb_quad(vadd(q0, v3(-w, 0, 0)), vadd(q1, v3(-w, 0, 0)), vadd(q1, v3(w, 0, 0)), vadd(q0, v3(w, 0, 0)));
+                        /* as lines, drawn a pixel wide and faded by how much of it there is */
+                        Mesh *sv = mb;
+                        mb = &mw;
+                        mb_vert(q0, v3(0, 1, 0), 0, 0);
+                        mb_vert(q1, v3(0, 1, 0), 0, 0);
+                        mb = sv;
                     }
                 }
         }
     }
     gm_upload(&c->mesh, &m);
+    gm_upload(&c->wires, &mw);
 }
 
 static Chunk *chunk_get(long k, int lod) {
@@ -283,7 +288,7 @@ static void build_crossing(Piece *p, Feat f) {
             boxc(0, 1.3f, L / 2, 0.04f, 0.06f, L / 2);
             boxc(0, 0.7f, L / 2, 0.04f, 0.05f, L / 2);
             for (int k = 0; k < 6; k++) boxc(0, 1.0f, 0.3f + k * L / 6.3f, 0.03f, 0.3f, 0.025f);
-            mat(PM_SIG_R);
+            mat(PM_RED);
             M4 s2 = mb->xf;
             push(m4mul(m4trans(s * -0.05f, 1.0f, L * 0.55f), m4roty((float)M_PI / 2)));
             float disc[] = {0, 0, 0.22f, 0};
@@ -604,6 +609,23 @@ static void lineside_update(void) {
             float want = signal_clear(signal_z(k, i)) ? 0.7f : 0.0f;
             sig_arm[idx] += (want - sig_arm[idx]) * 0.05f;
         }
+}
+
+/* the telegraph wires of the chunks drawn this frame */
+static void lineside_wires(GLuint p) {
+    long kc = (long)floor(cam.p[2] / CHUNK);
+    for (long k = kc - 26; k <= kc + 26; k++) {
+        Chunk *c = NULL;
+        for (int i = 0; i < MAXCHUNK; i++)
+            if (chunks[i].live && chunks[i].k == k) { c = &chunks[i]; break; }
+        if (!c || !c->wires.n) continue;
+        double zc = (k + 0.5) * CHUNK;
+        if (!visible((float)(track_x(zc) - cam.p[0]), (float)(track_y(zc) + 6 - cam.p[1]), (float)(zc - cam.p[2]), 42)) continue;
+        M4 m = m4trans((float)(c->o[0] - cam.p[0]), (float)(c->o[1] - cam.p[1]), (float)(c->o[2] - cam.p[2]));
+        glUniformMatrix4fv(UL(p, "uModel"), 1, GL_FALSE, m.m);
+        glBindVertexArray(c->wires.vao);
+        glDrawArrays(GL_LINES, 0, c->wires.n);
+    }
 }
 
 static void lineside_draw(GLuint p, int shadow) {

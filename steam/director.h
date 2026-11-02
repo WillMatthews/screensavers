@@ -6,8 +6,7 @@
  * of shots that ride with the train. Dips to black between them. All of it
  * a function of the simulation, so spanned instances agree. */
 
-enum { SH_WHEELS, SH_FRONT, SH_PASSBY, SH_AERIAL, SH_CAB, SH_SIDE, SH_VIADUCT, SH_STATION, SH_TUNNEL, SH_CROSSING, NSHOT };
-static const char *shot_name[NSHOT] = {"wheels", "front", "passby", "aerial", "cab", "side", "viaduct", "station", "tunnel", "crossing"};
+enum { SH_WHEELS, SH_FRONT, SH_PASSBY, SH_AERIAL, SH_CAB, SH_SIDE, SH_MOON, SH_VIADUCT, SH_STATION, SH_TUNNEL, SH_CROSSING, NSHOT };
 static struct {
     int kind, n;
     double t0, t1;
@@ -15,6 +14,7 @@ static struct {
     double a[3];               /* a world anchor (where a fixed camera stands) */
     double fz0, fz1;           /* the set piece's extent */
     double look[3], lookv[3];  /* the look-at point, on a spring */
+    float dk, hk;              /* the set-up's distance scale and extra height */
     int look_init;
 } shot;
 #define FADE 0.9
@@ -61,6 +61,56 @@ static void shot_target(double t, double *out) {
     (void)t;
 }
 
+/* the variant var of shot n's set-up: which side, how far, how high */
+static void shot_place(int n, int var, double v) {
+    int kind = shot.kind;
+    shot.side = (dfrand(n, 2) < 0.5f ? -1.0f : 1.0f) * (var & 1 ? -1 : 1);
+    shot.dk = 1.0f + 0.35f * (var / 2) * (var % 4 < 2 ? 1 : -0.6f);
+    shot.hk = 3.0f * (var / 2);
+    switch (kind) {
+    case SH_PASSBY: {
+        double z = head_z() + v * (8 + 4 * dfrand(n, 4));
+        line_pt(z, shot.side * (4.2 + 2 * dfrand(n, 5)), 0.6 + 1.2 * dfrand(n, 6) + shot.hk * 0.3, shot.a);
+        break;
+    }
+    case SH_STATION:
+        line_pt(shot.fz1 - 40 + var * 12, -pole_side * 3.4, 0.92 + 1.65, shot.a);
+        break;
+    case SH_CROSSING:
+        line_pt((shot.fz0 + shot.fz1) / 2 - 3.5, pole_side * (15.5 - var), 1.4 + shot.hk * 0.3, shot.a);
+        break;
+    case SH_VIADUCT: {
+        double mz = (shot.fz0 + shot.fz1) / 2 + (dfrand(n, 7) - 0.5) * 80;
+        line_pt(mz, shot.side * (95 + 40 * dfrand(n, 8)) * shot.dk, -22 + shot.hk * 2, shot.a);
+        break;
+    }
+    default: break;
+    }
+}
+
+static void director_camera(double t);
+static double cam_at[3];
+/* can the shot see the train at its start, middle and end (were she to keep her speed)? */
+static int shot_ok(void) {
+    double z0 = tr.z, len = shot.t1 - shot.t0;
+    double look[3] = {shot.look[0], shot.look[1], shot.look[2]};
+    int init = shot.look_init, ok = 1;
+    typeof(cam) save = cam;
+    for (int k = 0; k < 3 && ok; k++) {
+        double u = 0.12 + 0.38 * k;
+        tr.z = z0 + tr.v * u * len;
+        shot_target(shot.t0 + u * len, shot.look);
+        shot.look_init = 1;
+        director_camera(shot.t0 + u * len);
+        if (sight_blocked(cam.p, cam_at)) ok = 0;
+    }
+    tr.z = z0;
+    cam = save;
+    for (int k = 0; k < 3; k++) shot.look[k] = look[k];
+    shot.look_init = init;
+    return ok;
+}
+
 static double shot_len(int kind, double t, int n) {
     (void)t;
     switch (kind) {
@@ -88,7 +138,7 @@ static void shot_pick(double t) {
         }
     }
     if (kind < 0) {
-        static const int rot[] = {SH_WHEELS, SH_FRONT, SH_AERIAL, SH_PASSBY, SH_CAB, SH_SIDE, SH_FRONT, SH_WHEELS, SH_PASSBY, SH_AERIAL};
+        static const int rot[] = {SH_WHEELS, SH_FRONT, SH_AERIAL, SH_PASSBY, SH_CAB, SH_MOON, SH_SIDE, SH_FRONT, SH_WHEELS, SH_PASSBY, SH_AERIAL, SH_MOON};
         int r = (int)(dhash(n, 1) % (sizeof rot / sizeof *rot));
         kind = rot[r];
         if (kind == prev) kind = rot[(r + 1) % (sizeof rot / sizeof *rot)];
@@ -105,27 +155,11 @@ static void shot_pick(double t) {
     shot.n = n;
     shot.t0 = t;
     shot.t1 = t + shot_len(kind, t, n);
-    shot.side = dfrand(n, 2) < 0.5f ? -1.0f : 1.0f;
     shot.look_init = 0;
-    /* where fixed cameras stand */
-    switch (kind) {
-    case SH_PASSBY: {
-        double z = head_z() + v * (8 + 4 * dfrand(n, 4));
-        line_pt(z, shot.side * (4.2 + 2 * dfrand(n, 5)), 0.6 + 1.2 * dfrand(n, 6), shot.a);
-        break;
-    }
-    case SH_STATION:
-        line_pt(shot.fz1 - 40, -pole_side * 3.4, 0.92 + 1.65, shot.a);
-        break;
-    case SH_CROSSING:
-        line_pt((shot.fz0 + shot.fz1) / 2 - 3.5, pole_side * 15.5, 1.4, shot.a);
-        break;
-    case SH_VIADUCT: {
-        double mz = (shot.fz0 + shot.fz1) / 2 + (dfrand(n, 7) - 0.5) * 80;
-        line_pt(mz, shot.side * (95 + 40 * dfrand(n, 8)), -22, shot.a);
-        break;
-    }
-    default: break;
+    /* try set-ups until one isn't looking through a tree or a hill */
+    for (int var = 0; var < 10; var++) {
+        shot_place(n, var, v);
+        if (shot_ok()) break;
     }
 }
 
@@ -190,15 +224,33 @@ static void director_camera(double t) {
         break;
     }
     case SH_FRONT: {
-        float d = (float)(14 - 3 * u);
-        fpt(&f0, s * (2.0f + 1.4f * (float)u), 0.55f + 0.5f * (float)u, d, p);
-        fpt(&f0, s * 0.3f, 2.5f, 3.5f, at);
-        cam.hfov = 48; cam.fstop = 0.8f;
-        roll = -s * 0.03f;
+        /* three-quarters ahead, low, a long lens, drifting out and up */
+        float d = (float)(24 - 5 * u) * shot.dk;
+        fpt(&f0, s * (4.0f + 2.5f * (float)u), 0.9f + 0.9f * (float)u + shot.hk * 0.3f, d, p);
+        fpt(&f0, s * 0.4f, 2.4f, 0.5f, at);
+        cam.hfov = 34; cam.fstop = 0.7f;
+        roll = -s * 0.015f;
+        break;
+    }
+    case SH_MOON: {
+        /* low, from the side away from the moon, looking up at the plume against it */
+        float maz = atan2f(sky.moon.x, sky.moon.z);
+        V3 away = v3(-sinf(maz), 0, -cosf(maz));
+        double c[3];
+        fpt(&f0, 0, 3.0f, (float)(8 - 30 * u), c);
+        float dist = 48 * shot.dk;
+        p[0] = c[0] + away.x * dist; p[2] = c[2] + away.z * dist;
+        p[1] = terrain_h(p[0], p[2]) + 1.2 + shot.hk;
+        float alt = asinf(sky.moon.y);
+        float pitch = fminf(alt * 0.55f, 0.32f);
+        float hd = sqrtf((float)((c[0] - p[0]) * (c[0] - p[0]) + (c[2] - p[2]) * (c[2] - p[2])));
+        at[0] = c[0]; at[2] = c[2];
+        at[1] = p[1] + hd * tanf(pitch);
+        cam.hfov = 58;
         break;
     }
     case SH_AERIAL: {
-        fpt(&f0, s * (40 + 10 * (float)u), 26 + 6 * (float)u, 35 - 70 * (float)u, p);
+        fpt(&f0, s * (40 + 10 * (float)u) * shot.dk, 26 + 6 * (float)u + shot.hk * 2, 35 - 70 * (float)u, p);
         fpt(&f0, 0, 3, -20 - 10 * (float)u, at);
         cam.hfov = 42;
         break;
@@ -212,7 +264,7 @@ static void director_camera(double t) {
     }
     case SH_SIDE: {
         float z = (float)(-14 + 22 * u);
-        fpt(&f0, s * 26, 3.0f, z, p);
+        fpt(&f0, s * 34 * shot.dk, 2.6f + shot.hk, z, p);
         fpt(&f0, 0, 2.0f, z + 1, at);
         cam.hfov = 30;
         break;
@@ -232,7 +284,7 @@ static void director_camera(double t) {
     case SH_TUNNEL: {
         /* chase behind the train until near the portal, then stop */
         double cz = fmin(train_tail_z() - 26, shot.fz0 - 38);
-        line_pt(cz, s * 3.2, 6.5, p);
+        line_pt(cz, s * 3.2, 6.5 + shot.hk, p);
         for (int k = 0; k < 3; k++) at[k] = shot.look[k];
         cam.hfov = 48;
         break;
@@ -245,6 +297,8 @@ static void director_camera(double t) {
     /* never below the ground */
     double g = terrain_h(p[0], p[2]);
     if (shot.kind != SH_WHEELS && shot.kind != SH_FRONT && shot.kind != SH_CAB && p[1] < g + 0.5) p[1] = g + 0.5;
+    if ((shot.kind == SH_FRONT || shot.kind == SH_WHEELS) && p[1] < g + 0.35) p[1] = g + 0.35;
+    for (int k = 0; k < 3; k++) cam_at[k] = at[k];
     cam_look(p, at, roll);
     if (cam.fstop == 0) cam.focus = 1e4f;
 }

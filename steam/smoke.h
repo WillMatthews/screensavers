@@ -65,14 +65,14 @@ static void smoke_step(double dt) {
         float work = clampf(0.4f + tr.cutoff + 0.5f * tr.load_s, 0.3f, 1.4f);
         int n = tr.v > 25 ? 1 : 2;
         for (int i = 0; i < n; i++)
-            emit(&f, 0, 4.15f, 6.15f, v3(0, 7 + 7 * work, 0), 1.6f, 0, 0.32f, 3.5f + 2.0f * work, 6.0f + 3 * work, 0.32f + 0.15f * work);
+            emit(&f, 0, 4.15f, 6.15f, v3(0, 7 + 7 * work, 0), 1.6f, 0, 0.4f, 5.5f + 3.0f * work, 9.0f + 4 * work, 0.5f + 0.2f * work);
     }
     if (beats_done < tr.beats - 50) beats_done = floor(tr.beats);
     /* sparks, more when she's worked hard and the fire's hot */
     sm.spark_acc += (float)dt * (2 + 30 * tr.load_s * tr.load_s) * tr.fire;
     while (sm.spark_acc >= 1) {
         sm.spark_acc -= 1;
-        emit(&f, (srand01() - 0.5f) * 0.3f, 4.2f, 6.15f, v3(0, 14 + 10 * srand01(), 0), 4.0f, 2, 0.03f, 0.03f, 1.2f + srand01(), 1);
+        emit(&f, (srand01() - 0.5f) * 0.3f, 4.2f, 6.15f, v3(0, 7 + 6 * srand01(), 0), 3.0f, 2, 0.03f, 0.03f, 0.7f + 0.8f * srand01(), 1);
     }
     /* the safety valves blow off now and then, and when the regulator's eased (the load fell) */
     if (t > sm.blow_next || (tr.vt < tr.v - 4 && t > sm.blow_until + 20)) {

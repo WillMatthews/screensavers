@@ -192,7 +192,7 @@ static const char *FS_OBJ = GLSL(
             float sp = abs(fract(ang * nsp / 6.2832) - 0.5) * 2.0;
             float wsp = 0.16 / max(r, 0.2);
             float spoke = smoothstep(wsp + 0.03 + blur, wsp - 0.03, 1.0 - sp);
-            spoke = mix(spoke, wsp * 1.1, blur);
+            spoke = mix(spoke, 0.62, blur);
             float hub = smoothstep(0.3, 0.27, r);
             float rim = smoothstep(0.8, 0.83, r);
             float web = max(max(spoke, hub), rim);
@@ -328,8 +328,6 @@ static const char *VS_TREE = HDR GLSL(
     out vec3 vP, vN, vL;
     flat out float vKind, vTint;
     void main() {
-        bool conifer = iKind.x < 0.5;
-        if ((aMat < 0.5) != conifer) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
         float c = cos(iKind.y), s = sin(iKind.y);
         vec3 p = aPos * iPos.w;
         p.xz = mat2(c, -s, s, c) * p.xz;
@@ -339,7 +337,7 @@ static const char *VS_TREE = HDR GLSL(
         vP = p + iPos.xyz + uTileO;
         vN = n;
         vL = aPos;
-        vKind = iKind.x; vTint = iKind.z;
+        vKind = aMat; vTint = iKind.z;
         gl_Position = uVP * vec4(vP, 1.0);
     });
 static const char *FS_TREE = GLSL(
@@ -350,9 +348,10 @@ static const char *FS_TREE = GLSL(
         vec3 N = normalize(vN);
         float n = vnoise3(vL * 9.0 + vTint * 10.0);
         N = normalize(N + 0.7 * (vec3(vnoise3(vL * 7.0), vnoise3(vL * 7.0 + 3.0), vnoise3(vL * 7.0 + 6.0)) - 0.5));
-        vec3 alb = vKind < 0.5 ? vec3(0.03, 0.05, 0.035) : vec3(0.05, 0.06, 0.03);
-        alb *= 0.6 + 0.8 * n * (0.7 + 0.6 * vTint);
-        alb *= 0.6 + 0.4 * clamp(vL.y, 0.0, 1.0);
+        vec3 alb = vKind < 1.5 ? vec3(0.022, 0.04, 0.03) : vKind > 3.5 ? vec3(0.04, 0.05, 0.025) : vec3(0.035, 0.05, 0.026);
+        alb *= 0.55 + 0.9 * n * (0.7 + 0.6 * vTint);
+        alb *= 0.5 + 0.5 * clamp(vL.y * 1.4, 0.0, 1.0);
+        if (length(vL.xz) < 0.045 && vL.y < 0.75) alb = vec3(0.03, 0.025, 0.02);
         float sh = moonShadow(vP, N);
         vec3 col = lightAll(vP, N, alb, 0.8, 0.0, sh);
         o = vec4(fogApply(col, vP), 1.0);
@@ -630,6 +629,20 @@ static const char *FS_SMOKECOMP = GLSL(
     out vec4 o;
     void main() { o = texture(uSrc, vUV); });
 
+/* a telegraph wire: a line a pixel wide, as opaque as the wire is wide */
+static const char *FS_WIRE = GLSL(
+    in vec3 vP, vN, vL;
+    in vec2 vUV;
+    flat in int vMat;
+    uniform float uPixAng;
+    out vec4 o;
+    void main() {
+        float d = length(vP);
+        float a = clamp(0.006 / (d * uPixAng), 0.04, 1.0);
+        vec3 V = vP / d;
+        vec3 c = vec3(0.004) + uMoonCol * 0.08 * pow(max(dot(-V, uMoonDir), 0.0), 4.0);
+        o = vec4(fogApply(c, vP), a);
+    });
 static const char *FS_NONE = GLSL(
     out vec4 o;
     void main() { o = vec4(0.0); });

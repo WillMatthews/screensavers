@@ -26,7 +26,7 @@ static void palette_init(void) {
     pal_set(PM_TERRAIN, 0.1f, 0.1f, 0.1f, 0.9f, 0, 0, 0, 0);
     pal_set(PM_GREEN, 0.035f, 0.11f, 0.06f, 0.32f, 0, 0, 0, 0);
     pal_set(PM_BLACK, 0.025f, 0.025f, 0.025f, 0.55f, 0, 0, 0, 0);
-    pal_set(PM_RED, 0.32f, 0.03f, 0.02f, 0.4f, 0, 0, 0, 0);
+    pal_set(PM_RED, 0.2f, 0.022f, 0.016f, 0.4f, 0, 0, 0, 0);
     pal_set(PM_BRASS, 0.78f, 0.56f, 0.24f, 0.22f, 1, 0, 0, 0);
     pal_set(PM_COPPER, 0.8f, 0.42f, 0.27f, 0.25f, 1, 0, 0, 0);
     pal_set(PM_STEEL, 0.6f, 0.6f, 0.62f, 0.22f, 1, 0, 7, 0);
@@ -39,7 +39,7 @@ static void palette_init(void) {
     pal_set(PM_CABIN, 0.1f, 0.085f, 0.06f, 0.6f, 0, 0, 0, 0);
     pal_set(PM_GLASS, 0.01f, 0.012f, 0.015f, 0.04f, 0, 0, 0, 0);
     pal_set(PM_WINDOW, 1, 1, 1, 0.05f, 0, 0.7f, 2, 0);
-    pal_set(PM_COAL, 0.03f, 0.03f, 0.03f, 0.4f, 0, 0, 5, 0);
+    pal_set(PM_COAL, 0.03f, 0.03f, 0.03f, 0.55f, 0, 0, 5, 0);
     pal_set(PM_TEAK, 0.2f, 0.085f, 0.035f, 0.35f, 0, 0, 0, 0);
     pal_set(PM_ROOF, 0.12f, 0.12f, 0.12f, 0.7f, 0, 0, 0, 0);
     pal_set(PM_RAIL, 0.45f, 0.42f, 0.4f, 0.25f, 1, 0, 7, 0);
@@ -244,11 +244,28 @@ static void build_loco(void) {
     /* the door: dished, with its hinges and dart handles */
     float dr[] = {0, 7.06f, 0.3f, 7.04f, 0.6f, 6.99f, 0.76f, 6.96f, 0.8f, 6.93f};
     lathe_at(v3(0, BOILER_Y, 0), v3(0, 0, 1), dr, 5, 48);
+    /* its rim, the hinge straps across it, the dart: a small handwheel and a handle */
+    mat(PM_SMOKEBOX);
+    {
+        M4 sv = mb->xf;
+        push(m4trans(0, BOILER_Y, 6.95f));
+        mb_torus(0.79f, 0.035f, 48, 8);
+        mb->xf = sv;
+    }
     mat(PM_STEEL);
-    for (int i = -1; i <= 1; i += 2) boxc(0.3f, BOILER_Y + i * 0.4f, 7.0f, 0.42f, 0.03f, 0.02f);
-    cyl_at(v3(0, BOILER_Y, 7.04f), v3(0, 0, 1), 0.06f, 0.08f, 12);
-    mb_rod(v3(-0.14f, BOILER_Y, 7.14f), v3(0.14f, BOILER_Y, 7.14f), 0.015f, 6, 1);
-    mb_rod(v3(0, BOILER_Y - 0.14f, 7.16f), v3(0, BOILER_Y + 0.14f, 7.16f), 0.015f, 6, 1);
+    for (int i = -1; i <= 1; i += 2) boxc(-0.25f, BOILER_Y + i * 0.42f, 6.98f + 0.02f * (1 - i * i), 0.5f, 0.028f, 0.018f);
+    for (int i = -1; i <= 1; i += 2) cyl_at(v3(-0.78f, BOILER_Y + i * 0.42f, 6.95f), v3(0, 1, 0), 0.035f, 0.1f, 8);
+    cyl_at(v3(0, BOILER_Y, 7.03f), v3(0, 0, 1), 0.04f, 0.1f, 12);
+    {
+        M4 sv = mb->xf;
+        push(m4trans(0, BOILER_Y, 7.12f));
+        mb_torus(0.09f, 0.012f, 18, 5);
+        mb->xf = sv;
+    }
+    mb_rod(v3(0, BOILER_Y, 7.13f), v3(0.2f, BOILER_Y - 0.06f, 7.15f), 0.012f, 6, 1);
+    /* the smokebox saddle under it, and the top lamp iron */
+    mat(PM_SMOKEBOX);
+    boxc(0, BOILER_Y - 0.75f, 5.95f, 0.62f, 0.35f, 0.6f);
     /* the number plate on the door, and the headboard on the top lamp iron */
     mat(PM_PLATE);
     mb_quad_uv(v3(-0.32f, BOILER_Y + 0.5f, 7.0f), v3(0.32f, BOILER_Y + 0.5f, 7.0f), v3(0.32f, BOILER_Y + 0.64f, 6.985f), v3(-0.32f, BOILER_Y + 0.64f, 6.985f), 0, 1, 1, 0);
@@ -337,8 +354,19 @@ static void build_loco(void) {
         mat(PM_GREEN);
         /* the side sheet below the opening, and the pillars, with the opening's cut-out */
         mb_quad(v3(x, cy0 - 0.05f, cz0), v3(x, cy0 - 0.05f, cz1), v3(x, 2.8f, cz1), v3(x, 2.8f, cz0));
-        boxc(x, (2.8f + cyr) / 2, cz0 - 0.2f, 0.02f, (cyr - 2.8f) / 2, 0.2f);
-        boxc(x, (2.8f + cyr) / 2, cz1 + 0.12f, 0.02f, (cyr - 2.8f) / 2, 0.12f);
+        /* the front of the side: a window between two pillars; the rear pillar */
+        boxc(x, (2.8f + cyr) / 2, cz0 - 0.07f, 0.025f, (cyr - 2.8f) / 2, 0.07f);
+        boxc(x, (2.8f + cyr) / 2, cz0 - 0.75f, 0.025f, (cyr - 2.8f) / 2, 0.06f);
+        boxc(x, 2.84f, cz0 - 0.41f, 0.025f, 0.04f, 0.3f);
+        boxc(x, cyr - 0.03f, cz0 - 0.41f, 0.025f, 0.05f, 0.3f);
+        boxc(x, (2.8f + cyr) / 2, cz1 + 0.1f, 0.025f, (cyr - 2.8f) / 2, 0.1f);
+        mat(PM_GLASS);
+        boxc(x, (2.88f + cyr - 0.08f) / 2, cz0 - 0.41f, 0.006f, (cyr - 0.08f - 2.88f) / 2, 0.28f);
+        mat(PM_GREEN);
+        /* the cut-out's rounded edge: a beading along the top of the side sheet */
+        mat(PM_BLACK);
+        mb_rod(v3(x + s * 0.01f, 2.8f, cz0 - 0.82f), v3(x + s * 0.01f, 2.8f, cz1 + 0.2f), 0.025f, 6, 1);
+        mat(PM_GREEN);
         /* the cab-side window, glazed, in the front pillar's upper part */
         mat(PM_LINE);
         boxc(x + s * 0.003f, 2.78f, (cz0 + cz1) / 2, 0.003f, 0.012f, (cz0 - cz1) / 2 - 0.03f);
@@ -441,13 +469,15 @@ static void build_tender(void) {
     }
     mb_quad(v3(-w, y0, zr), v3(w, y0, zr), v3(w, y1, zr), v3(-w, y1, zr));
     mb_quad(v3(w, y0, zr), v3(-w, y0, zr), v3(-w, y1, zr), v3(w, y1, zr));
+    mat(PM_GRIME);
     mb_quad(v3(-w, y0, zf), v3(-w, y1, zf), v3(w, y1, zf), v3(w, y0, zf));
+    mat(PM_GREEN);
     /* the coal space: a heap at the front, the tank top behind */
     mat(PM_BLACK);
     mb_quad(v3(-w, y1 - 0.1f, zr), v3(w, y1 - 0.1f, zr), v3(w, y1 - 0.1f, zr + 2.0f), v3(-w, y1 - 0.1f, zr + 2.0f));
     mat(PM_COAL);
     {
-        int nx = 14, nz = 18;
+        int nx = 28, nz = 36;
         for (int j = 0; j < nz; j++)
             for (int i = 0; i < nx; i++) {
                 V3 P[4];
@@ -455,15 +485,22 @@ static void build_tender(void) {
                     int a = i + (k == 1 || k == 2), b = j + (k >= 2);
                     float x = -w + 2 * w * a / nx, z = zr + 2.0f + (zf - 0.3f - zr - 2.0f) * b / nz;
                     float u = x / w, v = (float)b / nz;
-                    float h = y1 + 0.45f * (1 - u * u) * sinf(v * (float)M_PI) + 0.08f * sinf(x * 9 + z * 7) * sinf(z * 5.3f + x * 3);
+                    float h = y1 + 0.45f * (1 - u * u) * sinf(v * (float)M_PI) + 0.05f * sinf(x * 9 + z * 7) * sinf(z * 5.3f + x * 3)
+                              + 0.025f * sinf(x * 23 + z * 17) * sinf(z * 19 - x * 11);
                     if (a == 0 || a == nx) h = y1 + 0.05f;
                     P[k] = v3(x, h, z);
                 }
                 mb_quad(P[0], P[3], P[2], P[1]);
             }
     }
-    /* the front: the coal hole and the shovelling plate */
+    /* coal rails above the sides of the coal space */
     mat(PM_GREEN);
+    for (int s = -1; s <= 1; s += 2)
+        for (int k = 0; k < 3; k++) mb_rod(v3(s * (w + 0.04f), y1 + 0.28f + k * 0.14f, zr + 2.1f), v3(s * (w + 0.04f), y1 + 0.28f + k * 0.14f, zf - 0.1f), 0.018f, 5, 1);
+    for (int s = -1; s <= 1; s += 2)
+        for (int k = 0; k < 5; k++) { float z = zr + 2.1f + k * (zf - zr - 2.2f) / 4; mb_rod(v3(s * (w + 0.04f), y1 + 0.15f, z), v3(s * (w + 0.04f), y1 + 0.58f, z), 0.02f, 5, 1); }
+    /* the front: the coal hole and the shovelling plate */
+    mat(PM_GRIME);
     boxc(0, y0 + 0.9f, zf + 0.02f, w, 0.9f, 0.02f);
     mat(PM_COAL);
     boxc(0, y0 + 0.5f, zf + 0.05f, 0.4f, 0.3f, 0.02f);

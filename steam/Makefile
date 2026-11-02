@@ -8,7 +8,7 @@ LAYER_XML = ../flightsim/protocols/wlr-layer-shell-unstable-v1.xml
 PROTO_H = proto-layer-shell.h
 PROTO_C = proto-layer-shell.c proto-xdg-shell.c
 
-steam: steam.c gfx.h world.h shaders.h loco.h lineside.h director.h smoke.h sensors.h platform.h $(PROTO_H) $(PROTO_C)
+steam: steam.c trees.h gfx.h world.h shaders.h loco.h lineside.h director.h smoke.h sensors.h platform.h $(PROTO_H) $(PROTO_C)
 	$(CC) $(CFLAGS) -o $@ steam.c $(PROTO_C) $(FT) -lGL -lX11 -lEGL -lwayland-client -lwayland-egl -lm
 
 proto-layer-shell.h: $(LAYER_XML)

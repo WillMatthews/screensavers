@@ -146,6 +146,54 @@ static double terrain_h(double x, double z) {
     return h > up ? up : h < dn ? dn : h;
 }
 
+/* ---- trees: at most one to a 9 m cell, in copses and hedgerows, clear of
+ * the line, the roads and the water ---- */
+#define TREE_G 9.0
+typedef struct { double x, y, z; float h, r; int kind; } Tree;
+static int tree_cell(long ci, long cj, Tree *t) {
+    double wx = (ci + hrand((int32_t)ci, (int32_t)cj, 21)) * TREE_G;
+    double wz = (cj + hrand((int32_t)ci, (int32_t)cj, 22)) * TREE_G;
+    double dens = fbm_d(wx / 260, wz / 260, 3, 23);
+    int hedge = fabs(fmod(wx / 97 + 1000.5 + 0.6 * sin(wz / 140), 1.0) - 0.5) < 0.015 ||
+                fabs(fmod(wz / 131 + 1000.5 + 0.6 * sin(wx / 170), 1.0) - 0.5) < 0.012;
+    double r = hrand((int32_t)ci, (int32_t)cj, 24);
+    double d = fabs(wx - track_x(wz));
+    /* fewer near the line: a cleared strip, thinning out */
+    double near = sstep(14, 60, d);
+    if (!(dens > 0.56 + 0.25 * r + 0.2 * (1 - near) || (hedge && r < 0.7 * near + 0.1))) return 0;
+    if (d < 14 || (in_feat(wz, F_STATION, 80) && d < 30) || in_feat(wz, F_CROSSING, 30)) return 0;
+    double h = terrain_h(wx, wz);
+    if (h < track_y(wz) - 30) return 0;
+    double s = 0.75 + 0.5 * hrand((int32_t)ci, (int32_t)cj, 25);
+    double q = hrand((int32_t)ci, (int32_t)cj, 26);
+    int kind;
+    if (hedge && dens <= 0.56 + 0.25 * r) kind = q < 0.7 ? 4 : 2;
+    else if (fbm_d(wx / 600, wz / 600, 2, 28) > 0.55) kind = q < 0.8 ? 0 : 1;
+    else kind = q < 0.55 ? 2 : 3;
+    static const float hgt[5] = {18, 15, 14, 18, 4.5f};
+    t->x = wx; t->z = wz; t->y = h; t->h = (float)(hgt[kind] * s); t->r = (float)r; t->kind = kind;
+    return 1;
+}
+/* is the view from a to b blocked by a tree or the ground (ignoring its last 6 m)? */
+static int sight_blocked(const double *a, const double *b) {
+    double d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    double L = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    for (double s = 1.5; s < L - 6; s += 2.5) {
+        double p[3] = {a[0] + d[0] * s / L, a[1] + d[1] * s / L, a[2] + d[2] * s / L};
+        if (p[1] < terrain_h(p[0], p[2]) + 0.2) return 1;
+        long ci = (long)floor(p[0] / TREE_G), cj = (long)floor(p[2] / TREE_G);
+        for (long j = cj - 1; j <= cj + 1; j++)
+            for (long i = ci - 1; i <= ci + 1; i++) {
+                Tree t;
+                if (!tree_cell(i, j, &t)) continue;
+                double dx = p[0] - t.x, dz = p[2] - t.z;
+                float cr = t.kind == 4 ? 0.4f * t.h : 0.3f * t.h;
+                if (dx * dx + dz * dz < (cr + 0.8) * (cr + 0.8) && p[1] < t.y + t.h + 0.5) return 1;
+            }
+    }
+    return 0;
+}
+
 /* ---- terrain tiles: a quadtree of 32 x 32 cell patches round the camera ---- */
 #define TCELLS 32
 #define TROOT 4096.0
@@ -155,7 +203,7 @@ typedef struct {
     int level; long ix, iz;     /* tile size TROOT / 2^level; index in that grid */
     double ox, oz;              /* world origin (corner) */
     GMesh mesh;
-    GLuint tree_vbo; int ntree;
+    GLuint tree_vbo; int ntree, tcount[5], toff[5];
     float hmin, hmax;
     unsigned used;
     int live;
@@ -212,39 +260,46 @@ static void tile_build(Tile *t) {
 #undef TH
     gm_upload_indexed(&t->mesh, &m, idx, ni);
 
-    /* trees: on a jittered grid, in copses and hedgerows, clear of the line, the roads and the water */
+    /* trees: one to a cell of a global grid (so they keep their places as
+     * tiles change detail; coarser tiles keep fewer of them) */
     t->ntree = 0;
     if (t->level >= 3) {
         static float tv[8 * 4096];
-        double g = t->level >= 5 ? 9 : t->level == 4 ? 14 : 22;
         int n = 0;
-        int cells = (int)(size / g);
+        int cells = (int)(size / TREE_G);
+        float keep = t->level >= 5 ? 1.0f : t->level == 4 ? 0.5f : 0.22f;
+        long ci0 = (long)floor(t->ox / TREE_G), cj0 = (long)floor(t->oz / TREE_G);
         for (int j = 0; j < cells && n < 4096; j++)
             for (int i = 0; i < cells && n < 4096; i++) {
-                double wx = t->ox + (i + hrand((int32_t)(t->ox / g) + i, (int32_t)(t->oz / g) + j, 21)) * g;
-                double wz = t->oz + (j + hrand((int32_t)(t->ox / g) + i, (int32_t)(t->oz / g) + j, 22)) * g;
-                double dens = fbm_d(wx / 260, wz / 260, 3, 23);
-                double hedge = fabs(fmod(wx / 97 + 1000.5 + 0.6 * sin(wz / 140), 1.0) - 0.5) < 0.015 ||
-                               fabs(fmod(wz / 131 + 1000.5 + 0.6 * sin(wx / 170), 1.0) - 0.5) < 0.012;
-                double r = hrand((int32_t)(wx * 3), (int32_t)(wz * 3), 24);
-                if (!(dens > 0.56 + 0.25 * r || (hedge && r < 0.7))) continue;
-                double d = fabs(wx - track_x(wz));
-                if (d < 9 || (in_feat(wz, F_STATION, 80) && d < 30) || (in_feat(wz, F_CROSSING, 30))) continue;
-                double h = terrain_h(wx, wz);
-                if (h < track_y(wz) - 30) continue;   /* the river */
-                /* thin out: only what this level's cell size can afford */
-                if (t->level < 5 && r > (t->level == 4 ? 0.7 : 0.45)) continue;
-                double s = 0.7 + 0.6 * hrand((int32_t)(wx * 7), (int32_t)(wz * 7), 25);
-                double kind = hrand((int32_t)(wx * 5), (int32_t)(wz * 5), 26) < 0.3 ? 1 : 0;
+                Tree tr0;
+                if (!tree_cell(ci0 + i, cj0 + j, &tr0) || tr0.r > keep) continue;
+                /* stand it on this tile's mesh, which at a coarse level isn't the true ground */
+                float fx = (float)((tr0.x - t->ox) / cs), fz = (float)((tr0.z - t->oz) / cs);
+                int gx = (int)fx, gz = (int)fz;
+                if (gx >= TCELLS) gx = TCELLS - 1;
+                if (gz >= TCELLS) gz = TCELLS - 1;
+                fx -= gx; fz -= gz;
+                float h00 = tbuf_h[(gz + 1) * (N + 2) + gx + 1], h10 = tbuf_h[(gz + 1) * (N + 2) + gx + 2];
+                float h01 = tbuf_h[(gz + 2) * (N + 2) + gx + 1], h11 = tbuf_h[(gz + 2) * (N + 2) + gx + 2];
+                float gy = fx > fz ? h00 + (h10 - h00) * fx + (h11 - h10) * fz : h00 + (h11 - h01) * fx + (h01 - h00) * fz;
                 float *o = tv + n * 8;
-                o[0] = (float)(wx - t->ox); o[1] = (float)h; o[2] = (float)(wz - t->oz);
-                o[3] = (float)((kind ? 11 : 9) * s); o[4] = (float)kind; o[5] = (float)(r * 6.28);
-                o[6] = (float)hrand((int32_t)wx, (int32_t)wz, 27); o[7] = 0;
+                o[0] = (float)(tr0.x - t->ox); o[1] = gy - 0.3f; o[2] = (float)(tr0.z - t->oz);
+                o[3] = tr0.h; o[4] = (float)tr0.kind; o[5] = tr0.r * 6.28f;
+                o[6] = (float)hrand((int32_t)tr0.x, (int32_t)tr0.z, 27); o[7] = 0;
                 n++;
             }
+        /* grouped by kind, for one draw a kind */
+        static float sorted[8 * 4096];
+        int m = 0;
+        for (int k = 0; k < 5; k++) {
+            t->toff[k] = m;
+            for (int i = 0; i < n; i++)
+                if ((int)tv[i * 8 + 4] == k) { memcpy(sorted + m * 8, tv + i * 8, sizeof(float) * 8); m++; }
+            t->tcount[k] = m - t->toff[k];
+        }
         if (!t->tree_vbo) glGenBuffers(1, &t->tree_vbo);
         glBindBuffer(GL_ARRAY_BUFFER, t->tree_vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 8 * (size_t)(n ? n : 1), tv, GL_STATIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 8 * (size_t)(n ? n : 1), sorted, GL_STATIC_DRAW);
         t->ntree = n;
     }
 }
