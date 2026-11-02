@@ -932,11 +932,15 @@ static float advance(double t) {
         steps = 0;
     }
     long want = (long)floor(lt * SIM_HZ) + 1;
-    while (steps < want) {
+    /* live, a late start (say an output restarted mid-scene) catches up a
+     * few steps a frame, in fast motion, rather than freezing for seconds */
+    int budget = opt_shot || opt_bench ? 1 << 30 : 12;
+    while (steps < want && budget-- > 0) {
         double st = steps / SIM_HZ;
         for (int k = 0; k < 2; k++) step_slice(&sl[k], k, st);
         steps++;
     }
+    if (steps < want) return 1.0f;
     return (float)(lt * SIM_HZ - (want - 1));
 }
 
