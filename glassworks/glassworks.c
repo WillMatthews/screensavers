@@ -710,7 +710,8 @@ static void build_shop(void) {
             tri(m, p0, p1, p2, n0, n1, n1, a0, 0, a1, 0, a1, 1, M_STEEL);
             tri(m, p0, p2, p3, n0, n1, n0, a0, 0, a1, 1, a0, 1, M_STEEL);
         }
-        capsule(m, vadd(a, v3(0, -0.01f, 0)), vadd(a, v3(0, 0.01f, 0)), 0.86f, 0.86f, 40, M_STEEL);
+        cyl(m, vadd(a, v3(0, -0.03f, 0)), a, 0.86f, 40, 0, M_STEEL);
+        cyl(m, vadd(a, v3(0, -0.03f, 0)), a, 0.845f, 40, 1, M_STEEL);
         cyl(m, b, v3(c.x, ROOM_H, c.z), 0.24f, 32, 0, M_STEEL);
         for (int i = 0; i < 3; i++) {
             float an = i * 2.1f + 0.4f;
@@ -813,28 +814,6 @@ static void build_shop(void) {
     for (int i = 0; i < 8; i++) {
         float x = -4.2f + i * 0.12f + 0.03f * hf(i, 5, 5);
         rod(m, v3(x, 0.05f, -2.85f), v3(x + 0.03f, 1.6f + 0.1f * hf(i, 6, 6), -3.08f), 0.012f, 8, M_PIPE);
-    }
-    /* a big pedestal fan by the bench, for the gaffer */
-    cur_seed = 140;
-    {
-        V3 c = v3(1.8f, 1.2f, -1.9f), d = vnorm(v3(-0.9f, -0.12f, 0.5f));
-        rod(m, v3(c.x, 0, c.z), v3(c.x, c.y - 0.05f, c.z), 0.025f, 10, M_STEEL);
-        disc(m, v3(c.x, 0.01f, c.z), v3(0, 1, 0), 0, 0.28f, 24, M_STEEL);
-        cyl(m, vsub(c, vmul(d, 0.08f)), vadd(c, vmul(d, 0.12f)), 0.36f, 40, 0, M_STEEL);
-        cyl(m, vsub(c, vmul(d, 0.08f)), vadd(c, vmul(d, 0.12f)), 0.355f, 40, 1, M_STEEL);
-        ellipsoid(m, vsub(c, vmul(d, 0.08f)), d, v3(0, 1, 0), vnorm(vcross(d, v3(0, 1, 0))), 0.12f, 0.1f, 0.1f, 16, M_STEEL);
-        V3 u, v;
-        basis(d, &u, &v);
-        for (int i = 0; i < 4; i++) {          /* blades */
-            float a = i * PI / 2 + 0.3f;
-            V3 r = vadd(vmul(u, cosf(a)), vmul(v, sinf(a))), tng = vcross(d, r);
-            obox(m, vadd(c, vmul(r, 0.19f)), r, d, tng, 0.15f, 0.006f, 0.07f, M_STEEL);
-        }
-        for (int i = 0; i < 12; i++) {         /* the guard's wires */
-            float a = i * PI / 6;
-            V3 r = vadd(vmul(u, cosf(a)), vmul(v, sinf(a)));
-            beam(m, vadd(c, vmul(d, 0.13f)), vadd(vadd(c, vmul(d, 0.12f)), vmul(r, 0.36f)), 0.003f, 0.003f, d, M_STEEL);
-        }
     }
     /* sheet steel on the floor round the hot end */
     cur_seed = 150;
@@ -1407,14 +1386,14 @@ static const char *FS_SCENE = "#version 330 core\n" COMMON GLSL(
         } else if (m == 4 || m == 16) {            /* wood: bench, handles; shelf boards */
             vec2 g = vUV * vec2(1.0, 1.0);
             float grain = vn2(vec2(g.x * 2.0, (g.y + fbm2(g * 3.0) * 0.2) * 60.0)) * 0.6 + vn2(g * vec2(0.5, 150.0)) * 0.4;
-            alb = (m == 4 ? vec3(0.20, 0.11, 0.055) : vec3(0.30, 0.19, 0.11)) * (0.7 + 0.5 * grain);
+            alb = (m == 4 ? vec3(0.085, 0.05, 0.03) : vec3(0.30, 0.19, 0.11)) * (0.7 + 0.5 * grain);
             /* charred where the hot end has lain */
             if (m == 4) alb *= mix(0.3, 1.0, smoothstep(-0.2, 0.6, P.x + (P.y > 0.7 ? 0.0 : 1.0)));
             rough = m == 16 ? 0.45 : 0.6;
         } else if (m == 6) {                       /* work clothes */
-            alb = vec3(0.045, 0.05, 0.06) * (0.85 + 0.3 * vn2(vUV * 30.0)); rough = 0.9; sheen = 1.0;
+            alb = vec3(0.03, 0.032, 0.04) * (0.85 + 0.3 * vn2(vUV * 30.0)); rough = 0.9; sheen = 0.35;
         } else if (m == 7) {                       /* skin */
-            alb = vec3(0.30, 0.17, 0.12); rough = 0.55; wrap = 0.5;
+            alb = vec3(0.16, 0.09, 0.065); rough = 0.55; wrap = 0.4;
         } else if (m == 8) {                       /* leather apron */
             alb = vec3(0.17, 0.085, 0.04) * (0.7 + 0.5 * fbm2(P.xy * 14.0 + P.z * 3.0)); rough = 0.55; sheen = 0.4;
         } else if (m == 9) {                       /* blowpipe: bright where worn, glowing near the glass */
@@ -1445,8 +1424,8 @@ static const char *FS_SCENE = "#version 330 core\n" COMMON GLSL(
             float pane = hash12(floor(w * vec2(4.0, 5.0)) + 3.0);
             /* old glass: each pane a little different, faintly wavy */
             vec2 wv = w + vec2(vn2(w * vec2(9.0, 3.0) + pane * 7.0) - 0.5, 0.0) * 0.006;
-            vec3 sky = mix(vec3(0.05, 0.065, 0.11), vec3(0.025, 0.035, 0.07), smoothstep(0.1, 1.0, wv.x));
-            sky += vec3(0.22, 0.25, 0.3) * exp(-length((wv - vec2(1.1, 0.15)) * vec2(1.0, 0.8)) * 2.6);
+            vec3 sky = mix(vec3(0.03, 0.042, 0.08), vec3(0.012, 0.02, 0.05), smoothstep(0.1, 1.0, wv.x));
+            sky += vec3(0.12, 0.15, 0.22) * exp(-length((wv - vec2(1.1, 0.15)) * vec2(1.0, 0.8)) * 2.6);
             vec2 sgp = wv * vec2(110.0, 160.0), sg = floor(sgp);
             float st = step(0.975, hash12(sg)) * smoothstep(0.3, 0.7, wv.x) * smoothstep(0.25, 0.05, length(fract(sgp) - 0.5));
             sky += vec3(0.5, 0.55, 0.7) * st * hash12(sg + 1.3);
@@ -1615,7 +1594,7 @@ static const char *FS_GLASS = "#version 330 core\n" COMMON GLSL(
         float hot = smoothstep(800.0, 1100.0, T);
         /* Kirchhoff: it glows where it absorbs */
         vec3 emiss = 1.0 - exp(-(vec3(24.0) + ab * 0.5) * path);
-        vec3 glo = glow(T) * emiss * 7.0 * (1.0 + 0.1 * pat);
+        vec3 glo = glow(T) * emiss * 15.0 * (1.0 + 0.1 * pat);
 
         if (uPass == 0) {
             /* refraction: bend the background by the surface's tilt in view */
@@ -1629,7 +1608,7 @@ static const char *FS_GLASS = "#version 330 core\n" COMMON GLSL(
             bg.b = texture(uScene, uv + off * 1.07).b;
             vec3 R = reflect(-V, -N);
             float F = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
-            vec3 c = bg * tint * (1.0 - F) * (1.0 - pat * 0.85 * (1.0 - hot));
+            vec3 c = bg * tint * (1.0 - F) * (1.0 - pat * 0.85 * (1.0 - hot)) * (1.0 - emiss * 0.8);
             c += env(vP, R, 0.02) * F * tint * 0.7;
             /* at grazing angles the light inside is turned back: the dark rims of real glass */
             float tir = smoothstep(0.38, 0.08, nv) * (1.0 - hot);
@@ -1638,7 +1617,6 @@ static const char *FS_GLASS = "#version 330 core\n" COMMON GLSL(
             vec3 Lg = normalize(uGhPos - vP);
             float lit = max(dot(-N, Lg), 0.0) * 0.5 + 0.5;
             c += tcol * pat * (dot(uGhCol, vec3(0.3)) * 0.004 + 0.02) * lit * (1.0 - hot);
-            c += glo * 0.5;
             o = vec4(c, 1.0);
         } else {
             vec3 R = reflect(-V, N);
@@ -1650,8 +1628,8 @@ static const char *FS_GLASS = "#version 330 core\n" COMMON GLSL(
             vec3 irr = uGhCol * max(dot(-Lg, uGhAxis), 0.0) * (max(dot(N, Lg), 0.0) * 0.7 + 0.3) / (dg + 0.04) * shadow_gh(vP, N)
                      + uFpCol * max(dot(-Lf, uFpAxis), 0.0) * (max(dot(N, Lf), 0.0) * 0.7 + 0.3) / (df + 0.04) + vec3(0.01);
             c += tcol * pat * irr * 0.25 * (1.0 - hot);
-            c += glo * 0.5;
-            o = vec4(c, (1.0 - F) * (1.0 - pat * 0.8 * (1.0 - hot)));
+            c += glo;
+            o = vec4(c, (1.0 - F) * (1.0 - pat * 0.8 * (1.0 - hot)) * (1.0 - dot(emiss, vec3(0.33)) * 0.7));
         }
     });
 
@@ -2337,10 +2315,11 @@ static void build_dyn(const Frame *F) {
         V3 tg = vsub(hand[i], vmul(hdir, 0.06f));
         V3 el = ik(sh[i], tg, 0.30f, 0.28f, pole, &wrist);
         capsule(m, sh[i], el, 0.058f, 0.047f, 10, M_CLOTH);
-        capsule(m, el, wrist, 0.045f, 0.032f, 10, M_SKIN);
+        capsule(m, el, wrist, 0.047f, 0.036f, 10, M_CLOTH);
         V3 fa = vnorm(vsub(wrist, el)), u2, v2;
         basis(fa, &u2, &v2);
-        ellipsoid(m, vadd(wrist, vmul(fa, 0.05f)), fa, u2, v2, 0.058f, 0.045f, 0.032f, 10, M_SKIN);
+        /* gloved fists */
+        ellipsoid(m, vadd(wrist, vmul(fa, 0.045f)), fa, u2, v2, 0.05f, 0.042f, 0.036f, 10, M_LEATHER);
     }
     /* legs */
     for (int i = 0; i < 2; i++) {
@@ -2377,7 +2356,6 @@ static void build_dyn(const Frame *F) {
         ellipsoid(m, head, hr, hu, hf_, 0.078f, 0.105f, 0.095f, 16, M_SKIN);
         ellipsoid(m, vadd(head, vadd(vmul(hu, 0.03f), vmul(hf_, -0.02f))), hr, hu, hf_, 0.084f, 0.09f, 0.095f, 14, M_HAIR);
         ellipsoid(m, vadd(head, vadd(vmul(hu, -0.06f), vmul(hf_, 0.035f))), hr, hu, hf_, 0.068f, 0.06f, 0.07f, 12, M_HAIR);
-        ellipsoid(m, vadd(head, vadd(vmul(hu, -0.005f), vmul(hf_, 0.09f))), hr, hu, hf_, 0.016f, 0.03f, 0.025f, 8, M_SKIN);
         /* safety glasses: a dark band with a glint */
         ellipsoid(m, vadd(head, vadd(vmul(hu, 0.018f), vmul(hf_, 0.07f))), hr, hu, hf_, 0.075f, 0.018f, 0.035f, 12, M_POLISH);
         if (p->hose > 0.3f) {
@@ -2521,7 +2499,7 @@ static void build_glass(GMesh *g, const Prof *pr, int seg, float Tcore, float pi
 }
 
 /* ---- the gallery: finished pieces on the shelves ---- */
-#define PRE 11                         /* pieces already there when the session starts */
+#define PRE 22                         /* pieces already there when the session starts */
 #define NSLOT (SH_N * SH_SLOTS)
 static int gal_k = -9999, gal_n;
 static int gal_pid[48];                /* which piece index each glass pid shows */
@@ -2575,13 +2553,13 @@ static const struct { float t0, t1; int n; int kinds[5]; } groups[] = {
     {0, 18, 2, {C_FURNACE, C_WIDE}},
     {18, 38, 2, {C_MARVER, C_WIDE}},
     {38, 50, 2, {C_BENCH, C_MACRO}},
-    {50, 70, 3, {C_GLORY, C_WIDE, C_LOW}},
-    {70, 110, 5, {C_MACRO, C_BENCH, C_HANDS, C_LOW, C_RACK}},
+    {50, 70, 2, {C_GLORY, C_WIDE}},
+    {70, 110, 4, {C_MACRO, C_BENCH, C_RACK, C_MACRO}},
     {110, 128, 2, {C_GLORY, C_WIDE}},
     {128, 134, 1, {C_BENCH}},
     {134, 140, 1, {C_MACRO}},
-    {140, 158, 3, {C_GLORY, C_LOW, C_WIDE}},
-    {158, 188, 4, {C_MACRO, C_HANDS, C_BENCH, C_LOW}},
+    {140, 158, 2, {C_GLORY, C_WIDE}},
+    {158, 188, 3, {C_MACRO, C_BENCH, C_MACRO}},
     {188, 218, 3, {C_MACRO, C_RACK, C_MACRO}},
     {218, 240, 2, {C_ANNEAL, C_WIDE}},
 };
@@ -2624,20 +2602,28 @@ static void director(double t, const Frame *F, Cam *cm) {
     cm->aperture = 0.006f;
     switch (kind) {
     case C_MACRO: {
-        float d = 0.3f + F->rmax * 3.2f;
-        int v = (int)(hu(id, 4) * 3);
-        float th = (v == 0 ? 0.95f + 0.35f * hu(id, 2) : v == 1 ? -0.85f + 0.4f * hu(id, 2) : -0.25f + 0.5f * hu(id, 2)) + side * 0.03f * u;
-        float el = 0.08f + 0.3f * hu(id, 3);
+        float d = 0.34f + F->rmax * 3.4f;
+        int v = (int)(hu(id, 4) * 2);
+        /* from beyond the piece, the gaffer a silhouette behind; or square on from the front */
+        float th = (v == 0 ? -1.35f + 0.6f * hu(id, 2) : -0.3f + 0.35f * hu(id, 2)) + side * 0.025f * u;
+        float el = 0.35f + 0.3f * hu(id, 3);
         cm->eye = vadd(pc, v3(sinf(th) * d, el * d + 0.02f, cosf(th) * d));
         cm->at = vadd(pc, v3(0, -0.01f, 0));
         cm->vfov = 24; cm->aperture = 0.012f; cm->exposure = 0.8f;
         break;
     }
     case C_BENCH: {
-        float x = SEAT.x - 1.7f + 0.8f * hu(id, 2) + 0.12f * q * side;
-        cm->eye = v3(x, 1.2f + 0.35f * hu(id, 3), SEAT.z + 2.5f - 0.1f * q);
-        cm->at = vlerp(v3(SEAT.x - 0.3f, 0.95f, SEAT.z + 0.2f), pc, 0.5f);
-        cm->vfov = 32; cm->aperture = 0.012f;
+        /* over his shoulder, or from the glory hole's side with him against the dark */
+        if (hu(id, 5) < 0.0f) {
+            cm->eye = v3(SEAT.x + 0.55f + 0.2f * hu(id, 2), 1.55f + 0.15f * hu(id, 3), SEAT.z - 1.25f + 0.1f * q);
+            cm->at = vadd(pc, v3(0.05f, -0.05f, 0));
+            cm->vfov = 30;
+        } else {
+            cm->eye = v3(SEAT.x - 2.5f + 0.15f * q, 1.3f + 0.2f * hu(id, 3), SEAT.z + 1.6f + 0.6f * hu(id, 2));
+            cm->at = vlerp(v3(SEAT.x, 1.0f, SEAT.z), pc, 0.5f);
+            cm->vfov = 32;
+        }
+        cm->aperture = 0.012f;
         break;
     }
     case C_WIDE: {
@@ -2657,8 +2643,10 @@ static void director(double t, const Frame *F, Cam *cm) {
         break;
     }
     case C_GLORY: {
-        cm->eye = vadd(gm, v3(1.25f + 0.3f * hu(id, 2) - 0.2f * q, 0.3f + 0.2f * hu(id, 3), 1.4f + 0.3f * side - 0.15f * q));
-        cm->at = vadd(gm, v3(0.35f, -0.05f, 0));
+        /* from the far side of the mouth, the gaffer beyond it */
+        /* over the gaffer's shoulder, him dark against the fire */
+        cm->eye = vadd(gm, v3(2.75f + 0.3f * hu(id, 2) - 0.2f * q, 0.65f + 0.15f * hu(id, 3), 0.85f + 0.35f * hu(id, 4)));
+        cm->at = vadd(gm, v3(0.25f, -0.05f, 0.1f));
         cm->vfov = 36; cm->aperture = 0.01f; cm->exposure = 0.85f;
         break;
     }
@@ -2684,7 +2672,7 @@ static void director(double t, const Frame *F, Cam *cm) {
         break;
     }
     case C_ANNEAL: {
-        cm->eye = v3(AN_DX0 - 1.1f - 0.2f * q, 1.35f, AN_Z1 + 2.3f);
+        cm->eye = v3(AN_DX0 - 1.8f - 0.2f * q, 1.55f, AN_Z1 + 3.2f);
         cm->at = v3((AN_DX0 + AN_DX1) / 2, 0.85f, AN_Z1);
         cm->vfov = 40; cm->aperture = 0.008f;
         break;
@@ -2741,7 +2729,7 @@ static void role_cam(double t, const Frame *F, Cam *cm) {
         int v = (int)(hu(id, 1) * 3);
         V3 gm = gh_mouth();
         if (v == 0) { cm->eye = v3(-0.6f - 0.3f * q, 1.55f, 1.9f - 0.2f * q); cm->at = v3(-1.9f, 1.0f, -1.3f); }
-        else if (v == 1) { cm->eye = v3(1.7f - 0.3f * q, 1.45f, -0.4f); cm->at = v3(-0.7f, 1.0f, -3.3f); }
+        else if (v == 1) { cm->eye = v3(0.9f - 0.2f * q, 1.5f, -1.75f); cm->at = v3(-0.7f, 1.0f, -3.3f); }
         else { cm->eye = v3(-4.7f + 0.3f * q, 1.6f, 0.9f); cm->at = v3(0.6f, 1.0f, -1.1f); }
         cm->vfov = 44; cm->aperture = 0.008f; cm->exposure = 0.95f;
         cm->focus = vlen(vsub(vlerp(gm, pc, 0.5f), cm->eye));
@@ -2885,7 +2873,7 @@ static void set_lights(GLuint p, const Frame *F, double t, float roar) {
     float hk = F->show ? 0.35f * (F->rmax / 0.05f) * (F->rmax / 0.05f) * (1 - F->inside) : 0;
     glUniform3f(U(p, "uHgPos"), F->pc.x, F->pc.y, F->pc.z);
     glUniform3f(U(p, "uHgCol"), g.x * hk, g.y * hk, g.z * hk);
-    glUniform1f(U(p, "uHgRad"), fmaxf(F->rmax * 1.5f, 0.06f));
+    glUniform1f(U(p, "uHgRad"), fmaxf(F->rmax * 2.0f, 0.12f));
     V3 md = moon_dir();
     glUniform3f(U(p, "uMoonDir"), md.x, md.y, md.z);
     glUniform3f(U(p, "uMoonCol"), 0.30f * 0.16f, 0.40f * 0.16f, 0.66f * 0.16f);
@@ -3303,6 +3291,8 @@ static void draw_caption(double wt, const Frame *F) {
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glBindTexture(GL_TEXTURE_2D, tex_atlas);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, AW, atlas_h, 0, GL_RED, GL_UNSIGNED_BYTE, atlas);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         cap_w = W; cap_h = H;
     }
     tvn = 0;
