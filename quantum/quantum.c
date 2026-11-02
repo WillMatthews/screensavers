@@ -39,7 +39,7 @@ static const char *opt_shot;
 static double opt_at = 30;             /* --shot / --bench: this many seconds into the act */
 static int off_w = 1920, off_h = 1080;
 static double opt_epoch;               /* CLOCK_REALTIME seconds the performance starts at */
-static int opt_palette = -1, opt_act = -1, opt_nocap;
+static int opt_palette = -1, opt_act = -1, opt_nocap, opt_resize_test;
 
 /* ---- spanning ---- */
 #define MAX_OUT 8
@@ -403,7 +403,6 @@ static void mult(double t, double scale, float *o) {
 }
 
 static int log2i(int n) { int l = 0; while ((1 << l) < n) l++; return l; }
-static int fft_passes(int n) { int l = log2i(n); return l / 2 + l % 2; }
 
 static int pass_k;                      /* passes so far in this transform: picks the ping-pong buffer */
 static void fft_pass(GLuint src, Pair *b, int axis, int n, int ns, int radix, float sign, GLuint pre, GLuint post) {
@@ -453,6 +452,7 @@ typedef struct {
     GLuint red1[2], fred1, red2[2], fred2;
     int gw, gh;
     GLuint kshow;                      /* the texture holding the momentum picture */
+    int kstale;                        /* steps taken since it was made */
     double vmax;                       /* V at which the relief saturates */
     double norm0, rmax0;               /* the norm uploaded (sum |psi|^2 dx dy), and the peak of |psi|^2 */
     int win_x, win_y;                  /* moments only over [0, win) (the revival's quadrant) */
@@ -540,6 +540,7 @@ static void grid_measure_fft(void) {
     pass_k = 0;
     GLuint t = fft_axis(G.psi.t[0], &G.meas, 0, G.nx, 1, 0, 0);
     G.kshow = fft_axis(t, &G.meas, 1, G.ny, 1, 0, 0);
+    G.kstale = 0;
 }
 
 /* moments */
@@ -549,6 +550,37 @@ typedef struct {
     int have_k;
 } Mom;
 static Mom M;
+
+/* live, the numbers come back a frame late through pixel-buffer objects, so
+ * the CPU never waits on the GPU in the middle of a frame; offline (shots,
+ * --check) they are read at once */
+static int async_rd;
+typedef struct { GLuint pbo; int bytes, pending, n; } Rd;
+static Rd rd[5];
+static void rd_issue(int k, int w, int h, GLenum fmt, int comps, GLenum att, int n) {
+    Rd *r = &rd[k];
+    int bytes = w * h * comps * 4;
+    if (!r->pbo) glGenBuffers(1, &r->pbo);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, r->pbo);
+    if (r->bytes < bytes) { glBufferData(GL_PIXEL_PACK_BUFFER, bytes, NULL, GL_STREAM_READ); r->bytes = bytes; }
+    glReadBuffer(att);
+    glReadPixels(0, 0, w, h, fmt, GL_FLOAT, 0);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    r->pending = 1; r->n = n;
+}
+static int rd_fetch(int k, void *dst, int bytes) {
+    Rd *r = &rd[k];
+    if (!r->pending) return 0;
+    r->pending = 0;
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, r->pbo);
+    void *m = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, bytes, GL_MAP_READ_BIT);
+    if (m) memcpy(dst, m, (size_t)bytes);
+    glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    return m != NULL;
+}
+static void rd_drop(void) { for (int k = 0; k < 5; k++) rd[k].pending = 0; }
 
 static void reduce(GLuint src, int kmode, float *o) {
     glUseProgram(prog_red1);
@@ -570,6 +602,11 @@ static void reduce(GLuint src, int kmode, float *o) {
     bind(1, G.red1[1]);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     int n = (G.nx / 64) * (G.ny / 64);
+    if (async_rd) {
+        rd_issue(2 * kmode, G.nx / 64, G.ny / 64, GL_RGBA, 4, GL_COLOR_ATTACHMENT0, n);
+        rd_issue(2 * kmode + 1, G.nx / 64, G.ny / 64, GL_RGBA, 4, GL_COLOR_ATTACHMENT1, n);
+        return;
+    }
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glReadPixels(0, 0, G.nx / 64, G.ny / 64, GL_RGBA, GL_FLOAT, o);
     glReadBuffer(GL_COLOR_ATTACHMENT1);
@@ -577,13 +614,39 @@ static void reduce(GLuint src, int kmode, float *o) {
     glReadBuffer(GL_COLOR_ATTACHMENT0);
 }
 
+static void mom_x(const float *buf, int n);
+static void mom_k(const float *buf, int n);
+static long meas_frame;
 static void measure(int with_k) {
     static float buf[2 * 4 * 256];
     int n = (G.nx / 64) * (G.ny / 64);
-    double s[8] = {0}, mx = 0;
     glBindVertexArray(vao);
     glDisable(GL_BLEND);
+    if (async_rd) {
+        /* last frame's numbers, then this frame's sent off */
+        int pn = rd[0].n;
+        if (rd[0].pending && rd_fetch(0, buf, pn * 16) && rd_fetch(1, buf + 4 * pn, pn * 16)) mom_x(buf, pn);
+        pn = rd[2].n;
+        if (rd[2].pending && rd_fetch(2, buf, pn * 16) && rd_fetch(3, buf + 4 * pn, pn * 16)) mom_k(buf, pn);
+        reduce(G.psi.t[0], 0, buf);
+        if (!with_k) return;
+        /* the momentum picture: every frame on small grids, every other on big ones */
+        meas_frame++;
+        if (!G.kshow || (G.kstale && (G.nx * G.ny <= 65536 || (meas_frame & 1)))) {
+            grid_measure_fft();
+            reduce(G.kshow, 1, buf);
+        }
+        return;
+    }
     reduce(G.psi.t[0], 0, buf);
+    mom_x(buf, n);
+    if (!with_k) return;
+    if (!G.kshow || G.kstale) grid_measure_fft();
+    reduce(G.kshow, 1, buf);
+    mom_k(buf, n);
+}
+static void mom_x(const float *buf, int n) {
+    double s[8] = {0}, mx = 0;
     for (int i = 0; i < n; i++) {
         for (int c = 0; c < 4; c++) s[c] += buf[4 * i + c];
         for (int c = 0; c < 3; c++) s[4 + c] += buf[4 * n + 4 * i + c];
@@ -592,11 +655,9 @@ static void measure(int with_k) {
     double dA = G.dx * G.dy, nn = s[0] > 0 ? s[0] : 1;
     M.n = s[0] * dA; M.x = s[1] / nn; M.y = s[2] / nn; M.V = s[3] / nn;
     M.right = s[4] / nn; M.xx = s[5] / nn; M.yy = s[6] / nn; M.rmax = mx;
-    if (!with_k) return;
-    if (!G.kshow) grid_measure_fft();
-    double k[8] = {0};
-    mx = 0;
-    reduce(G.kshow, 1, buf);
+}
+static void mom_k(const float *buf, int n) {
+    double k[8] = {0}, mx = 0;
     for (int i = 0; i < n; i++) {
         for (int c = 0; c < 4; c++) k[c] += buf[4 * i + c];
         for (int c = 0; c < 3; c++) k[4 + c] += buf[4 * n + 4 * i + c];
@@ -621,6 +682,11 @@ static void marginal(void) {
     glUniform1i(U(prog_marg, "uNy"), G.ny);
     bind(0, G.kshow);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    if (async_rd) {
+        if (rd[4].pending && rd_fetch(4, kmarg, rd[4].n * 4)) have_marg = 1;
+        rd_issue(4, G.nx, 1, GL_RED, 1, GL_COLOR_ATTACHMENT0, G.nx);
+        return;
+    }
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glReadPixels(0, 0, G.nx, 1, GL_RED, GL_FLOAT, kmarg);
     have_marg = 1;
@@ -682,7 +748,7 @@ typedef struct { int face, px; uint32_t cp; short x, y, w, h, left, top; float a
 static GEnt gcache[GCACHE];
 #define ATLAS 2048
 static GLuint atlas_tex;
-static int at_x = 1, at_y = 1, at_shelf;
+static int at_x = 1, at_y = 1, at_shelf, atlas_full, glyphs_used;
 
 static void fonts_init(void) {
     if (!FcInit()) die("fontconfig init failed");
@@ -703,7 +769,7 @@ static void fonts_init(void) {
 
 static void atlas_reset(void) {
     memset(gcache, 0, sizeof gcache);
-    at_x = 1; at_y = 1; at_shelf = 0;
+    at_x = 1; at_y = 1; at_shelf = 0; atlas_full = 0; glyphs_used = 0;
     if (!atlas_tex) {
         glGenTextures(1, &atlas_tex);
         glBindTexture(GL_TEXTURE_2D, atlas_tex);
@@ -723,6 +789,7 @@ static const GEnt *glyph(int face, int px, uint32_t cp) {
         GEnt *e = &gcache[(h + (uint32_t)k) % GCACHE];
         if (e->used && e->face == face && e->px == px && e->cp == cp) return e;
         if (e->used) continue;
+        if (++glyphs_used > GCACHE * 3 / 4) atlas_full = 1;   /* sizes come and go: start over next frame */
         FT_Face f = faces[face];
         /* what a face lacks (Latin Modern has no hbar), from the fallback */
         if (!FT_Get_Char_Index(f, cp) && FT_Get_Char_Index(faces[F_FALLBACK], cp)) f = faces[F_FALLBACK];
@@ -736,7 +803,7 @@ static const GEnt *glyph(int face, int px, uint32_t cp) {
         e->left = (short)g->bitmap_left; e->top = (short)g->bitmap_top;
         if (!w || !gh) return e;
         if (at_x + w + 2 > ATLAS) { at_x = 1; at_y += at_shelf + 2; at_shelf = 0; }
-        if (at_y + gh + 2 > ATLAS) return e;          /* full: drawn blank until the next reset */
+        if (at_y + gh + 2 > ATLAS) { atlas_full = 1; return e; }   /* full: blank until the next frame resets it */
         glBindTexture(GL_TEXTURE_2D, atlas_tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, g->bitmap.pitch);
@@ -969,7 +1036,7 @@ static Box math_measure(float px, const char *src) {
 /* ---- the acts ---- */
 enum { A_TUNNEL, A_SLIT, A_COHERENT, A_SQUEEZED, A_REVIVAL, A_BRAGG, A_STADIUM, NACT };
 static const char *act_key[NACT] = {"tunnel", "slit", "coherent", "squeezed", "revival", "bragg", "stadium"};
-static const double act_len[NACT] = {58, 62, 52, 52, 66, 56, 64};
+static const double act_len[NACT] = {49, 47, 52, 52, 66, 38, 64};
 #define INTRO 2.5                      /* seconds of title before the sim starts */
 #define FADE 1.6
 
@@ -1184,7 +1251,7 @@ static void setup_slit(int v) {
     absorber(5, 6, A.k0);
     grid_upload(g_psi, g_V, g_W);
     G.vmax = V0;
-    A.sps = 40; A.max_steps = (long)(17.0 / G.dt);
+    A.sps = 40; A.max_steps = (long)(16.0 / G.dt);
     A.vx0 = -35; A.vx1 = 35; A.vy0 = -17.5; A.vy1 = 17.5;
     A.kview = 4.5; A.kcx = 4; A.expo_k = 1;
     /* the screen: one column of |psi|^2 per snapshot */
@@ -1368,7 +1435,7 @@ static void setup_bragg(int v) {
     absorber(4, 4, A.k0);
     grid_upload(g_psi, g_V, g_W);
     G.vmax = 6;
-    A.sps = 46; A.max_steps = (long)(13.5 / G.dt);
+    A.sps = 22; A.max_steps = (long)(13.5 / G.dt);
     A.vx0 = -20.5; A.vx1 = 20.5; A.vy0 = -20.5; A.vy1 = 20.5;
     A.kview = 7; A.expo_k = 1;
 }
@@ -1446,6 +1513,8 @@ static void act_setup(int id, int variant, int num) {
     case A_STADIUM: setup_stadium(variant); break;
     }
     act_title();
+    rd_drop();
+    have_marg = 0;
     steps = 0; sim_t = 0; hn = 0;
     memset(&M, 0, sizeof M);
 }
@@ -1582,7 +1651,7 @@ static void advance(double t) {
     int budget = offline ? 1 << 30 : (int)ceil(A.sps / 60.0) + 6;
     int did = 0;
     while (steps < want && budget-- > 0) { grid_step(); after_step(); did = 1; }
-    if (did) G.kshow = 0;
+    if (did) G.kstale = 1;
     sim_t = steps * G.dt;
 }
 
@@ -2313,7 +2382,7 @@ static void aux_panel(Rect r, int big) {
         Rect p = r;
         float strip = (vertical ? rw(p) : rh(p)) * 0.30f;
         for (int b = 0; b < nb; b++) {
-            float a0 = (float)b / nb, a1 = (float)(b + 1) / nb, hgt = hb[b] / hmax;
+            float a0 = (float)b / nb, a1 = (float)(b + 1) / nb, hgt = fminf(hb[b] / hmax, 1.0f);
             if (vertical) fill(p.x0 + strip * 1.1f, p.y1 - a1 * rh(p) + 0.5f, p.x0 + strip * 1.1f + hgt * (rw(p) - strip * 1.1f), p.y1 - a0 * rh(p) - 0.5f, col(c_acc, 0.30f));
             else fill(p.x0 + a0 * rw(p) + 0.5f, p.y1 - hgt * (rh(p) - strip * 1.1f), p.x0 + a1 * rw(p) - 0.5f, p.y1, col(c_acc, 0.30f));
         }
@@ -2529,7 +2598,10 @@ static void render_front(void) {
             float room = H - m - 90 * u_ - sy;          /* for the sim, a gap and the insets */
             float sh = room - s - 110 * u_;
             if (sh < (x1 - x0) / (float)asp * 0.6f) { s *= 0.8f; sh = room - s - 110 * u_; }
-            sim = fit((Rect){x0, sy, x1, sy + sh}, (float)asp, 0.5f);
+            sim = fit((Rect){x0, sy, x1, sy + sh}, (float)asp, 0.0f);
+            /* the sim and the insets as one block, centred in the room */
+            float blk = rh(sim) + 100 * u_ + s, sh0 = (room - blk) * 0.5f;
+            if (sh0 > 0) { sim.y0 += sh0; sim.y1 += sh0; }
             float iy = sim.y1 + 100 * u_;
             kr = (Rect){x0, iy, x0 + s, iy + s};
             ar = (Rect){x1 - s, iy, x1, iy + s};
@@ -2572,6 +2644,9 @@ static void render_aux(void) {
 }
 
 static void draw_scene(GLuint target) {
+    /* every text size follows the output's: on a resize the glyphs start over */
+    static int atlas_w, atlas_h;
+    if (atlas_full || atlas_w != W || atlas_h != H) { atlas_reset(); atlas_w = W; atlas_h = H; }
     u_ = fminf(W, H) / 1000.0f;
     if (W < H) u_ = W / 1000.0f * 1.15f;
     double L = act_len[A.id];
@@ -2847,6 +2922,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-check")) opt_check = 1;
         else if (!strcmp(a, "-no-caption")) opt_nocap = 1;
+        else if (!strcmp(a, "-resize-test") && i + 1 < argc) opt_resize_test = atoi(argv[++i]);
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(a, "-palette") && i + 1 < argc) {
             const char *n = argv[++i];
@@ -2873,6 +2949,7 @@ int main(int argc, char **argv) {
     if (!opt_seed) opt_seed = 1;
     P = &PALETTES[opt_palette >= 0 ? opt_palette : (int)(mix32(opt_seed * 2246822519U ^ 0x7a3U) % NPAL)];
     offline = opt_shot || opt_bench > 0 || opt_check;
+    async_rd = !opt_shot && !opt_check;
     locked_at = lock_start();
 
     Display *dpy = NULL;
@@ -2956,7 +3033,18 @@ int main(int argc, char **argv) {
     double t0 = now();
     if (opt_epoch) t0 -= wallclock() - opt_epoch;   /* the clock runs from the shared epoch */
     double cap_t = 0;
-    for (;;) {
+    for (long frame = 0;; frame++) {
+        if (opt_resize_test && dpy && frame % 12 == 0) {
+            /* --resize-test N: N window sizes in turn, then report and quit */
+            int k = (int)(frame / 12);
+            if (k >= opt_resize_test) {
+                char st[256];
+                slurp_line("/proc/self/statm", st, sizeof st);
+                printf("quantum: %d sizes, now %dx%d, statm %s, %d glyphs cached\n", k, W, H, st, glyphs_used);
+                return 0;
+            }
+            XResizeWindow(dpy, win, 320 + (k * 397) % 1500, 240 + (k * 263) % 1000);
+        }
         if (opt_layer && !wl_poll()) return 0;
         while (dpy && XPending(dpy)) {
             XEvent ev;
