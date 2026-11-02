@@ -1457,7 +1457,7 @@ static void ho_draw(Rect R, double u) {
         if (ho.ph && u > 50) {
             double w[3] = {-ho.rb, 0, 0};
             proj(&v, w, &x, &y);
-            text_h(st_lab, x, y - 14 * UI, 0, "r\xe2\x82\x90 = 125 000 km", ca(pal->ink, 0.85f));
+            text_h(st_lab, x, y - 14 * UI, 0, "apogee 125 000 km", ca(pal->ink, 0.85f));
         }
     }
     /* the burns */
@@ -2453,7 +2453,7 @@ static void wk_init(uint32_t seed, double wt) {
     wk.jd0 = jd_of(wt);
     double sd[3];
     sun_dir_eq(wk.jd0, sd);
-    wk.yaw0 = atan2(sd[1], sd[0]) + 0.5 + (hrand(seed, 11) - 0.5) * 1.0;
+    wk.yaw0 = atan2(sd[1], sd[0]) + 0.15 + (hrand(seed, 11) - 0.5) * 0.6;
     wk.hl = (int)(hrand(seed, 12) * wk.d.T);
     double eps = 10 * RAD;
     wk.lam = acos(R_EARTH * cos(eps) / wk.a) - eps;
@@ -2643,7 +2643,7 @@ static void wk_map(Rect R, double u) {
 }
 
 static void wk_draw(Rect R, double u) {
-    int port = (R.y1 - R.y0) > (R.x1 - R.x0);
+    int port = (R.y1 - R.y0) > (R.x1 - R.x0) * 0.7f;
     if (port) {
         float m = R.y0 + (R.y1 - R.y0) * 0.55f;
         wk_globe((Rect){R.x0, R.y0, R.x1, m}, u);
@@ -2763,10 +2763,12 @@ static void dc_state(double t, double *p, double *v, double *cdv) {
 static void dc_update(double u, Info *in) {
     dc.t = warp_at(&dc.w, u, &dc.rate);
     double cdv;
+    dc.gone = dc.t >= dc.life;
+    if (dc.gone) dc.rate = 1;
+    dc.t = fmin(dc.t, dc.life);           /* the last we heard */
     dc_state(dc.t, dc.p, dc.v, &cdv);
     orb_from_rv(MU_EARTH, dc.p, dc.v, dc.t, &dc.osc);
     double r = norm3(dc.p), h = r - R_EARTH, vv = norm3(dc.v);
-    dc.gone = dc.t >= dc.life;
     in->title = "Orbital decay";
     in->sub = "185 \xc3\x97 800 km, B = 50 kg/m\xc2\xb2: drag eats the apogee, then the spiral down";
     in->sub = "185 \xc3\x97 800 km, ballistic coefficient 50 kg/m\xc2\xb2: drag eats the apogee, then the spiral in";
@@ -3037,7 +3039,7 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
                     c *= 0.78 + 0.22 * n.z;
                     if (ty == 0 || ty == 2) {
                         float g = max(gridline(lon, 0.5235988), gridline(lat, 0.5235988));
-                        c = mix(c, uInk, g * 0.10);
+                        c = mix(c, uInk, g * (0.03 + 0.09 * day));
                     }
                     if (uPaper > 0.5) c = mix(c, uInk, (1.0 - smoothstep(0.5, 1.0, dist / r)) * 0.0 + smoothstep(r - 1.5, r, dist) * 0.8);
                 }
@@ -3538,6 +3540,7 @@ static void render_front(double wt) {
         float vy0 = fmaxf(ty, y + 120 * UI) + 10 * UI;
         float vy1 = H * 0.60f;
         Rect view = {0, vy0, (float)W, vy1};
+        flush(NULL);
         act_draw(act, view, act_u);
         flush(&view);
         float yy = vy1 + 6 * UI;
