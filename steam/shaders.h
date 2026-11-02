@@ -574,18 +574,15 @@ static const char *FS_POST = GLSL(
         float g = hash12(gl_FragCoord.xy + fract(uTime * 7.31) * 300.0) - 0.5;
         c += g * 0.018;
         c *= uFade;
-        if (uCapOn > 0.5) {
-            vec2 cq = (vUV - uCapRect.xy) / uCapRect.zw;
-            if (cq.x > -0.02 && cq.x < 1.02 && cq.y > -0.1 && cq.y < 1.1) {
-                vec2 tc = vec2(cq.x, 1.0 - cq.y);
-                float t = texture(uCap, tc).r;
-                vec2 px = 1.0 / vec2(textureSize(uCap, 0));
-                float sh = texture(uCap, tc + vec2(-2.0, -3.0) * px).r;
-                sh = max(sh, texture(uCap, tc + vec2(0.0, -4.0) * px).r);
-                c *= 1.0 - 0.45 * sh;
-                c = mix(c, vec3(0.93, 0.88, 0.78), t * 0.85);
-            }
-        }
+        /* the caption: sampled everywhere (so the mip level is sound at its edges), shown inside its rect */
+        vec2 cq = (vUV - uCapRect.xy) / uCapRect.zw;
+        vec2 tc = clamp(vec2(cq.x, 1.0 - cq.y), 0.0, 1.0);
+        vec2 px = 1.0 / vec2(textureSize(uCap, 0));
+        float t = texture(uCap, tc).r;
+        float sh = max(texture(uCap, tc + vec2(-2.0, -3.0) * px).r, texture(uCap, tc + vec2(0.0, -4.0) * px).r);
+        float inside = uCapOn * step(0.0, cq.x) * step(cq.x, 1.0) * step(0.0, cq.y) * step(cq.y, 1.0);
+        c *= 1.0 - 0.45 * sh * inside;
+        c = mix(c, vec3(0.93, 0.88, 0.78), t * 0.85 * inside);
         o = vec4(c, 1.0);
     });
 
@@ -641,7 +638,7 @@ static const char *FS_SMOKE = GLSL(
     in vec3 vC;
     in float vDepth;
     uniform sampler2D uDepth;
-    uniform vec2 uDepthSize;
+    uniform vec2 uDepthSize, uSmokeSize;
     uniform vec3 uCamR, uCamU, uCamF;
     out vec4 o;
     float linz(float d) { float n = 0.2, f = 16000.0; float z = d * 2.0 - 1.0; return 2.0 * n * f / (f + n - z * (f - n)); }
@@ -650,7 +647,7 @@ static const char *FS_SMOKE = GLSL(
         if (d > 1.0) discard;
         if (vA.y > 1.5) {
             /* a spark: hidden behind solid things */
-            if (linz(texture(uDepth, gl_FragCoord.xy * 2.0 / uDepthSize).r) < vDepth) discard;
+            if (linz(texture(uDepth, gl_FragCoord.xy / uSmokeSize).r) < vDepth) discard;
             float g = smoothstep(1.0, 0.0, d);
             float life = 1.0 - vL.w;
             vec3 c = mix(vec3(1.0, 0.25, 0.04), vec3(1.0, 0.7, 0.3), life) * 6.0 * life;
@@ -663,7 +660,7 @@ static const char *FS_SMOKE = GLSL(
         float dens = smoothstep(1.0, 0.15, d + (n - 0.5) * 0.9);
         float a = vA.x * dens;
         /* soften where it meets solid things */
-        float sz = linz(texture(uDepth, gl_FragCoord.xy * 2.0 / uDepthSize).r);
+        float sz = linz(texture(uDepth, gl_FragCoord.xy / uSmokeSize).r);
         float r = 1.0;
         a *= clamp((sz - vDepth) / max(0.5, length(vC) * 0.002 + 1.0), 0.0, 1.0);
         if (a < 0.002) discard;

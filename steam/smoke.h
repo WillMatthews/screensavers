@@ -147,7 +147,8 @@ static void smoke_init(void) {
     }
 }
 static void smoke_targets(int sw, int sh) {
-    smoke_w = (sw + 1) / 2; smoke_h = (sh + 1) / 2;
+    int div = sw >= 1600 ? 3 : 2;      /* soft stuff: a third of the resolution is plenty on a big screen */
+    smoke_w = (sw + div - 1) / div; smoke_h = (sh + div - 1) / div;
     tex_smoke = mk_tex(smoke_w, smoke_h, GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT, GL_LINEAR);
     fbo_smoke = mk_fbo(tex_smoke, 0);
 }
@@ -219,6 +220,7 @@ static void smoke_draw(void) {
         glUniform3f(UL(p_smoke, "uCamF"), cam.F.x, cam.F.y, cam.F.z);
         glUniform1i(UL(p_smoke, "uDepth"), 8);
         glUniform2f(UL(p_smoke, "uDepthSize"), (float)scene_w, (float)scene_h);
+        glUniform2f(UL(p_smoke, "uSmokeSize"), (float)smoke_w, (float)smoke_h);
         glActiveTexture(GL_TEXTURE8);
         glBindTexture(GL_TEXTURE_2D, tex_depth);
         glActiveTexture(GL_TEXTURE0);
