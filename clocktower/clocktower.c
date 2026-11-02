@@ -2,8 +2,58 @@
  * clocktower — a tall stone clocktower alone on a rock in the sea, reached by
  * a narrow stone causeway that the tide covers and uncovers.
  *
- * (The full description is kept up to date at the end of development; see
- * usage() for the options.)
+ * The tower: weathered ashlar on a crag of jointed rock, a copper spire with
+ * a turning armillary, four dials, an open belfry, and a round turret on its
+ * south-west corner. Part of the east wall has fallen away, so the movement
+ * inside shows: a flatbed of brass wheels on iron A-frames, the going train
+ * stepping to an anchor escapement and a long pendulum, the striking train
+ * with its count wheel and fly, the weights on their cables, a lantern on
+ * the bed and a lamp hung from the ceiling.
+ *
+ *   The dials show the real local time. On the hour the bell strikes the
+ *   hour: the pins lift the hammer's tail, the wire pulls, the hammer rises
+ *   and falls, the bell swings, the gulls on the parapet lift off (and come
+ *   back in their own time), and each blow spreads over the bay as a ring
+ *   on the water and a faint shell in the air.
+ *   A row of numbered drums in a stone housing on the turret, worked by an
+ *   iron lever that pulls each minute, shows the time away: how long the
+ *   screen has been locked (swaylock's start time, from /proc, as gauges).
+ *   The tide is the Moon's and the Sun's (M2 and S2 from their real hour
+ *   angles, springs at new and full Moon), so the causeway floods and
+ *   drains over hours; the sea washes over it as it goes under.
+ *   The Sun and Moon are where they really are (low-precision formulas;
+ *   --lat/--lon, else ~/.config/wallpapers/location as nightsky, else
+ *   Greenwich), with the Moon in its real phase; at night the lanterns on
+ *   the causeway, the dials and a window light up, and stars come out.
+ *   Weather per --seed (or --weather): overcast with breaks and shafts of
+ *   light, clear (golden at the ends of the day), mist lying on the water,
+ *   or rain. Gulls circle.
+ *
+ * The camera takes a slow tour (about seven minutes, looping): the shore,
+ * along the causeway, the drums, round to the broken wall, into the gear
+ * room past the escapement and the striking train, back out against the
+ * sea, up past a dial to the bell, and away high over the bay.
+ *
+ * Rendering: meshes built at start (tower, causeway, turret, movement; the
+ * ground in culled chunks of four detail levels), a shadow map of the key
+ * light, a mirrored pass for the sea's reflections, height fog and low mist,
+ * light shafts marched through the shadow map and the clouds, temporal
+ * antialiasing, bloom and a filmic grade. It renders at a dynamic internal
+ * resolution that keeps each frame inside --budget ms (4).
+ *
+ * Same plumbing as gauges and flightsim: Xlib + GLX for --window / --root, a
+ * native wlr-layer-shell surface over EGL for --layer (swaylock-plugin),
+ * --shot FILE.ppm [--at SECONDS] [--size WxH] for one frame offscreen,
+ * --bench N to time N frames (with a per-pass split).
+ *
+ * Spanning: run one instance per monitor with the same --seed, --epoch and
+ * --layout (every output's logical rect), and --output = this one's index.
+ * They all follow the same tour off the shared epoch through one virtual
+ * camera centred on the front output (the one under the middle of the
+ * layout), each rendering its own slice of it, as flightsim. When the wall
+ * has a portrait output, the wide shots put the tower on it.
+ *
+ * Keys (window mode): q / Escape quit.
  */
 #define _DEFAULT_SOURCE
 #define GL_GLEXT_PROTOTYPES
@@ -55,6 +105,7 @@ static float opt_scale;                /* fixed render scale (0: adapt to the bu
 static float opt_fov;                  /* spanning: the horizontal angle over the layout */
 static float opt_budget = 4.0f;        /* ms per frame the dynamic resolution aims at */
 static int opt_shotcam = -1;           /* hold the tour at this shot (testing) */
+static float opt_fps = 30;
 
 /* ---- spanning ---- */
 #define MAX_OUT 8
@@ -331,10 +382,6 @@ static void mv(Mesh *m, v3 p, v3 n, float u, float v, int mat, float aux) {
 static void mquad(Mesh *m, v3 a, v3 b, v3 c, v3 d, v3 n, const float *uv, int mat, float aux) {
     mv(m, a, n, uv[0], uv[1], mat, aux); mv(m, b, n, uv[2], uv[3], mat, aux); mv(m, c, n, uv[4], uv[5], mat, aux);
     mv(m, a, n, uv[0], uv[1], mat, aux); mv(m, c, n, uv[4], uv[5], mat, aux); mv(m, d, n, uv[6], uv[7], mat, aux);
-}
-static void mtri(Mesh *m, v3 a, v3 b, v3 c, int mat, float aux) {
-    v3 n = vnorm(vcross(vsub(b, a), vsub(c, a)));
-    mv(m, a, n, a.x + a.z, a.y, mat, aux); mv(m, b, n, b.x + b.z, b.y, mat, aux); mv(m, c, n, c.x + c.z, c.y, mat, aux);
 }
 /* planar uv for a face: metres along two world axes chosen by its normal */
 static void face_uv(v3 n, v3 p, float *u, float *v) {
@@ -619,13 +666,16 @@ static float terrain(float x, float z) {
     /* skerries: rocks out in the bay, some only showing at low water */
     static const float SK[][4] = {{-31, -25, 8, 2.4f}, {26, -31, 6, 0.9f}, {37, 6, 5, 0.2f}, {-40, 8, 7, 1.4f},
                                   {11, -43, 5, 0.5f}, {-17, 33, 4, -0.3f}, {21, 52, 5, 0.4f}, {-23, 88, 5, -0.6f},
-                                  {28, 112, 7, 0.8f}, {-44, -41, 6, 3.0f}};
+                                  {28, 112, 7, 0.8f}, {-44, -41, 6, 3.0f},
+                                  /* and boulders on the beach by the causeway's head */
+                                  {19, 167, 2.5f, 1.6f}, {33, 186, 3.0f, 3.2f}, {-13, 171, 2.2f, 1.9f}, {-27, 160, 4.0f, 1.5f}, {41, 174, 2.0f, 2.4f}};
     for (int i = 0; i < 10; i++) {
         float dx = x - SK[i][0], dz = z - SK[i][1];
         /* stretched along the strike of the rock */
         float u = dx * 0.8f + dz * 0.6f, v = (-dx * 0.6f + dz * 0.8f) * 1.7f, d = sqrtf(u * u + v * v);
         if (d > SK[i][2] * 2.0f) continue;
-        float sk = SK[i][3] - 3.5f * powf(d / SK[i][2], 1.6f) + facets(x, z, 2.6f, 320 + i) * 0.9f;
+        float q = 1 - (d / SK[i][2]) * (d / SK[i][2]);
+        float sk = (q > 0 ? (SK[i][3] + 3.0f) * sqrtf(q) - 3.0f : -3.0f - 2.0f * (d / SK[i][2] - 1)) + facets(x, z, 2.6f, 320 + i) * 0.7f;
         h = fmaxf(h, sk);
     }
     /* the reef under the causeway, with rocks breaking the surface at low water */
@@ -1893,8 +1943,8 @@ void main() {
         float tidal = 1.0 - smoothstep(0.4, 2.6, vP.y);
         alb = mix(alb, vec3(0.10, 0.12, 0.05), tidal * smoothstep(0.35, 0.7, g + 0.25 * (1.0 - gn.y)) * 0.85);
         alb = mix(alb, vec3(0.20, 0.26, 0.10), gn.y * tidal * smoothstep(0.55, 0.8, nz(vP.xz * 0.21).b) * 0.6);
-        float barn = step(0.8, hash12(floor(vP.xz * 22.0) + floor(vP.y * 22.0))) * (1.0 - gn.y) * tidal;
-        alb = mix(alb, vec3(0.55, 0.53, 0.48), barn * 0.6);
+        float barn = smoothstep(0.72, 0.85, nz(vec2(vP.x + vP.z, vP.y) * 3.0).a) * (1.0 - gn.y) * tidal;
+        alb = mix(alb, vec3(0.50, 0.48, 0.43), barn * 0.35);
         wet = max(wet, 1.0 - smoothstep(uTide + 0.15, uTide + 0.9, vP.y));
         wet = max(wet, 0.35 * tidal);
     }\n#endif\n\n#ifdef G_METAL\n
@@ -2546,7 +2596,7 @@ void main() {
 static const char *FS_POST = GLSL(
 in vec2 vUV;
 uniform sampler2D uScene, uBloom, uVol;
-uniform float uExposure, uBloomAmt, uRain;
+uniform float uExposure, uBloomAmt, uRain, uSharpen;
 uniform vec4 uVig;                    /* this view in layout-normalised coords */
 uniform vec2 uLayoutPx;               /* the layout's size in pixels */
 out vec4 oCol;
@@ -2563,8 +2613,11 @@ vec3 catmull(sampler2D t, vec2 uv) {
     return max(r / ws, vec3(0.0));
 }
 void main() {
-    vec3 c = catmull(uScene, vUV);
-    if (any(isnan(texture(uScene, vUV).rgb))) { oCol = vec4(1.0, 0.0, 1.0, 1.0); return; }
+    /* upscale: bilinear, and an unsharp mask from two diagonal taps */
+    vec2 tx = 1.0 / vec2(textureSize(uScene, 0));
+    vec3 c = texture(uScene, vUV).rgb;
+    vec3 blur = 0.5 * (texture(uScene, vUV + tx * vec2(0.75, 0.6)).rgb + texture(uScene, vUV - tx * vec2(0.75, 0.6)).rgb);
+    c = max(c + (c - blur) * uSharpen, vec3(0.0));
     c += texture(uVol, vUV).rgb;
     c += texture(uBloom, vUV).rgb * uBloomAmt;
     vec2 L = uVig.xy + vUV * uVig.zw;               /* where on the whole wall */
@@ -2617,9 +2670,9 @@ static void choose_weather(void) {
         weather = r < 0.33f ? W_OVERCAST : r < 0.63f ? W_CLEAR : r < 0.83f ? W_MIST : W_RAIN;
     }
     switch (weather) {
-    case W_OVERCAST: WP = (typeof(WP)){0.80f, 0.0016f, 150, 0.0f, 0.15f, 0.8f, 0}; break;
+    case W_OVERCAST: WP = (typeof(WP)){0.70f, 0.0016f, 150, 0.0f, 0.15f, 0.8f, 0}; break;
     case W_CLEAR:    WP = (typeof(WP)){0.30f, 0.00035f, 260, 0.0f, 0.0f, 0.5f, 0}; break;
-    case W_MIST:     WP = (typeof(WP)){0.62f, 0.0009f, 120, 0.12f, 0.35f, 0.3f, 0}; break;
+    case W_MIST:     WP = (typeof(WP)){0.62f, 0.0008f, 120, 0.035f, 0.35f, 0.3f, 0}; break;
     default:         WP = (typeof(WP)){0.97f, 0.0032f, 120, 0.004f, 1.0f, 0.95f, 1}; break;
     }
 }
@@ -2925,7 +2978,7 @@ static void key_at(int i, float *t, v3 *p, v3 *l, float *f, v3 *fr) {
     *fr = V3(keys[k].sx, keys[k].sy, keys[k].span);
 }
 static void tour(float t, v3 *pos, v3 *look, float *fov, v3 *frame) {
-    if (opt_shotcam >= 0) t = keys[opt_shotcam % NKEY].t + fmodf(t, 1.0f) * 0;
+    if (opt_shotcam >= 0) t = keys[opt_shotcam % NKEY].t;
     t = fmodf(t, TOUR);
     if (t < 0) t += TOUR;
     int i = 0;
@@ -3090,11 +3143,11 @@ static void gl_init(void) {
 
     /* the sea: a polar grid round the camera, dense near it */
     {
-        enum { NR = 150, NA = 200 };
+        enum { NR = 112, NA = 144 };
         float *v = malloc(sizeof(float) * 2 * 6 * NR * NA);
         int k = 0;
         for (int i = 0; i < NR; i++) {
-            float r0 = 0.25f * powf(1.068f, (float)i) - 0.25f, r1 = 0.25f * powf(1.068f, (float)(i + 1)) - 0.25f;
+            float r0 = 0.3f * powf(1.095f, (float)i) - 0.3f, r1 = 0.3f * powf(1.095f, (float)(i + 1)) - 0.3f;
             if (r1 > 9000) r1 = 9000;
             for (int j = 0; j < NA; j++) {
                 float a0 = 2 * PI * j / NA, a1 = 2 * PI * (j + 1) / NA;
@@ -3741,6 +3794,7 @@ static void render(GLuint target, double t, double wt) {
     glUniform1i(U(p_post, "uVol"), 7);
     glUniform1f(U(p_post, "uExposure"), F.exposure);
     glUniform1f(U(p_post, "uBloomAmt"), 0.06f);
+    glUniform1f(U(p_post, "uSharpen"), clampf(1.2f - render_scale, 0.2f, 0.8f));
     glUniform1f(U(p_post, "uRain"), WP.rain);
     glUniform4f(U(p_post, "uVig"), (view_x - lay_x0) / lay_w, 1 - (view_y + view_h - lay_y0) / lay_h, view_w / lay_w, view_h / lay_h);
     glUniform2f(U(p_post, "uLayoutPx"), lay_w, lay_h);
@@ -3842,7 +3896,7 @@ static void usage(void) {
         "usage: clocktower [--window | --root | --layer] [--seed N]\n"
         "                  [--weather overcast|clear|mist|rain|random] [--lat DEG --lon DEG]\n"
         "                  [--time 'YYYY-MM-DD HH:MM[:SS]'] [--tide METRES] [--font FAMILY]\n"
-        "                  [--scale X] [--budget MS] [--msaa N] [--fov DEG] [--shotcam K]\n"
+        "                  [--scale X] [--budget MS] [--fps N] [--msaa N] [--fov DEG] [--shotcam K]\n"
         "                  [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
         "                  [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH]\n");
     exit(1);
@@ -3905,6 +3959,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-msaa") && i + 1 < argc) opt_msaa = atoi(argv[++i]);
         else if (!strcmp(a, "-fov") && i + 1 < argc) opt_fov = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-shotcam") && i + 1 < argc) opt_shotcam = atoi(argv[++i]);
+        else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-shot") && i + 1 < argc) opt_shot = argv[++i];
         else if (!strcmp(a, "-bench") && i + 1 < argc) opt_bench = atoi(argv[++i]);
         else if (!strcmp(a, "-size") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &off_w, &off_h) != 2) usage(); }
@@ -3993,7 +4048,8 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    render_scale = opt_scale > 0 ? opt_scale : 0.6f;
+    if (opt_fps < 5) opt_fps = 5;
+    render_scale = opt_scale > 0 ? opt_scale : 0.5f;
     double avg = opt_budget / 1000, last_change = 0;
     for (int frame = 0;; frame++) {
         if (opt_layer && !wl_poll()) return 0;
@@ -4025,7 +4081,7 @@ int main(int argc, char **argv) {
             s = clampf(s, 0.3f, 1.0f);
             if (fabsf(s - render_scale) > 0.02f) { render_scale = s; last_change = t; avg = b; }
         }
-        double spare = 1.0 / 30 - (now() - t);
+        double spare = 1.0 / opt_fps - (now() - t);
         if (spare > 0) {
             struct timespec ts = {0, (long)(spare * 1e9)};
             nanosleep(&ts, NULL);
