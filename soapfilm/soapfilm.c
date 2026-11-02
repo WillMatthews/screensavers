@@ -1,7 +1,77 @@
 /*
  * soapfilm — the iridescence of soap films, as in macro photographs.
  *
- * (header filled in below once the scenes settle)
+ * Three scenes, an act each, in an order shuffled from the seed (or fixed
+ * with --scene), crossfading through black:
+ *
+ *   film     a flat soap film in a brass wire frame filling the screen, lit
+ *            by a big softbox behind the camera. It's drawn up out of the
+ *            bath thick and silvery, drains (thick at the bottom, the
+ *            colours stacking up from the top, thinning to the common black
+ *            film that spreads down from the top edge) while buoyant thin
+ *            film rises in plumes off the frame's sides and bottom and
+ *            curls into eddies. When it's old it bursts from the black film:
+ *            a ragged hole with a rolled-up rim races across, throwing off
+ *            mist, and a new film is drawn. Two films an act.
+ *   bubbles  free bubbles drifting on the air in front of black velvet,
+ *            each a thin film whose colours swirl over it and thin to a
+ *            black cap with age, reflecting a window and a strip light.
+ *            Bubbles that touch join into clusters, their films meeting at
+ *            120 degrees across a shared wall (a cap of radius r1 r2 /
+ *            |r1 - r2| through the circle of contact) with a Plateau border
+ *            round it. Old ones burst: the hole opens from a point, its rim
+ *            shedding a fine mist. New ones are blown in from the left or
+ *            drift down from above.
+ *   foam     a raft of foam seen from above with a tilted plane of focus:
+ *            domed cells of film, each with the window in it, divided by
+ *            glassy Plateau borders that widen at the junctions. It
+ *            coarsens (von Neumann: cells with fewer than six sides shrink),
+ *            films between cells rupture (the border retracts to its ends,
+ *            the two become one), caps burst and their neighbours close in.
+ *
+ * The colour is physical. Thin-film reflectance (the Airy sum for a film
+ * of soapy water in air, Fresnel per polarisation, water's dispersion) is
+ * integrated over the visible spectrum against a daylight-ish 5800 K source
+ * and the CIE 1931 observer, once, into a table of thickness x incidence:
+ * black below ~30 nm, first-order silver-white, straw, orange-red, magenta
+ * at ~200 nm (where green cancels), blue, then the second order's green,
+ * yellow, magenta, blue, washing out to pastel pinks and greens and grey
+ * past a micron (see --lutstrip). Every film in every scene is that table
+ * looked up with its thickness and view angle, times the light it reflects.
+ *
+ * The flat film is a 2D simulation on the GPU: an incompressible flow in
+ * the film's plane (semi-Lagrangian, Jacobi pressure, vorticity
+ * confinement, a faint stirring of air) carrying the thickness (MacCormack).
+ * Thin film is lighter, so it's pushed up against the local mean; the
+ * thickness relaxes slowly to the drainage profile of its age (thick below,
+ * sqrt of the depth beneath the black front above); the edges pull out thin
+ * patches (marginal regeneration) that feed the rising plumes; below 35 nm
+ * the film collapses to common black. It runs at a fixed 30 steps a second
+ * from the moment the film is drawn, so it's the same film whenever and
+ * wherever it's rendered. Bubbles and foam are CPU simulations, likewise in
+ * fixed steps from the start of their act.
+ *
+ * Rendered at an internal resolution (about a megapixel, --scale to set),
+ * into colour + depth, then a depth-of-field gather at a third of that
+ * (Gustafsson's single-pass bokeh), a faint bloom, a filmic curve, vignette
+ * and grain. A small caption, bottom left: the time, and how long the
+ * screen's been locked (swaylock's start, from /proc), on the front output.
+ *
+ * Same plumbing as marbling: Xlib + GLX for --window / --root, a native
+ * wlr-layer-shell surface over EGL for --layer (swaylock-plugin),
+ * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen,
+ * --bench N to time N frames offscreen (SOAP_PROF=1 for GPU time a stage).
+ *
+ * Spanning: run one instance per monitor with the same --seed and --epoch,
+ * --layout (every output's logical rect) and --output = this one's index,
+ * as for flightsim. The outputs are windows onto one wall (the layout's
+ * bounding box) seen from one eye, over the front output (the one under
+ * the middle of the layout): one film in one frame round the whole wall,
+ * one air full of bubbles drifting across the bezels, one raft of foam.
+ * Everything is a function of the seed, the time since the epoch and the
+ * layout, so the instances agree without talking.
+ *
+ * Keys (window mode): q / Escape quit.
  */
 #define _DEFAULT_SOURCE
 #define GL_GLEXT_PROTOTYPES
@@ -1155,9 +1225,10 @@ static void film_alloc(void) {
     float cx, cy, hw, hh;
     film_frame(&cx, &cy, &hw, &hh);
     float ad = hw / hh;
-    /* thickness texels per frame height: about one per 2 px of the screen
-     * that shows the most of it, velocity a third of that */
-    float pxh = (float)H / out_w0[3] * hh * 2;
+    /* thickness texels per frame height: about one per 2 logical px of the
+     * wall (the same on every output, so they all run the same film),
+     * velocity a third of that */
+    float pxh = wallr[3] * hh * 2;
     int hy = (int)clampf(pxh / 2.0f, 300, 900);
     int hx = (int)lroundf(hy * ad);
     if (hx == fm.hx && hy == fm.hy) return;
@@ -1448,8 +1519,9 @@ static void bubbles_step(void) {
         b->v[1] -= 0.0015f * dt;
         for (int j = 0; j < 3; j++) b->p[j] += b->v[j] * dt;
         b->spin += b->spinv * dt;
-        if (!b->popping && t >= b->popt) b->popping = 1;
-        if (b->popping && t >= b->popt + POPB) {
+        if (!b->popping && t >= b->popt) {
+            b->popping = 1;
+            if (getenv("SOAP_DEBUG")) fprintf(stderr, "pop %d at %.2f: (%.2f %.2f %.2f) r %.3f\n", i, t, b->p[0], b->p[1], b->p[2], b->r);
             if (bs.nev < NPOPEV) {
                 PopEv *e = &bs.ev[bs.nev++];
                 e->t = b->popt;
@@ -1457,6 +1529,8 @@ static void bubbles_step(void) {
                 e->r = b->r;
                 e->seed = mix32((uint32_t)i * 977U ^ (uint32_t)(b->popt * 1000));
             }
+        }
+        if (b->popping && t >= b->popt + POPB) {
             unlink_bub(i);
             b->on = 0;
             continue;
@@ -1990,7 +2064,7 @@ static void render_foam(const Act *a, int ai, double lt) {
     glUniform1f(U(p, "uFill"), 3.2f);
     draw_fs();
     dof_focus = BUB_D;
-    dof_aperture = 0.035f;
+    dof_aperture = 0.026f;
 }
 
 /* ================= caption ================= */
