@@ -95,6 +95,7 @@ in `savers.sh`.
 | ![neural](docs/img/neural.jpg) | **neural**: neural networks learning live, trained on the CPU with hand-written backprop: a SIREN painting a picture, a classifier finding its decision boundary, a character model learning to write away messages, and optimisers racing down a loss surface. |
 | ![orbits](docs/img/orbits.jpg) | **orbits**: a mission-control trajectory display: Hohmann and bi-elliptic transfers, Earth to Mars from today's real ephemeris with a live porkchop plot, a Jupiter flyby, the Earth–Moon three-body problem with its Lagrange points, a Walker constellation's ground tracks, and orbital decay. |
 | ![fdtd](docs/img/fdtd.jpg) | **fdtd**: Maxwell's equations solved live on a GPU Yee grid with absorbing boundaries: dipoles, a steered phased array, a Yagi, a horn, a dish, lenses, a waveguide bend, a photonic crystal, slits, total internal reflection and a ringing cavity, with far-field polar plots measured from the field. |
+| ![quantum](docs/img/quantum.jpg) | **quantum**: the time-dependent Schrödinger equation solved live on the GPU (split-step Fourier): tunnelling through a barrier, the double slit building up particle by particle, coherent and squeezed states, revival in a box beside its quantum carpet, Bragg scattering off a crystal, and scars in a stadium. Hue is phase, brightness is probability. |
 
 ## Building
 
