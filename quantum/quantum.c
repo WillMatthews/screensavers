@@ -1,7 +1,67 @@
 /*
  * quantum — the time-dependent Schrödinger equation, solved live.
  *
- * (header comment: filled in below, see the end of the file's development)
+ *     i hbar dpsi/dt = -hbar^2/2m Laplacian psi + V psi      (hbar = m = 1)
+ *
+ * on a 2D grid (64k to 128k points), by the split-step Fourier method:
+ * Strang splitting, half a potential step, a whole kinetic step in k-space,
+ * half a potential step. The FFT is a Stockham autosort, radix 4 with a
+ * closing radix-2 stage, one fragment pass per stage on RG32F textures; the
+ * potential and kinetic multipliers ride in the first and last passes. An
+ * absorbing layer (a complex potential) lines the edges where waves leave.
+ * Plain float32 loses ~1e-7 of the norm a step, always the same way (the
+ * state changes slowly, so the rounding errors line up), so every complex
+ * product is compensated (fma for the products' errors, TwoSum for the
+ * sums', each multiplier a float pair plus its residual): without
+ * absorbers the norm then holds to ~5e-7 over 8000 steps.
+ *
+ * The experiments, in a shuffled cycle, each opened by a small title card
+ * with its governing equations:
+ *   tunnelling   a packet meets a square barrier: R(t), T(t) against T(k)
+ *                averaged over the packet; the kx distribution against
+ *                T(k) |phi0(k)|^2
+ *   double slit  the pattern on a screen, and particles landing on it one
+ *                at a time, drawn from |psi|^2 there (the flux through the
+ *                screen), with the histogram filling in
+ *   coherent     a coherent state circling (or tracing a Lissajous figure)
+ *                in a harmonic well, its classical orbit, phase space
+ *   squeezed     a squeezed state sloshing and breathing at 2 omega, with
+ *                its uncertainty ellipse turning in phase space
+ *   revival      a packet in the infinite square well, the odd extension
+ *                of the box on the periodic grid, where free evolution is
+ *                exact: it falls apart and comes back at T = 4mL^2/(pi hbar),
+ *                beside the 1D quantum carpet woven row by row
+ *   Bragg        a wave through a 2D crystal turned to the Bragg angle: the
+ *                Ewald circle in momentum space, a polar diffraction plot
+ *   stadium      a packet launched along the unstable bouncing orbit of a
+ *                Bunimovich stadium (or, alternately, into a ring of atoms,
+ *                a quantum corral), with the long exposure where scars show
+ * Pictures are domain coloured (hue the phase, brightness |psi|^2, a soft
+ * glow), the potential a translucent relief with the classical turning
+ * line V = E, beside the momentum picture |phi(k)|^2 and live <x>, <p>,
+ * norm and energy. --check verifies the physics (norm and energy, the
+ * coherent state's orbit, the squeezed width, T for three barriers, the
+ * fringe spacing, the revival) and times a step.
+ *
+ * Palettes (--palette, else from the seed): phase (a hue wheel on black),
+ * mono, paper (light), ember. A small caption gives the time and the time
+ * away (since swaylock started, from /proc).
+ *
+ * Same plumbing as gauges and ink: Xlib + GLX for --window / --root, a
+ * native wlr-layer-shell surface over EGL for --layer (swaylock-plugin),
+ * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame
+ * offscreen, --bench N to time N frames offscreen. --act NAME plays one
+ * experiment on a loop.
+ *
+ * Spanning: run one instance per monitor with the same --seed and --epoch,
+ * --layout (every output's logical rect) and --output = this one's index.
+ * Every instance runs the same simulation from the epoch (same grid, same
+ * steps, so they agree without talking); the output under the middle of the
+ * layout shows the experiment, the others, left to right, the act's own
+ * picture (the screen, the carpet, phase space...) and momentum space.
+ * A late start catches up a few steps a frame, in fast motion.
+ *
+ * Keys (window mode): q / Escape quit.
  */
 #define _DEFAULT_SOURCE
 #define GL_GLEXT_PROTOTYPES
@@ -2383,8 +2443,8 @@ static void aux_panel(Rect r, int big) {
         float strip = (vertical ? rw(p) : rh(p)) * 0.30f;
         for (int b = 0; b < nb; b++) {
             float a0 = (float)b / nb, a1 = (float)(b + 1) / nb, hgt = fminf(hb[b] / hmax, 1.0f);
-            if (vertical) fill(p.x0 + strip * 1.1f, p.y1 - a1 * rh(p) + 0.5f, p.x0 + strip * 1.1f + hgt * (rw(p) - strip * 1.1f), p.y1 - a0 * rh(p) - 0.5f, col(c_acc, 0.30f));
-            else fill(p.x0 + a0 * rw(p) + 0.5f, p.y1 - hgt * (rh(p) - strip * 1.1f), p.x0 + a1 * rw(p) - 0.5f, p.y1, col(c_acc, 0.30f));
+            if (vertical) fill(p.x0 + strip * 1.1f, p.y1 - a1 * rh(p) + 0.5f, p.x0 + strip * 1.1f + hgt * (rw(p) - strip * 1.1f), p.y1 - a0 * rh(p) - 0.5f, col(c_acc, 0.30f * fminf(1.0f, nin / 500.0f)));
+            else fill(p.x0 + a0 * rw(p) + 0.5f, p.y1 - hgt * (rh(p) - strip * 1.1f), p.x0 + a1 * rw(p) - 0.5f, p.y1, col(c_acc, 0.30f * fminf(1.0f, nin / 500.0f)));
         }
         /* the wave's prediction */
         float lx = 0, ly = 0;
@@ -3092,17 +3152,6 @@ static int run_check(void) {
     /* 1. norm and energy, no absorbers: the coherent state, 8000 steps */
     SECTION("norm") {
     act_setup(A_COHERENT, 0, 1);
-    if (getenv("QDEBUG")) {
-        float *b = grid_read(); printf("debug: norm0 %.6f  psi[center] %g %g\n", cpu_norm(b), b[2 * (128 * 256 + 197)], b[2 * (128 * 256 + 197) + 1]); free(b);
-        fft_begin(G.nx, G.ny); pass_k = 0;
-        GLuint t = fft_axis(G.psi.t[0], &G.psi, 0, G.nx, 1, 0, 0);
-        b = malloc(8 * 65536); glBindTexture(GL_TEXTURE_2D, t); glGetTexImage(GL_TEXTURE_2D, 0, GL_RG, GL_FLOAT, b);
-        printf("debug: after x fft (pass_k %d, t==psi0 %d): sum|.|^2 %.6g\n", pass_k, t == G.psi.t[0], cpu_norm(b)); free(b);
-        act_setup(A_COHERENT, 0, 1);
-        grid_step();
-        b = grid_read(); printf("debug: after a step: norm %.6f (pass_k %d)\n", cpu_norm(b), pass_k); free(b);
-        return 0;
-    }
     measure(1);
     double E0c = M.T + M.V, n0 = G.norm0, worst_n = 0, worst_e = 0, worst_x = 0;
     double Ecl = 0.5 * (A.px0 * A.px0 + A.py0 * A.py0) + 0.5 * (A.wx * A.wx * A.x0 * A.x0) + 0.5 * (A.wx + A.wy);
@@ -3183,8 +3232,30 @@ static int run_check(void) {
             double d1 = hypot(A.Lscr, y + A.d / 2) - hypot(A.Lscr, y - A.d / 2);
             if (d1 >= A.lam) { y1 = y; break; }
         }
-        printf("  slit %d: d %.2f, w %.2f, L %.1f, lambda %.4f: mean fringe spacing (|y| < 15, %d gaps) %.3f | lambda L / d = %.3f (%+.1f%%), two-source first maximum %.3f; %d particles\n",
-               v, A.d, A.w, A.Lscr, A.lam, ns, sp, th, (sp / th - 1) * 100, y1, nclick);
+        /* and by Huygens-Fresnel for the finite slits (2D Green's function
+         * e^ikr / sqrt r, obliquity (1 + cos)/2): first maximum and minimum */
+        double hf_max = 0, hf_min = 0, prev = -1, pprev = -1;
+        for (double y = 0; y < 20 && !hf_max; y += 0.005) {
+            double re = 0, im = 0;
+            for (int sl = -1; sl <= 1; sl += 2)
+                for (int q = 0; q < 160; q++) {
+                    double yy = sl * A.d / 2 - A.w / 2 + A.w * (q + 0.5) / 160, r = hypot(A.Lscr, y - yy);
+                    double amp = (1 + A.Lscr / r) / 2 / sqrt(r);
+                    re += amp * cos(A.k0 * r); im += amp * sin(A.k0 * r);
+                }
+            double I = re * re + im * im;
+            if (pprev >= 0 && prev < pprev && prev <= I && !hf_min) hf_min = y - 0.005;
+            if (pprev >= 0 && prev > pprev && prev >= I && hf_min) hf_max = y - 0.005;
+            pprev = prev; prev = I;
+        }
+        /* the simulated first minimum: the least of the screen intensity between 0 and the first maximum */
+        double first_max = 0, first_min = 0, lo = 1e30;
+        for (int i = 0; i < np; i++) if (pk[i] > 0.5) { first_max = pk[i]; break; }
+        for (int j = 0; j < G.ny; j++)
+            if (YJ(j) > 0 && YJ(j) < first_max && scr_acc[j] < lo) { lo = scr_acc[j]; first_min = YJ(j); }
+        printf("  slit %d: d %.2f, w %.2f, L %.1f, lambda %.4f: first maximum %.3f, first minimum %.2f | lambda L / d = %.3f (%+.1f%%);"
+               " Huygens-Fresnel, finite slits: maximum %.3f (%+.1f%%), minimum %.2f; two point sources: maximum %.3f; mean spacing %.3f; %d particles\n",
+               v, A.d, A.w, A.Lscr, A.lam, first_max, first_min, th, (first_max / th - 1) * 100, hf_max, (first_max / hf_max - 1) * 100, hf_min, y1, sp, nclick);
         printf("    peaks:");
         for (int i = 0; i < np; i++) printf(" %.2f", pk[i]);
         printf("\n");
