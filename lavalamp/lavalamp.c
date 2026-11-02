@@ -356,7 +356,8 @@ static void sim_step(void) {
         bd->x[0] = bd->base[0]; bd->x[2] = bd->base[1];
         bd->x[1] = h - 0.02f;
         float dur = (3.5f + 4.5f * srand1()) * (1 + 2.2f * sp) * (tower ? 2.6f : 1);
-        float vol = fminf(0.3f * sim.Vpool, 0.010f + 0.020f * srand1()) * (1 + 1.4f * sp) * (tower ? 2.0f : 1);
+        float vol = fminf(0.34f * sim.Vpool, 0.014f + 0.032f * srand1())
+ * (1 + 1.4f * sp) * (tower ? 2.0f : 1);
         bd->flux = vol / dur;
         bd->feed_end = t + dur;
     }
@@ -1123,8 +1124,9 @@ vec3 shadeWax(vec3 p, vec3 d, float T) {
     float rim = pow(1.0 - max(dot(-d, n), 0.0), 2.0);
     /* light from the bulb shines up through the wax: the underside glows, the crown falls dark */
     float under = smoothstep(0.35, -0.85, n.y);
-    vec3 col = uWax * (diff * 2.0 + sss * ext * 0.45 * (0.35 + 1.3 * under) + amb * 0.7 + rim * eo * 0.1);
-    col *= (0.55 + 0.45 * pow(max(dot(-d, n), 0.0), 0.6)) * 1.7;
+    vec3 col = uWax * (diff * 2.0 + sss * ext * 0.45 * (0.5 + 1.3 * under) + amb * 1.0 + rim * eo * 0.1);
+
+    col *= (0.6 + 0.4 * pow(max(dot(-d, n), 0.0), 0.6)) * 2.6;
 
 
     /* hotter wax glows a touch more */
