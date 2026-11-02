@@ -1773,7 +1773,7 @@ vec3 lamps(vec3 p, vec3 n, vec3 v, vec3 alb, float rough, vec3 f0) {
     vec3 sum = vec3(0.0);
     for (int i = 0; i < uNLamp; i++) {
         /* the gear room's lamp burns day and night; the lanterns only at night */
-        float on = i < 2 ? max(uNight, 0.5) : uNight;
+        float on = i < 2 ? mix(0.5, 0.13, uNight) : uNight;
         if (on < 0.01) continue;
         vec3 L = uLamp[i].xyz - p;
         float d2 = dot(L, L);
@@ -1811,7 +1811,7 @@ vec3 shade(vec3 p, vec3 n, vec3 v, vec3 alb, float rough, float metal, float ao,
     if (occ < 0.99) occ *= 0.55 + 0.6 * max(n.x, 0.0) + 0.1 * n.y;
     col += dif * amb * ao * occ;
     /* inside, light bounced off the sunlit floor and stone, warm */
-    if (occ < 0.99) col += dif * ao * (uKeyCol * max(uKeyDir.y, 0.15) * 0.11 * cloudShadowFast(p) + uAmbSky * 0.3) * vec3(1.0, 0.8, 0.6) * (1.0 - occ);
+    if (occ < 0.99) col += dif * ao * (uKeyCol * max(uKeyDir.y, 0.15) * 0.16 * cloudShadowFast(p) + uAmbSky * 0.4) * vec3(1.0, 0.8, 0.6) * (1.0 - occ);
     vec3 R = reflect(-v, n);
     float fr = pow(1.0 - max(dot(n, v), 0.0), 5.0);
     vec3 Fe = f0 + (max(vec3(1.0 - rough), f0) - f0) * fr;
@@ -1887,7 +1887,7 @@ void stone(vec3 p, inout vec3 n, vec3 gn, vec2 uv, float aux, float rubble, out 
     vec4 f1 = nz(wp * 0.11 + 3.0), f2 = nz(uv * 1.3 + b.z * 7.0), f3 = nz(wp * 2.6 + 3.7);
     float W = f1.r * 0.55 + f1.g * 0.3 + f1.b * 0.15;
     float grain = f2.r * 0.5 + f2.g * 0.3 + f2.a * 0.2;
-    float h = smoothstep(0.0, 0.04, e) * 0.01 + (grain - 0.5) * 0.004;
+    float h = smoothstep(0.0, 0.025, e) * 0.006 + (grain - 0.5) * 0.007 + (f2.a - 0.5) * 0.004;
     if (uLowQ < 0.5 && dot(uCam - p, uCam - p) < 8100.0) n = bump(p, n, h);
     vec3 warm = vec3(0.34, 0.315, 0.28), cool = vec3(0.29, 0.295, 0.29);
     vec3 c = mix(warm, cool, b.z) * (0.9 + 0.2 * b.w);
@@ -1897,12 +1897,15 @@ void stone(vec3 p, inout vec3 n, vec3 gn, vec2 uv, float aux, float rubble, out 
     /* grime run down from the ledges, long and vertical */
     vec4 fs = nz(vec2(wp.x * 1.4, wp.y * 0.05));
     float streak = fs.g * 0.6 + fs.a * 0.4;
-    c *= 1.0 - 0.38 * smoothstep(0.42, 0.8, streak) * (1.0 - abs(gn.y));
+    c *= 1.0 - 0.38 * smoothstep(0.42, 0.8, streak) * (1.0 - abs(gn.y)) * (abs(p.x) < 3.0 && abs(p.z) < 3.0 ? 0.4 : 1.0);
     /* lichens: orange spots and grey-green crust, on what faces the weather */
-    float lich = smoothstep(0.74, 0.8, f3.a * 0.7 + f1.a * 0.4) * (0.4 + 0.6 * smoothstep(0.3, 1.0, gn.y + 0.5));
+    float outside = step(0.99, interiorOcc(p));
+    float lich = smoothstep(0.74, 0.8, f3.a * 0.7 + f1.a * 0.4) * (0.4 + 0.6 * smoothstep(0.3, 1.0, gn.y + 0.5)) * outside;
     c = mix(c, vec3(0.50, 0.35, 0.14), lich * 0.55 * (1.0 - rubble));
     float lich2 = smoothstep(0.64, 0.72, f1.g + grain * 0.1);
-    c = mix(c, vec3(0.36, 0.38, 0.33), lich2 * 0.3);
+    c = mix(c, vec3(0.36, 0.38, 0.33), lich2 * 0.3 * outside);
+    /* indoors: darker, sooted towards the ceiling */
+    c *= mix(0.62 - 0.25 * smoothstep(15.0, 21.0, p.y), 1.0, outside);
     /* damp low down: green-black algae, salt, the high-water mark */
     float damp = 1.0 - smoothstep(PLAT + 0.2, PLAT + 2.2 + W * 1.5, p.y);
     c = mix(c, c * vec3(0.55, 0.6, 0.5), damp * 0.8);
@@ -1957,7 +1960,11 @@ void main() {
     if (m == 3) {
         /* brass, tarnished, rubbed bright on the edges that work */
         float t = fbm2(uv * 2.3 + vP.yz * 1.7 + vAux * 5.0);
-        alb = mix(vec3(0.86, 0.66, 0.32), vec3(0.55, 0.40, 0.18), smoothstep(0.4, 0.8, t) * 0.7);
+        /* turning marks: fine rings round the arbor catch the light */
+        float rr = length(uv);
+        if (uLowQ < 0.5 && abs(n.x) > 0.9) n = bump(vP, n, sin(rr * 260.0) * 0.0004 + sin(rr * 37.0) * 0.0008);
+        alb = mix(vec3(0.86, 0.66, 0.32), vec3(0.50, 0.36, 0.16), smoothstep(0.35, 0.8, t) * 0.75);
+        alb *= 0.8 + 0.2 * smoothstep(0.0, 0.3, rr);
         float verd = smoothstep(0.82, 0.9, nz(vP.yz * 14.0 + vAux * 3.0).a * 0.6 + nz(vP.yz * 1.5).b * 0.5) * 0.6;
         rough = 0.22 + 0.2 * t;
         metal = 1.0 - verd;
@@ -1995,7 +2002,7 @@ void main() {
         float on = uNight;
         float flick = 1.0;
         if (m == 7 && k == 4) on = 0.0;                               /* one has gone out */
-        if (m == 13) on = max(uNight, 0.5);
+        if (m == 13) on = mix(0.5, 0.15, uNight);
         if (m == 7 && k == 6) flick = 0.55 + 0.45 * smoothstep(0.2, 0.6, nz(vec2(uTime * 0.7, 0.3)).r);
         flick *= 0.92 + 0.08 * nz(vec2(uTime * 2.3 + vAux, 0.7)).g;
         alb = vec3(0.05, 0.05, 0.05);
@@ -3611,6 +3618,12 @@ static void render(GLuint target, double t, double wt) {
     }
     camera_setup((float)t);
     shadow_setup();
+    /* the eye opens up inside the gear room */
+    {
+        float kx = smooth01(5.5f, 2.8f, F.cam.x), kz = smooth01(3.4f, 2.6f, fabsf(F.cam.z)), ky = smooth01(7.5f, 9.0f, F.cam.y) * smooth01(22, 20, F.cam.y);
+        float in = (F.cam.x > -3.2f ? kx : 0) * kz * ky;
+        F.exposure *= 1 + 1.4f * in * (1 - F.night);
+    }
     if (frame_no == 0 && getenv("CLOCKTOWER_DEBUG"))
         fprintf(stderr, "sun alt %.1f az %.0f, moon alt %.1f lit %.2f, tide %.2f m, exposure %.2f, key %.2f %.2f %.2f, zen %.3f %.3f %.3f hor %.3f %.3f %.3f, %s\n",
                 sky.sun_alt, atan2(sky.sun.x, -sky.sun.z) / D2R, sky.moon_alt, sky.illum, F.tide, F.exposure, F.key_col.x, F.key_col.y,
