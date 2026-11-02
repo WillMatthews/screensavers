@@ -494,7 +494,8 @@ static void advance(double t, double wt) {
 }
 
 /* ---- drawing ---- */
-static GLuint p_obj, p_ter, p_tree, p_sky, p_down, p_up, p_post, p_shadow, p_tree_pre, p_ter_pre, p_wire;
+static GLuint p_obj, p_ter, p_tree, p_sky, p_down, p_up, p_post, p_shadow, p_tree_pre, p_ter_pre, p_wire, p_rain;
+static float cam_vel[3];
 static GLuint vao_full;
 
 /* the canvas (see setup_view), and this output's slice of it */
@@ -609,6 +610,7 @@ static void set_common(GLuint p) {
     glUniform4fv(UL(p, "uCarD"), 12, &car_d[0][0]);
     glUniform1i(UL(p, "uNCar"), ncar_u);
     glUniform4fv(UL(p, "uCarBox"), 1, car_box);
+    glUniform2f(UL(p, "uWeather"), sky.weather == 1 ? 1.0f : 0.0f, sky.weather == 2 ? 1.0f : 0.0f);
     glUniform1i(UL(p, "uShadow"), 4);
     glUniformMatrix4fv(UL(p, "uShadowM"), 1, GL_FALSE, shadowM.m);
     glUniformMatrix4fv(UL(p, "uVP"), 1, GL_FALSE, VP.m);
@@ -806,7 +808,13 @@ static void prof_collect(void) {
 }
 static void render(GLuint target) {
     t_now = sim_t;
-    director_camera(sim_t);
+    {
+        /* the camera's velocity, for the rain's streaks */
+        director_camera(sim_t - 1.0 / 60);
+        double p0[3] = {cam.p[0], cam.p[1], cam.p[2]};
+        director_camera(sim_t);
+        for (int k = 0; k < 3; k++) cam_vel[k] = (float)((cam.p[k] - p0[k]) * 60);
+    }
     setup_view();
     setup_matrices();
     frustum_from(&VP);
@@ -964,6 +972,26 @@ static void render(GLuint target) {
     glDepthMask(GL_TRUE);
     glDepthFunc(GL_LESS);
 
+    /* rain or snow, if it's that kind of night */
+    if (sky.weather == 1 || sky.weather == 2) {
+        int snow = sky.weather == 2;
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        set_common(p_rain);
+        float box = snow ? 24.0f : 30.0f;
+        glUniform3f(UL(p_rain, "uCamW"), (float)fmod(cam.p[0], (double)box), (float)fmod(cam.p[1], (double)box), (float)fmod(cam.p[2], (double)box));
+        glUniform3fv(UL(p_rain, "uCamV"), 1, cam_vel);
+        glUniform1f(UL(p_rain, "uSnowing"), (float)snow);
+        glUniform1f(UL(p_rain, "uShutter"), snow ? 0.012f : 0.02f);
+        glUniform1f(UL(p_rain, "uTime"), (float)fmod(t_now, 600.0));
+        glBindVertexArray(vao_full);
+        if (snow) glDrawArrays(GL_LINES, 0, 2 * 9000);
+        else glDrawArrays(GL_LINES, 0, 2 * 14000);
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
+    }
+
     prof_mark(PR_RESOLVE);
     glDisable(GL_DEPTH_TEST);
 
@@ -1038,6 +1066,11 @@ static void gl_init(void) {
     p_tree = mk_prog("tree", VS_TREE, FSRC(FS_TREE, ""));
     p_tree_pre = mk_prog("tree_pre", VS_TREE, FSRC(FS_NONE, ""));
     p_wire = mk_prog("wire", VS_OBJ, FSRC(FS_WIRE, ""));
+    {
+        static char vs[1 << 15];
+        snprintf(vs, sizeof vs, "%s%s%s", HDR, GL_COMMON, VS_RAIN + strlen(HDR));
+        p_rain = mk_prog("rain", vs, FSRC(FS_RAIN, ""));
+    }
     p_ter_pre = mk_prog("ter_pre", VS_TER, FSRC(FS_NONE, ""));
     p_sky = mk_prog("sky", VS_FULL, FSRC(FS_SKY, ""));
     p_down = mk_prog("down", VS_FULL, FSRC(FS_DOWN, ""));

@@ -19,6 +19,7 @@ static const char *GL_COMMON = GLSL(
     uniform vec4 uCarD[12];      /* forward xz, lit fraction, kind */
     uniform int uNCar;
     uniform vec4 uCarBox;        /* a sphere round all the carriages: centre, radius */
+    uniform vec2 uWeather;       /* how wet, how snowy (0..1) */
     uniform sampler2D uShadow;
     uniform mat4 uShadowM;
 
@@ -33,6 +34,20 @@ static const char *GL_COMMON = GLSL(
         vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
         return mix(mix(mix(hash13(i), hash13(i + vec3(1, 0, 0)), f.x), mix(hash13(i + vec3(0, 1, 0)), hash13(i + vec3(1, 1, 0)), f.x), f.y),
                    mix(mix(hash13(i + vec3(0, 0, 1)), hash13(i + vec3(1, 0, 1)), f.x), mix(hash13(i + vec3(0, 1, 1)), hash13(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+    }
+
+    /* the weather on a surface: wet darkens and polishes, snow lies on what faces up */
+    void weather(inout vec3 alb, inout float rough, vec3 N, vec3 wp) {
+        if (uWeather.x > 0.0) {
+            float puddle = smoothstep(0.55, 0.7, vnoise(wp.xz * 0.35)) * smoothstep(0.85, 0.97, N.y);
+            alb *= 1.0 - 0.45 * uWeather.x;
+            rough = mix(rough, 0.12, uWeather.x * (0.45 + 0.55 * puddle));
+        }
+        if (uWeather.y > 0.0) {
+            float cover = smoothstep(0.35, 0.75, N.y + 0.25 * (vnoise(wp.xz * 1.7) - 0.5)) * uWeather.y;
+            alb = mix(alb, vec3(0.62, 0.64, 0.68), cover);
+            rough = mix(rough, 0.7, cover);
+        }
     }
 
     float moonShadow(vec3 P, vec3 N) {
@@ -251,6 +266,7 @@ static const char *FS_OBJ = GLSL(
             alb *= 0.85 + 0.25 * g;
             rough = clamp(rough + 0.15 * (g - 0.5), 0.05, 1.0);
         }
+        if (kind != 2 && kind != 4) weather(alb, rough, N, wp);
         float sh = moonShadow(vP, N);
         vec3 col = lightAll(vP, N, alb, rough, metal, sh) + E;
         o = vec4(fogApply(col, vP), cover);
@@ -312,6 +328,7 @@ static const char *FS_TER = GLSL(
             rough = mix(rough, 0.04, wet);
             N = normalize(mix(N, vec3(0.0, 1.0, 0.0), wet) + wet * 0.03 * vec3(vnoise(w2 * 1.3 + uTime * 0.4) - 0.5, 0.0, vnoise(w2.yx * 1.3 - uTime * 0.3) - 0.5));
         }
+        weather(alb, rough, N, vW);
         float sh = dot(P, P) < 90.0 * 90.0 ? moonShadow(P, N) : 1.0;
         vec3 col = lightAll(P, N, alb, rough, wet, sh);
         o = vec4(fogApply(col, P), 1.0);
@@ -355,6 +372,8 @@ static const char *FS_TREE = GLSL(
         alb *= 0.55 + 0.9 * n * (0.7 + 0.6 * vTint);
         alb *= 0.5 + 0.5 * clamp(vL.y * 1.4, 0.0, 1.0);
         if (length(vL.xz) < 0.045 && vL.y < 0.75) alb = vec3(0.03, 0.025, 0.02);
+        float rough = 0.8;
+        weather(alb, rough, N, vP + uWOff);
         float sh = moonShadow(vP, N);
         vec3 col = lightAll(vP, N, alb, 0.8, 0.0, sh);
         o = vec4(fogApply(col, vP), 1.0);
@@ -645,6 +664,52 @@ static const char *FS_WIRE = GLSL(
         vec3 V = vP / d;
         vec3 c = vec3(0.004) + uMoonCol * 0.08 * pow(max(dot(-V, uMoonDir), 0.0), 4.0);
         o = vec4(fogApply(c, vP), a);
+    });
+/* rain and snow: a box of drops round the camera, wrapping as it moves;
+ * each drawn as the streak it makes over the shutter, seen from the moving
+ * camera; lit by the lamps they pass */
+static const char *VS_RAIN = HDR GLSL(
+    uniform mat4 uVP;
+    uniform vec3 uCamW;          /* the camera's world position, mod the box */
+    uniform vec3 uCamV;          /* its velocity, m/s */
+    uniform float uSnowing, uShutter;
+    out float vA;
+    out vec3 vC;
+    out vec3 vP;
+    void main() {
+        int id = gl_VertexID / 2, end = gl_VertexID % 2;
+        float h = float(id);
+        vec3 s = vec3(hash12(vec2(h, 1.3)), hash12(vec2(h, 7.1)), hash12(vec2(h, 3.7)));
+        float box = uSnowing > 0.5 ? 24.0 : 30.0;
+        vec3 vel = uSnowing > 0.5 ? vec3(0.6 + 0.5 * sin(uTime * 0.7 + h), -1.1 - 0.4 * s.x, 0.3 * cos(uTime * 0.9 + h * 1.7)) : vec3(1.5, -9.0 - 2.0 * s.x, 0.4);
+        vec3 w = s * box + vel * uTime;
+        /* camera-relative, wrapped into the box round the camera */
+        vec3 p = mod(w - uCamW + box * 0.5, box) - box * 0.5;
+        vec3 streak = (vel - uCamV) * uShutter;
+        if (uSnowing > 0.5) streak = normalize(streak + vec3(0.0, 1e-3, 0.0)) * max(length(streak), 0.025);
+        if (end == 1) p -= streak;
+        vP = p;
+        float d = length(p);
+        vA = smoothstep(box * 0.5, box * 0.3, d) * smoothstep(0.3, 1.0, d);
+        /* the lamps nearby light it */
+        vec3 L = uSkyCol * 3.0 + uMoonCol * 0.15;
+        for (int i = 0; i < 16; i++) {
+            if (i >= uNPL) break;
+            vec3 dl = uPL[i].xyz - p;
+            L += uPLC[i].rgb * 0.6 / (1.0 + dot(dl, dl) / (uPL[i].w * uPL[i].w * 4.0));
+        }
+        vC = L;
+        gl_Position = uVP * vec4(p, 1.0);
+    });
+static const char *FS_RAIN = GLSL(
+    in float vA;
+    in vec3 vC;
+    in vec3 vP;
+    uniform float uSnowing;
+    out vec4 o;
+    void main() {
+        float a = vA * (uSnowing > 0.5 ? 0.85 : 0.35);
+        o = vec4(fogApply(vC * (uSnowing > 0.5 ? 1.6 : 0.8), vP), a);
     });
 static const char *FS_NONE = GLSL(
     out vec4 o;

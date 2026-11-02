@@ -90,6 +90,20 @@ static void shot_place(int n, int var, double v) {
 
 static void director_camera(double t);
 static double cam_at[3];
+/* does the view from a to b pass through a telegraph pole? */
+static int pole_blocked(const double *a, const double *b) {
+    double d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    double L = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    for (double s = 0.5; s < L - 4; s += 0.5) {
+        double p[3] = {a[0] + d[0] * s / L, a[1] + d[1] * s / L, a[2] + d[2] * s / L};
+        double z = floor(p[2] / 50 + 0.5) * 50;
+        double q[3];
+        line_pt(z, pole_side * pole_off, 0, q);
+        double dx = p[0] - q[0], dz = p[2] - q[2];
+        if (dx * dx + dz * dz < 0.6 * 0.6 && p[1] < q[1] + 8.5) return 1;
+    }
+    return 0;
+}
 /* can the shot see the train at its start, middle and end (were she to keep her speed)? */
 static int shot_ok(void) {
     double z0 = tr.z, len = shot.t1 - shot.t0;
@@ -102,7 +116,7 @@ static int shot_ok(void) {
         shot_target(shot.t0 + u * len, shot.look);
         shot.look_init = 1;
         director_camera(shot.t0 + u * len);
-        if (sight_blocked(cam.p, cam_at)) ok = 0;
+        if (sight_blocked(cam.p, cam_at) || pole_blocked(cam.p, cam_at)) ok = 0;
     }
     tr.z = z0;
     cam = save;
