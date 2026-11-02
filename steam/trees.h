@@ -11,7 +11,8 @@
  * moon lights it as one soft mass with a broken edge. */
 
 #define NTREEKIND 5
-static int tree_first[NTREEKIND], tree_count[NTREEKIND];
+static int tree_first[2][NTREEKIND], tree_count[2][NTREEKIND];
+static int tree_sub = 3;   /* the lumps' subdivision, by detail */
 static GMesh g_tree;
 static GLuint vao_tree;
 
@@ -26,7 +27,7 @@ static void blob(V3 c, V3 rad, V3 cc, float bend, int salt) {
     static const int f[8][3] = {{0, 2, 4}, {4, 2, 1}, {1, 2, 5}, {5, 2, 0}, {0, 4, 3}, {4, 1, 3}, {1, 5, 3}, {5, 0, 3}};
     for (int k = 0; k < 8; k++) {
         V3 A = oct[f[k][0]], B = oct[f[k][1]], C = oct[f[k][2]];
-        int n = 4;
+        int n = tree_sub;
         for (int i = 0; i < n; i++)
             for (int j = 0; j < n - i; j++) {
                 /* barycentric sub-triangles */
@@ -79,15 +80,18 @@ static void skirt(float ytop, float ybot, float r, int n, int salt) {
 static void trees_init(void) {
     static Mesh m;
     mb_begin(&m);
+    for (int lod = 0; lod < 2; lod++)
     for (int k = 0; k < NTREEKIND; k++) {
-        tree_first[k] = m.n / VF;
+        tree_sub = lod ? 1 : 3;
+        int sk = lod ? 6 : 11;
+        tree_first[lod][k] = m.n / VF;
         mb->mat = (float)k;
         switch (k) {
         case 0:   /* spruce */
             trunk(0.025f, 0.01f, 0.95f, 6);
-            for (int t = 0; t < 7; t++) {
+            for (int t = 0; t < 7; t += lod ? 2 : 1) {
                 float y = 0.16f + t * 0.12f;
-                skirt(y + 0.16f, y, 0.27f * (1 - t / 7.5f) + 0.03f, 11, t + 1);
+                skirt(y + 0.16f, y, 0.27f * (1 - t / 7.5f) + 0.03f, sk, t + 1);
             }
             break;
         case 1:   /* pine: bare trunk, a high flat crown */
@@ -117,7 +121,7 @@ static void trees_init(void) {
                 blob(v3(0.15f * cosf(a), 0.32f + 0.08f * (l & 1), 0.15f * sinf(a)), v3(0.24f, 0.2f, 0.24f), v3(0, 0.3f, 0), 0.6f, 40 + l);
             }
         }
-        tree_count[k] = m.n / VF - tree_first[k];
+        tree_count[lod][k] = m.n / VF - tree_first[lod][k];
     }
     gm_upload(&g_tree, &m);
     glGenVertexArrays(1, &vao_tree);
@@ -133,11 +137,20 @@ static void trees_init(void) {
 }
 
 static int tile_visible(const Tile *t);
+static int trees_near_only;    /* the shadow pass: only round its focus */
+static float trees_focus[3];
 static void draw_trees(GLuint p) {
     glBindVertexArray(vao_tree);
     for (int i = 0; i < ndraw; i++) {
         Tile *t = drawlist[i];
-        if (!t->ntree || !tile_visible(t)) continue;
+        if (!t->ntree) continue;
+        if (trees_near_only) {
+            double size = TROOT / (1 << t->level);
+            double dx = fmax(fabs(cam.p[0] + trees_focus[0] - (t->ox + size / 2)) - size / 2, 0);
+            double dz = fmax(fabs(cam.p[2] + trees_focus[2] - (t->oz + size / 2)) - size / 2, 0);
+            if (dx * dx + dz * dz > 70.0 * 70.0) continue;
+        } else if (!tile_visible(t)) continue;
+        int lod = t->level >= 5 ? 0 : 1;
         glUniform3f(UL(p, "uTileO"), (float)(t->ox - cam.p[0]), (float)(-cam.p[1]), (float)(t->oz - cam.p[2]));
         glBindBuffer(GL_ARRAY_BUFFER, t->tree_vbo);
         for (int k = 0; k < NTREEKIND; k++) {
@@ -145,7 +158,7 @@ static void draw_trees(GLuint p) {
             size_t off = sizeof(float) * 8 * (size_t)t->toff[k];
             glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)off);
             glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)(off + 4 * sizeof(float)));
-            glDrawArraysInstanced(GL_TRIANGLES, tree_first[k], tree_count[k], t->tcount[k]);
+            glDrawArraysInstanced(GL_TRIANGLES, tree_first[lod][k], tree_count[lod][k], t->tcount[k]);
         }
     }
 }

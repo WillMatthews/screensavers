@@ -72,6 +72,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 #include "proto-layer-shell.h"
 
 static int W = 1280, H = 720;
@@ -568,7 +569,23 @@ static void add_light(const double *wp, float rad, float r, float g, float b) {
     npl++;
 }
 
-static float car_u[12][4], car_d[12][4];
+static float car_u[12][4], car_d[12][4], car_box[4];
+/* the point lights that reach a sphere, into the uniforms (per draw) */
+static float pl_sel[MAXPL][4], plc_sel[MAXPL][4];
+static void lights_for(GLuint p, float x, float y, float z, float r) {
+    int n = 0;
+    for (int i = 0; i < npl; i++) {
+        float dx = pl[i][0] - x, dy = pl[i][1] - y, dz = pl[i][2] - z;
+        float reach = pl[i][3] * 8 + r;
+        if (dx * dx + dy * dy + dz * dz > reach * reach) continue;
+        memcpy(pl_sel[n], pl[i], sizeof pl[i]);
+        memcpy(plc_sel[n], plc[i], sizeof plc[i]);
+        n++;
+    }
+    glUniform4fv(UL(p, "uPL"), MAXPL, &pl_sel[0][0]);
+    glUniform4fv(UL(p, "uPLC"), MAXPL, &plc_sel[0][0]);
+    glUniform1i(UL(p, "uNPL"), n);
+}
 static int ncar_u;
 static M4 shadowM;
 static float fog_col[3], fog_den, mist_y, moon_col[3], sky_col[3], gnd_col[3];
@@ -591,6 +608,7 @@ static void set_common(GLuint p) {
     glUniform4fv(UL(p, "uCar"), 12, &car_u[0][0]);
     glUniform4fv(UL(p, "uCarD"), 12, &car_d[0][0]);
     glUniform1i(UL(p, "uNCar"), ncar_u);
+    glUniform4fv(UL(p, "uCarBox"), 1, car_box);
     glUniform1i(UL(p, "uShadow"), 4);
     glUniformMatrix4fv(UL(p, "uShadowM"), 1, GL_FALSE, shadowM.m);
     glUniformMatrix4fv(UL(p, "uVP"), 1, GL_FALSE, VP.m);
@@ -761,10 +779,13 @@ static void render_shadow(void) {
     draw_train(p_shadow, 0);
     draw_train(p_shadow, 1);
     lineside_draw(p_shadow, 1);
-    glUseProgram(p_tree);
-    glUniformMatrix4fv(UL(p_tree, "uVP"), 1, GL_FALSE, shadowM.m);
-    glUniform1f(UL(p_tree, "uTime"), (float)fmod(t_now, 1000.0));
-    draw_trees(p_tree);
+    glUseProgram(p_tree_pre);
+    glUniformMatrix4fv(UL(p_tree_pre, "uVP"), 1, GL_FALSE, shadowM.m);
+    glUniform1f(UL(p_tree_pre, "uTime"), (float)fmod(t_now, 1000.0));
+    trees_near_only = 1;
+    trees_focus[0] = c.x; trees_focus[1] = c.y; trees_focus[2] = c.z;
+    draw_trees(p_tree_pre);
+    trees_near_only = 0;
     cull_on = 1;
 }
 
@@ -791,7 +812,7 @@ static void render(GLuint target) {
     frustum_from(&VP);
     int sw = (int)(W * render_scale + 0.5f), sh = (int)(H * render_scale + 0.5f);
     targets(sw, sh);
-    tiles_update(cam.p[0], cam.p[2], 9000, opt_shot || frame_no < 2 ? 100000 : 3);
+    tiles_update(cam.p[0], cam.p[2], 9000, opt_shot || frame_no < 2);
     lineside_update();
     frame_no++;
     if (tr.ncoach != tr.ncoach_want && director_offscreen_tail()) tr.ncoach = tr.ncoach_want;
@@ -823,6 +844,12 @@ static void render(GLuint target) {
     }
     lineside_lights();
     ncar_u = 0;
+    {
+        Frame fa = veh_frame(2), fb = veh_frame(1 + tr.ncoach);
+        car_box[0] = (float)((fa.o[0] + fb.o[0]) / 2 - cam.p[0]); car_box[1] = (float)((fa.o[1] + fb.o[1]) / 2 - cam.p[1]);
+        car_box[2] = (float)((fa.o[2] + fb.o[2]) / 2 - cam.p[2]);
+        car_box[3] = (float)(fabs(fa.o[2] - fb.o[2]) / 2 + COACH_L / 2 + 20);
+    }
     for (int i = 2; i < 2 + tr.ncoach && ncar_u < 12; i++) {
         Frame f = veh_frame(i);
         car_u[ncar_u][0] = (float)(f.o[0] - cam.p[0]); car_u[ncar_u][1] = (float)(f.o[1] - cam.p[1] + 2.5);
@@ -911,6 +938,11 @@ static void render(GLuint target) {
     for (int i = 0; i < ndraw; i++) {
         Tile *t = drawlist[i];
         if (!tile_visible(t)) continue;
+        {
+            double size = TROOT / (1 << t->level);
+            lights_for(p_ter, (float)(t->ox + size / 2 - cam.p[0]), (float)((t->hmin + t->hmax) / 2 - cam.p[1]), (float)(t->oz + size / 2 - cam.p[2]),
+                       (float)(size * 0.71 + (t->hmax - t->hmin) / 2));
+        }
         glUniform3f(UL(p_ter, "uTileO"), (float)(t->ox - cam.p[0]), (float)(-cam.p[1]), (float)(t->oz - cam.p[2]));
         glUniform3f(UL(p_ter, "uTileW"), (float)fmod(t->ox, 4096.0), 0, (float)fmod(t->oz, 4096.0));
         gm_draw(&t->mesh);
@@ -1119,6 +1151,7 @@ int main(int argc, char **argv) {
     locked_at = lock_start();
     if (!locked_at) locked_at = (time_t)t_wall0;
     sky_init(t_wall0);
+    if (!opt_shot) tiles_start_worker();
     sim_init();
 
     Display *dpy = NULL;

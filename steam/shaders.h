@@ -18,6 +18,7 @@ static const char *GL_COMMON = GLSL(
     uniform vec4 uCar[12];       /* the carriages: centre xyz, half length */
     uniform vec4 uCarD[12];      /* forward xz, lit fraction, kind */
     uniform int uNCar;
+    uniform vec4 uCarBox;        /* a sphere round all the carriages: centre, radius */
     uniform sampler2D uShadow;
     uniform mat4 uShadowM;
 
@@ -49,6 +50,8 @@ static const char *GL_COMMON = GLSL(
     /* the lit windows of the carriages, thrown on whatever is beside them */
     vec3 trainGlow(vec3 P, vec3 N) {
         vec3 acc = vec3(0.0);
+        vec3 dc = P - uCarBox.xyz;
+        if (dot(dc, dc) > uCarBox.w * uCarBox.w) return acc;
         for (int i = 0; i < 12; i++) {
             if (i >= uNCar) break;
             vec4 C = uCar[i], D = uCarD[i];
@@ -282,7 +285,7 @@ static const char *FS_TER = GLSL(
         float ty = uTrack.w + uTrack2.y * dz;
         float d = abs(P.x - tx);
         vec2 w2 = vW.xz;
-        float n = fbm(w2 * 0.05), n2 = vnoise(w2 * 0.6), n3 = vnoise(w2 * 3.0);
+        float n = vnoise(w2 * 0.05) * 0.6 + vnoise(w2 * 0.13) * 0.4, n2 = vnoise(w2 * 0.6), n3 = vnoise(w2 * 3.0);
         /* fields: pasture, plough and stubble in patches, darker in the hollows */
         float field = hash12(floor(w2 / vec2(97.0, 131.0) + vec2(0.6 * sin(vW.z / 140.0), 0.6 * sin(vW.x / 170.0))));
         vec3 grass = mix(vec3(0.075, 0.095, 0.05), vec3(0.11, 0.12, 0.07), n);

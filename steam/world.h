@@ -194,11 +194,15 @@ static int sight_blocked(const double *a, const double *b) {
     return 0;
 }
 
-/* ---- terrain tiles: a quadtree of 32 x 32 cell patches round the camera ---- */
+/* ---- terrain tiles: a quadtree of 32 x 32 cell patches round the camera ----
+ * Built by a worker thread (a tile and its trees take a few milliseconds);
+ * while a finer tile is on its way the coarser one stands in. */
 #define TCELLS 32
+#define TN (TCELLS + 1)
 #define TROOT 4096.0
 #define TLEAF 128.0
 #define MAXTILE 400
+#define MAXTREE 4096
 typedef struct {
     int level; long ix, iz;     /* tile size TROOT / 2^level; index in that grid */
     double ox, oz;              /* world origin (corner) */
@@ -211,42 +215,52 @@ typedef struct {
 static Tile tiles[MAXTILE];
 static unsigned tile_clock;
 
-static float tbuf_h[(TCELLS + 3) * (TCELLS + 3)];
-static void tile_build(Tile *t) {
-    double size = TROOT / (1 << t->level), cs = size / TCELLS;
-    int N = TCELLS + 1;
+/* what a tile is made of, on the CPU */
+typedef struct {
+    float h[(TN + 2) * (TN + 2)];
+    float v[(TN * TN + 4 * TN) * VF];
+    unsigned short idx[TCELLS * TCELLS * 6 + 4 * TCELLS * 6];
+    int nv, ni;
+    float trees[8 * MAXTREE];
+    int ntree, tcount[5], toff[5];
+    float hmin, hmax;
+} TileData;
+
+static void tile_compute(int level, long ix, long iz, TileData *d) {
+    double size = TROOT / (1 << level), cs = size / TCELLS;
+    double ox = ix * size, oz = iz * size;
+    int N = TN;
+#define TH(i, j) d->h[((j) + 1) * (N + 2) + (i) + 1]
     /* heights with a one-cell border for the normals */
     for (int j = -1; j <= N; j++)
-        for (int i = -1; i <= N; i++)
-            tbuf_h[(j + 1) * (N + 2) + (i + 1)] = (float)terrain_h(t->ox + i * cs, t->oz + j * cs);
-    static Mesh m;
-    static unsigned short idx[TCELLS * TCELLS * 6 + 4 * TCELLS * 6];
-    mb_begin(&m);
-    m.mat = 0;
+        for (int i = -1; i <= N; i++) TH(i, j) = (float)terrain_h(ox + i * cs, oz + j * cs);
     float skirt = (float)(cs * 1.5 + 2);
-    t->hmin = 1e9f; t->hmax = -1e9f;
-#define TH(i, j) tbuf_h[((j) + 1) * (N + 2) + (i) + 1]
+    d->hmin = 1e9f; d->hmax = -1e9f;
+    d->nv = 0;
     /* the grid's vertices, then the skirt's (each edge vertex again, lowered) */
     for (int j = 0; j < N; j++)
         for (int i = 0; i < N; i++) {
             float h = TH(i, j);
-            if (h < t->hmin) t->hmin = h;
-            if (h > t->hmax) t->hmax = h;
-            mb_vert(v3((float)(i * cs), h, (float)(j * cs)), vnorm(v3(TH(i - 1, j) - TH(i + 1, j), (float)(2 * cs), TH(i, j - 1) - TH(i, j + 1))), 0, 0);
+            if (h < d->hmin) d->hmin = h;
+            if (h > d->hmax) d->hmax = h;
+            V3 n = vnorm(v3(TH(i - 1, j) - TH(i + 1, j), (float)(2 * cs), TH(i, j - 1) - TH(i, j + 1)));
+            float *o = d->v + d->nv++ * VF;
+            o[0] = (float)(i * cs); o[1] = h; o[2] = (float)(j * cs); o[3] = n.x; o[4] = n.y; o[5] = n.z; o[6] = o[7] = o[8] = 0;
         }
     int sk0 = N * N;
     for (int e = 0; e < 4; e++)
         for (int k = 0; k < N; k++) {
             int i = e == 0 ? k : e == 1 ? TCELLS : e == 2 ? k : 0;
             int j = e == 0 ? 0 : e == 1 ? k : e == 2 ? TCELLS : k;
-            mb_vert(v3((float)(i * cs), TH(i, j) - skirt, (float)(j * cs)), v3(0, 1, 0), 0, 0);
+            float *o = d->v + d->nv++ * VF;
+            o[0] = (float)(i * cs); o[1] = TH(i, j) - skirt; o[2] = (float)(j * cs); o[3] = 0; o[4] = 1; o[5] = 0; o[6] = o[7] = o[8] = 0;
         }
     int ni = 0;
     for (int j = 0; j < TCELLS; j++)
         for (int i = 0; i < TCELLS; i++) {
             unsigned short a0 = (unsigned short)(j * N + i), a1 = (unsigned short)(a0 + 1), a2 = (unsigned short)(a0 + N + 1), a3 = (unsigned short)(a0 + N);
-            idx[ni++] = a0; idx[ni++] = a2; idx[ni++] = a1;
-            idx[ni++] = a0; idx[ni++] = a3; idx[ni++] = a2;
+            d->idx[ni++] = a0; d->idx[ni++] = a2; d->idx[ni++] = a1;
+            d->idx[ni++] = a0; d->idx[ni++] = a3; d->idx[ni++] = a2;
         }
     for (int e = 0; e < 4; e++)
         for (int k = 0; k < TCELLS; k++) {
@@ -254,78 +268,156 @@ static void tile_build(Tile *t) {
             int i1 = e == 0 ? k + 1 : e == 1 ? TCELLS : e == 2 ? k + 1 : 0, j1 = e == 0 ? 0 : e == 1 ? k + 1 : e == 2 ? TCELLS : k + 1;
             unsigned short A = (unsigned short)(j0 * N + i0), B = (unsigned short)(j1 * N + i1);
             unsigned short A2 = (unsigned short)(sk0 + e * N + k), B2 = (unsigned short)(sk0 + e * N + k + 1);
-            idx[ni++] = A; idx[ni++] = B; idx[ni++] = B2;
-            idx[ni++] = A; idx[ni++] = B2; idx[ni++] = A2;
+            d->idx[ni++] = A; d->idx[ni++] = B; d->idx[ni++] = B2;
+            d->idx[ni++] = A; d->idx[ni++] = B2; d->idx[ni++] = A2;
+        }
+    d->ni = ni;
+
+    /* trees: one to a cell of the global grid (so they keep their places as
+     * tiles change detail; coarser tiles keep fewer of them), stood on this
+     * tile's mesh, which at a coarse level isn't quite the true ground */
+    d->ntree = 0;
+    for (int k = 0; k < 5; k++) d->tcount[k] = d->toff[k] = 0;
+    if (level < 3) return;
+    static __thread float tv[8 * MAXTREE];
+    int n = 0;
+    int cells = (int)(size / TREE_G);
+    float keep = level >= 5 ? 1.0f : level == 4 ? 0.4f : 0.12f;
+    long ci0 = (long)floor(ox / TREE_G), cj0 = (long)floor(oz / TREE_G);
+    for (int j = 0; j < cells && n < MAXTREE; j++)
+        for (int i = 0; i < cells && n < MAXTREE; i++) {
+            Tree t0;
+            if (!tree_cell(ci0 + i, cj0 + j, &t0) || t0.r > keep) continue;
+            float fx = (float)((t0.x - ox) / cs), fz = (float)((t0.z - oz) / cs);
+            int gx = (int)fx, gz = (int)fz;
+            if (gx < 0 || gz < 0 || gx >= TCELLS || gz >= TCELLS) continue;
+            fx -= gx; fz -= gz;
+            float h00 = TH(gx, gz), h10 = TH(gx + 1, gz), h01 = TH(gx, gz + 1), h11 = TH(gx + 1, gz + 1);
+            float gy = fx > fz ? h00 + (h10 - h00) * fx + (h11 - h10) * fz : h00 + (h11 - h01) * fx + (h01 - h00) * fz;
+            float *o = tv + n * 8;
+            o[0] = (float)(t0.x - ox); o[1] = gy - 0.3f; o[2] = (float)(t0.z - oz);
+            o[3] = t0.h; o[4] = (float)t0.kind; o[5] = t0.r * 6.28f;
+            o[6] = (float)hrand((int32_t)t0.x, (int32_t)t0.z, 27); o[7] = 0;
+            n++;
         }
 #undef TH
-    gm_upload_indexed(&t->mesh, &m, idx, ni);
-
-    /* trees: one to a cell of a global grid (so they keep their places as
-     * tiles change detail; coarser tiles keep fewer of them) */
-    t->ntree = 0;
-    if (t->level >= 3) {
-        static float tv[8 * 4096];
-        int n = 0;
-        int cells = (int)(size / TREE_G);
-        float keep = t->level >= 5 ? 1.0f : t->level == 4 ? 0.5f : 0.22f;
-        long ci0 = (long)floor(t->ox / TREE_G), cj0 = (long)floor(t->oz / TREE_G);
-        for (int j = 0; j < cells && n < 4096; j++)
-            for (int i = 0; i < cells && n < 4096; i++) {
-                Tree tr0;
-                if (!tree_cell(ci0 + i, cj0 + j, &tr0) || tr0.r > keep) continue;
-                /* stand it on this tile's mesh, which at a coarse level isn't the true ground */
-                float fx = (float)((tr0.x - t->ox) / cs), fz = (float)((tr0.z - t->oz) / cs);
-                int gx = (int)fx, gz = (int)fz;
-                if (gx >= TCELLS) gx = TCELLS - 1;
-                if (gz >= TCELLS) gz = TCELLS - 1;
-                fx -= gx; fz -= gz;
-                float h00 = tbuf_h[(gz + 1) * (N + 2) + gx + 1], h10 = tbuf_h[(gz + 1) * (N + 2) + gx + 2];
-                float h01 = tbuf_h[(gz + 2) * (N + 2) + gx + 1], h11 = tbuf_h[(gz + 2) * (N + 2) + gx + 2];
-                float gy = fx > fz ? h00 + (h10 - h00) * fx + (h11 - h10) * fz : h00 + (h11 - h01) * fx + (h01 - h00) * fz;
-                float *o = tv + n * 8;
-                o[0] = (float)(tr0.x - t->ox); o[1] = gy - 0.3f; o[2] = (float)(tr0.z - t->oz);
-                o[3] = tr0.h; o[4] = (float)tr0.kind; o[5] = tr0.r * 6.28f;
-                o[6] = (float)hrand((int32_t)tr0.x, (int32_t)tr0.z, 27); o[7] = 0;
-                n++;
-            }
-        /* grouped by kind, for one draw a kind */
-        static float sorted[8 * 4096];
-        int m = 0;
-        for (int k = 0; k < 5; k++) {
-            t->toff[k] = m;
-            for (int i = 0; i < n; i++)
-                if ((int)tv[i * 8 + 4] == k) { memcpy(sorted + m * 8, tv + i * 8, sizeof(float) * 8); m++; }
-            t->tcount[k] = m - t->toff[k];
-        }
-        if (!t->tree_vbo) glGenBuffers(1, &t->tree_vbo);
-        glBindBuffer(GL_ARRAY_BUFFER, t->tree_vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 8 * (size_t)(n ? n : 1), sorted, GL_STATIC_DRAW);
-        t->ntree = n;
+    /* grouped by kind, for one draw a kind */
+    int m = 0;
+    for (int k = 0; k < 5; k++) {
+        d->toff[k] = m;
+        for (int i = 0; i < n; i++)
+            if ((int)tv[i * 8 + 4] == k) { memcpy(d->trees + m * 8, tv + i * 8, sizeof(float) * 8); m++; }
+        d->tcount[k] = m - d->toff[k];
     }
+    d->ntree = n;
 }
 
-static Tile *tile_get(int level, long ix, long iz) {
+static Tile *tile_find(int level, long ix, long iz) {
+    for (int i = 0; i < MAXTILE; i++)
+        if (tiles[i].live && tiles[i].level == level && tiles[i].ix == ix && tiles[i].iz == iz) return &tiles[i];
+    return NULL;
+}
+static Tile *tile_upload(int level, long ix, long iz, const TileData *d) {
     Tile *free_t = NULL, *oldest = NULL;
     for (int i = 0; i < MAXTILE; i++) {
         Tile *t = &tiles[i];
-        if (t->live && t->level == level && t->ix == ix && t->iz == iz) { t->used = tile_clock; return t; }
         if (!t->live) { if (!free_t) free_t = t; }
-        else if (!oldest || t->used < oldest->used) oldest = t;
+        else if (t->used != tile_clock && (!oldest || t->used < oldest->used)) oldest = t;
     }
     Tile *t = free_t ? free_t : oldest;
+    if (!t) return NULL;
     t->live = 1; t->level = level; t->ix = ix; t->iz = iz;
     double size = TROOT / (1 << level);
     t->ox = ix * size; t->oz = iz * size;
     t->used = tile_clock;
-    tile_build(t);
+    t->hmin = d->hmin; t->hmax = d->hmax;
+    Mesh m = {(float *)d->v, d->nv * VF, d->nv * VF, m4id(), 0};
+    gm_upload_indexed(&t->mesh, &m, d->idx, d->ni);
+    if (!t->tree_vbo) glGenBuffers(1, &t->tree_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, t->tree_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 8 * (size_t)(d->ntree ? d->ntree : 1), d->trees, GL_STATIC_DRAW);
+    t->ntree = d->ntree;
+    for (int k = 0; k < 5; k++) { t->tcount[k] = d->tcount[k]; t->toff[k] = d->toff[k]; }
     return t;
 }
 
+/* the worker and its queue */
+#define MAXJOB 48
+typedef struct { int level; long ix, iz; int state; unsigned asked; TileData *d; } Job;   /* state: 0 free, 1 queued, 2 working, 3 done */
+static Job jobs[MAXJOB];
+static pthread_mutex_t jmu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t jcv = PTHREAD_COND_INITIALIZER;
+static int tiles_threaded;
+static void *tile_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&jmu);
+        Job *j = NULL;
+        for (;;) {
+            /* the most recently wanted, finest first */
+            for (int i = 0; i < MAXJOB; i++)
+                if (jobs[i].state == 1 && (!j || jobs[i].asked > j->asked || (jobs[i].asked == j->asked && jobs[i].level > j->level))) j = &jobs[i];
+            if (j) break;
+            pthread_cond_wait(&jcv, &jmu);
+        }
+        j->state = 2;
+        int level = j->level;
+        long ix = j->ix, iz = j->iz;
+        TileData *d = j->d;
+        pthread_mutex_unlock(&jmu);
+        tile_compute(level, ix, iz, d);
+        pthread_mutex_lock(&jmu);
+        j->state = 3;
+        pthread_mutex_unlock(&jmu);
+    }
+    return NULL;
+}
+static void tiles_start_worker(void) {
+    for (int i = 0; i < MAXJOB; i++) jobs[i].d = malloc(sizeof(TileData));
+    pthread_t th;
+    if (pthread_create(&th, NULL, tile_worker, NULL) == 0) { pthread_detach(th); tiles_threaded = 1; }
+}
+
+/* the tile, if it's ready; sync: build it now if it isn't */
+static Tile *tile_want(int level, long ix, long iz, int sync) {
+    Tile *t = tile_find(level, ix, iz);
+    if (t) { t->used = tile_clock; return t; }
+    if (sync || !tiles_threaded) {
+        static TileData *d;
+        if (!d) d = malloc(sizeof(TileData));
+        tile_compute(level, ix, iz, d);
+        return tile_upload(level, ix, iz, d);
+    }
+    pthread_mutex_lock(&jmu);
+    Job *j = NULL, *spare = NULL;
+    for (int i = 0; i < MAXJOB; i++) {
+        Job *q = &jobs[i];
+        if (q->state && q->level == level && q->ix == ix && q->iz == iz) { j = q; break; }
+        if (!q->state) { if (!spare || spare->state) spare = q; }
+        else if (q->state == 1 && (!spare || (spare->state == 1 && q->asked < spare->asked))) spare = q;
+    }
+    if (j && j->state == 3) {
+        pthread_mutex_unlock(&jmu);
+        t = tile_upload(level, ix, iz, j->d);
+        pthread_mutex_lock(&jmu);
+        j->state = 0;
+        pthread_mutex_unlock(&jmu);
+        return t;
+    }
+    if (j) j->asked = tile_clock;
+    else if (spare && (spare->state == 0 || spare->asked < tile_clock)) {
+        spare->level = level; spare->ix = ix; spare->iz = iz; spare->asked = tile_clock; spare->state = 1;
+        pthread_cond_signal(&jcv);
+    }
+    pthread_mutex_unlock(&jmu);
+    return NULL;
+}
+
 /* which tiles to draw from the camera at (cx, cz): a tile is split while
- * the camera is within 1.6 of its size of its centre */
+ * the camera is within 1.6 of its size of its centre, once its children are ready */
 #define MAXDRAW 400
 static Tile *drawlist[MAXDRAW];
-static int ndraw, nbuilt, build_budget;
+static int ndraw, tiles_sync;
 static void tiles_visit(int level, long ix, long iz, double cx, double cz, double far) {
     double size = TROOT / (1 << level);
     double mx = (ix + 0.5) * size, mz = (iz + 0.5) * size;
@@ -333,30 +425,21 @@ static void tiles_visit(int level, long ix, long iz, double cx, double cz, doubl
     double d = sqrt(dx * dx + dz * dz);
     if (d > far) return;
     if (size > TLEAF && d < size * 1.6) {
-        /* only split once every child exists or can be made this frame */
         int ready = 1;
-        for (int k = 0; k < 4 && ready; k++) {
-            int l = level + 1;
-            long cx2 = ix * 2 + (k & 1), cz2 = iz * 2 + (k >> 1);
-            int found = 0;
-            for (int i = 0; i < MAXTILE; i++)
-                if (tiles[i].live && tiles[i].level == l && tiles[i].ix == cx2 && tiles[i].iz == cz2) { found = 1; break; }
-            if (!found) ready = 0;
-        }
-        if (ready || nbuilt + 4 <= build_budget) {
+        for (int k = 0; k < 4; k++)
+            if (!tile_want(level + 1, ix * 2 + (k & 1), iz * 2 + (k >> 1), tiles_sync)) ready = 0;
+        if (ready) {
             for (int k = 0; k < 4; k++) tiles_visit(level + 1, ix * 2 + (k & 1), iz * 2 + (k >> 1), cx, cz, far);
             return;
         }
     }
-    int existed = 0;
-    for (int i = 0; i < MAXTILE; i++)
-        if (tiles[i].live && tiles[i].level == level && tiles[i].ix == ix && tiles[i].iz == iz) { existed = 1; break; }
-    if (!existed) nbuilt++;
-    if (ndraw < MAXDRAW) drawlist[ndraw++] = tile_get(level, ix, iz);
+    Tile *t = tile_want(level, ix, iz, tiles_sync || level == 0);
+    if (t && ndraw < MAXDRAW) drawlist[ndraw++] = t;
 }
-static void tiles_update(double cx, double cz, double far, int budget) {
+static void tiles_update(double cx, double cz, double far, int sync) {
     tile_clock++;
-    ndraw = 0; nbuilt = 0; build_budget = budget;
+    ndraw = 0;
+    tiles_sync = sync;
     long r = (long)ceil(far / TROOT) + 1;
     long bx = (long)floor(cx / TROOT), bz = (long)floor(cz / TROOT);
     for (long j = bz - r; j <= bz + r; j++)
