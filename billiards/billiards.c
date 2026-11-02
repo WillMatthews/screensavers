@@ -793,6 +793,26 @@ static void check(void) {
     printf("\n   (the stadium, Sinai and cardioid spread evenly, to the noise; the circle and\n"
            "   ellipse, confined to their caustics, don't; the mushroom's chaotic orbit and the\n"
            "   limaçon's leave the regular islands of phase space empty.)\n");
+
+    printf("\n6. time reversal maps (s, cos θ) to (s, −cos θ), so a chaotic sea is symmetric: the\n"
+           "   share of bounces with cos θ < 0 after n bounces, from a start with cos θ > 0. It\n"
+           "   reaches 1/2 at once in the stadium; in the limaçon partial barriers (cantori) hold\n"
+           "   an orbit in one half for thousands of bounces.\n");
+    printf("   %-9s %9s %9s %9s %9s\n", "n", "1e3", "1e4", "1e5", "1e6");
+    int st[] = {TB_STADIUM, TB_CARDIOID, TB_LIMACON, TB_LEMON};
+    for (unsigned j = 0; j < sizeof st / sizeof st[0]; j++) {
+        Table T;
+        table_build(&T, st[j]);
+        Ball b;
+        ball_on(&b, &T, 0, 0.0003, 1.21);
+        long neg = 0, n = 0;
+        printf("   %-9s", tb_names[st[j]]);
+        for (long lim = 1000; lim <= 1000000; lim *= 10) {
+            for (; n < lim; n++) { ball_bounce(&b, &T); neg += b.pp < 0; }
+            printf(" %9.3f", (double)neg / n);
+        }
+        printf("\n");
+    }
 }
 
 /* ==================================================================== */
