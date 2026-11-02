@@ -1111,7 +1111,7 @@ static void window_build(int wi) {
     mat(MT_IRON, 0.05f, 0.05f, 0.05f);
     for (int k = 1; k < 4; k++) {
         float y = o->y0 + (o->y1 - o->y0) * k / 4;
-        box(v3(0, y, zg), v3(w, 0.014f, 0.02f), 0);
+        box(v3(0, y, zg), v3(w * 0.9f, 0.014f, 0.02f), 0);
     }
     for (int side = -1; side <= 1; side += 2)
         for (int k = 1; k < 3; k++) {
@@ -1120,7 +1120,7 @@ static void window_build(int wi) {
             box(v3(s, (o->y0 + top) / 2, zg), v3(0.006f, (top - o->y0) / 2, 0.006f), 0);
         }
     for (float y = o->y0 + 0.2f; y < o->y1 + w - 0.05f; y += 0.2f) {
-        float hw = y <= o->y1 ? w : sqrtf(fmaxf(w * w - (y - o->y1) * (y - o->y1), 0));
+        float hw = (y <= o->y1 ? w : sqrtf(fmaxf(w * w - (y - o->y1) * (y - o->y1), 0))) * 0.9f;
         box(v3(0, y, zg), v3(hw, 0.006f, 0.006f), 0);
     }
     /* the seat: a cushion and a book left open on it */
@@ -1521,7 +1521,7 @@ static void room_build(void) {
     for (int i = 0; i < NWIN; i++) window_build(i);
     xf = m4_id();
     /* the floor: stone flags */
-    mat(MT_FLOOR, 0.5f, 0.47f, 0.42f);
+    mat(MT_FLOOR, 0.6f, 0.56f, 0.5f);
     for (int k = 0; k < 10; k++) ring(RIN * k / 10, RIN * (k + 1) / 10 + 0.001f, 0, 2 * PI, 0, 1);
     /* a round rug under the desk */
     xf = m4_trans(desk_c.x, 0.006f, desk_c.z + 0.4f);
@@ -1542,9 +1542,6 @@ static void room_build(void) {
     shelf_run(-22.5f * DEG, 19.4f * DEG, 1001 + opt_seed * 7);
     shelf_run(104.6f * DEG, 172 * DEG, 2002 + opt_seed * 7);
     shelf_run(-172 * DEG, -57.5f * DEG, 3003 + opt_seed * 7);
-    /* narrow presses between the windows */
-    shelf_run(39.6f * DEG, 52.4f * DEG, 4004 + opt_seed * 7);
-    shelf_run(71.6f * DEG, 84.4f * DEG, 5005 + opt_seed * 7);
     /* a brass rail along the shelves behind the desk, for the ladder */
     mat(MT_BRASS, 0.7f, 0.5f, 0.24f);
     for (int k = 0; k < 40; k++) {
@@ -1853,7 +1850,7 @@ void main() {
     if (uDebug == 9) { oCol = vec4(vC * max(dot(n, vec3(0.3, 0.8, 0.5)), 0.1), 1.0); return; }
     if (m == 19) {                                         /* the sky */
         vec3 d = normalize(p - uCam);
-        vec3 c = outside(d);
+        vec3 c = outside(d) * 0.55;
         /* old glass: a faint green cast and a little of the room by night */
         c = c * vec3(0.9, 0.95, 0.92) + vec3(0.02, 0.012, 0.006) * uNight * uLampOn;
         oCol = vec4(c, 1.0);
@@ -2106,7 +2103,7 @@ void main() {
     /* ambient occlusion from the voxelised room */
     vec3 aq = (p + s.n * 0.16 + vec3(5.8, 0.0, 5.8)) / vec3(11.6, 10.0, 11.6);
     float occ = texture(uAO, aq).r;
-    float ao = clamp(1.0 / (1.0 + 9.0 * max(occ - 0.03, 0.0)), 0.08, 1.0) * ao_mul;
+    float ao = clamp(1.0 / (1.0 + 7.0 * max(occ - 0.14, 0.0)), 0.1, 1.0) * ao_mul;
 
     vec3 col = vec3(0);
     /* the sun or the moon, through the windows */
@@ -2139,7 +2136,7 @@ void main() {
         vec3 L = l * inversesqrt(d2);
         vec3 wn = normalize(vec3(-uWinC[i].x, 0.0, -uWinC[i].z));
         float cs = max((dot(s.n, L) + 0.25) / 1.25, 0.0), cw = max(dot(wn, -L), 0.0);
-        E += uWinL * uWinC[i].w * cs * cw / (PI * (d2 + uWinC[i].w * 0.3));
+        E += 1.5 * uWinL * uWinC[i].w * cs * cw / (PI * (d2 + uWinC[i].w * 0.3));
     }
     vec3 hemi = mix(uGndAmb, uSkyAmb, s.n.y * 0.5 + 0.5) + uBounce
               + uFireCol * 0.012 + uLampCol * uLampOn * 0.02;
@@ -2169,6 +2166,8 @@ void main() {
     col += s.emis;
     if (uDebug == 1) col = vec3(float(m % 4), float((m / 4) % 4), float(m / 16)) / 3.0 * 0.3 + (any(isnan(col)) ? vec3(10, 0, 10) : vec3(0));
     if (uDebug == 2) col = vec3(ao) * 0.3;
+    if (uDebug == 4) col = E * 0.3;
+    if (uDebug == 5) col = s.alb * 0.3;
     oCol = vec4(col, 1.0);
 }
 );
@@ -2262,10 +2261,10 @@ void main() {
     float vis = (sc.x > 0.0 && sc.x < 1.0 && sc.y > 0.0 && sc.y < 1.0) ? texture(uKeySh, sc) : 0.0;
     if (length(p.xz) > 4.4) vis = 0.0;
     float df = distance(p, uFirePos), dl = distance(p, uLampPos);
-    vCol = uKeyCol * vis * 0.05 + uFireCol * 0.002 / (df * df + 0.3) + uLampCol * 0.004 / (dl * dl + 0.1);
+    vCol = uKeyCol * vis * 0.16 + uFireCol * 0.002 / (df * df + 0.3) + uLampCol * 0.004 / (dl * dl + 0.1);
     float fade = sin(ph * 3.14159);
     gl_Position = uVP * vec4(p, 1.0);
-    float sz = uPx * 0.004 / max(gl_Position.w, 0.05);
+    float sz = uPx * 0.0045 / max(gl_Position.w, 0.05);
     gl_PointSize = clamp(sz, 1.0, 9.0);
     vA = fade * clamp(sz, 0.15, 1.0) * clamp(1.6 / max(sz, 1.0), 0.15, 1.0);
 }
@@ -2399,7 +2398,7 @@ void main() {
     vec2 q = uVig.xy + vUV * uVig.zw;
     q.y = 1.0 - q.y;
     vec2 d = (q - 0.5) * vec2(1.0, 0.9);
-    c *= 1.0 - 0.38 * smoothstep(0.25, 0.85, length(d));
+    c *= 1.0 - 0.3 * smoothstep(0.3, 0.9, length(d));
     c += (h12(gl_FragCoord.xy + fract(uTime) * 91.0) - 0.5) * 0.018;
     oCol = vec4(c, 1.0);
 }
@@ -3311,7 +3310,7 @@ static void sky_light(double wt) {
     lt.bounce.z *= 0.8f;
     float lum = 0.3f * lt.win_l.x + 0.55f * lt.win_l.y + 0.15f * lt.win_l.z;
     lt.exposure = 1.5f / (0.14f + lum);
-    if (lt.exposure > 3.4f) lt.exposure = 3.4f;
+    if (lt.exposure > 2.5f) lt.exposure = 2.5f;
     lt.lamp_on = 1 - smoothf(0.05f, 0.2f, s);
 }
 
