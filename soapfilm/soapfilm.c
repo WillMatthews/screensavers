@@ -1129,8 +1129,8 @@ static int IW, IH;
 static GLuint scene_fbo, scene_col, scene_dep;
 static RT half_rt, dof_rt;
 
-static void scene_targets(void) {
-    float s = opt_scale > 0 ? opt_scale : fminf(1.0f, sqrtf(1.0e6f / ((float)W * H)));
+static void scene_targets(float budget) {
+    float s = opt_scale > 0 ? opt_scale : fminf(1.0f, sqrtf(budget / ((float)W * H)));
     int iw = (int)lroundf(W * s), ih = (int)lroundf(H * s);
     if (iw == IW && ih == IH && scene_fbo) return;
     IW = iw; IH = ih;
@@ -1448,14 +1448,14 @@ static void bub_new(Bub *b, float t, int entering) {
     b->on = 1;
     float u = frand();
     b->r = 0.035f + 0.16f * u * u;
-    float z = frange(-0.3f, 1.6f);
-    if (frand() < 0.18f) z = frange(1.6f, 3.2f);       /* some far off, small in the dark */
+    float z = frange(-0.2f, 1.3f);
+    if (frand() < 0.12f) z = frange(1.6f, 3.2f);       /* some far off, small in the dark */
     b->p[2] = z;
     float v[4];
     vis(z, v);
-    if (entering && frand() < 0.35f) {
+    if (entering && frand() < 0.45f) {
         /* drifting down from above */
-        b->p[0] = v[0] + (v[1] - v[0]) * frange(0.05f, 0.8f);
+        b->p[0] = v[0] + (v[1] - v[0]) * frange(0.05f, 0.95f);
         b->p[1] = v[3] + b->r * 1.2f;
     } else if (entering) {
         /* blown in from the left */
@@ -1580,7 +1580,7 @@ static void bubbles_step(void) {
         if (bub_count() < bub_target())
             for (int i = 0; i < NB; i++)
                 if (!bs.b[i].on) { bub_new(&bs.b[i], t, 1); break; }
-        bs.next_spawn = t + frange(0.8f, 3.5f) * 1.6f / fmaxf(wallA, 0.6f);
+        bs.next_spawn = t + frange(0.5f, 2.2f) * 1.6f / fmaxf(wallA, 0.8f);
     }
     bs.rng = rng;
     bs.steps++;
@@ -2034,9 +2034,7 @@ static void render_foam(const Act *a, int ai, double lt) {
         for (int i = 0; i < fo.n; i++) { fo.c[i].px = fo.c[i].x; fo.c[i].py = fo.c[i].y; fo.c[i].pw = fo.c[i].w; }
     }
     long cap = offline ? want : fo.steps + (want - fo.steps > 12 ? 60 : 2);
-    double tq = now();
     while (fo.steps < want && fo.steps < cap) foam_step(0);
-    if (getenv("SOAP_PROF")) fprintf(stderr, "step %.2f ms\n", (now() - tq) * 1e3);
     foam_upload((float)lt, clampf((float)(lt * FOAMHZ - fo.steps) + 1, 0, 1));
     if (getenv("SOAP_DEBUG")) fprintf(stderr, "foam: %d cells, bin overflow %d\n", fo.n, fbin_over);
     fbin_over = 0;
@@ -2177,13 +2175,19 @@ static void caption_draw(GLuint target) {
         else if (a < 3600) snprintf(away, sizeof away, "away %ld min", a / 60);
         else snprintf(away, sizeof away, "away %ld h %02ld min", a / 3600, a / 60 % 60);
     }
-    float x = roundf(56 * s), y = roundf(H - 52 * s);
-    static const float ct[4] = {0.93f, 0.89f, 0.82f, 0.78f}, ca[4] = {0.86f, 0.82f, 0.76f, 0.55f};
-    if (away[0]) {
-        text(&f_away, away, x + 1, y, 0.6f * s, ca);
-        y -= roundf(36 * s);
+    /* inside the film's wire frame, clear of its corner, with a soft shadow */
+    float x = roundf(0.034f * H + 54 * s), y = roundf(H - 0.034f * H - 60 * s);
+    static const float ct[4] = {0.95f, 0.92f, 0.86f, 0.86f}, ca[4] = {0.9f, 0.86f, 0.8f, 0.68f};
+    static const float sh[4] = {0.0f, 0.0f, 0.0f, 0.42f};
+    float o = fmaxf(1, roundf(1.5f * s));
+    for (int pass = 0; pass < 2; pass++) {
+        float yy = y, d = pass ? 0 : o;
+        if (away[0]) {
+            text(&f_away, away, x + 1 + d, yy + d, 0.6f * s, pass ? ca : sh);
+            yy -= roundf(36 * s);
+        }
+        text(&f_time, hm, x + d, yy + d, 2.0f * s, pass ? ct : sh);
     }
-    text(&f_time, hm, x, y, 2.0f * s, ct);
     (void)text_w;
     glBindFramebuffer(GL_FRAMEBUFFER, target);
     glViewport(0, 0, W, H);
@@ -2404,10 +2408,11 @@ static void tq_mark(int i) {
 static void render(double t, GLuint target) {
     tq_mark(0);
     view_update();
-    scene_targets();
     double lt;
     int ai = act_at(t, &lt);
     const Act *a = act_get(ai);
+    /* about a megapixel inside; the foam, mostly out of focus, less */
+    scene_targets(a->scene == S_FOAM ? 0.7e6f : 1.0e6f);
     cur_time = (float)fmod(t, 4000.0);
     cur_fade = (float)(smooth01((float)(lt / ACT_FADE)) * smooth01((float)((a->dur - lt) / ACT_FADE)));
     mist_n = 0;
@@ -2660,6 +2665,7 @@ int main(int argc, char **argv) {
     if (!opt_seed) opt_seed = 1;
     span_setup();
     locked_at = lock_start();
+    if (getenv("SOAP_LOCKED_AGO")) locked_at = time(NULL) - atol(getenv("SOAP_LOCKED_AGO"));   /* for testing the caption */
     offline = opt_shot || opt_bench > 0;
 
     Display *dpy = NULL;
