@@ -1313,20 +1313,21 @@ static void desk_build(void) {
     mat(MT_LAMPGLASS, 0.9f, 0.85f, 0.7f);
     cur_var = 0;                               /* the chimney */
     {
-        float r[] = {0.022f, 0.032f, 0.03f, 0.016f, 0.016f}, y[] = {0.47f, 0.5f, 0.56f, 0.62f, 0.7f};
+        float r[] = {0.022f, 0.03f, 0.028f, 0.016f, 0.016f}, y[] = {0.47f, 0.5f, 0.55f, 0.6f, 0.7f};
         lathe(r, y, 5, 16, 0, 2 * PI);
     }
     cur_var = 1;                               /* the shade, an open bell of cream glass */
     {
-        float r[] = {0.05f, 0.085f, 0.13f, 0.155f}, y[] = {0.66f, 0.63f, 0.57f, 0.52f};
-        lathe(r, y, 4, 24, 0, 2 * PI);
+        float r[] = {0.045f, 0.075f, 0.105f, 0.118f, 0.112f, 0.09f, 0.06f, 0.05f},
+              y[] = {0.47f, 0.49f, 0.53f, 0.58f, 0.63f, 0.68f, 0.71f, 0.725f};
+        lathe(r, y, 8, 28, 0, 2 * PI);
     }
     mat(MT_BRASS, 0.7f, 0.5f, 0.24f);
     {
-        float r[] = {0.156f, 0.16f, 0.16f, 0.156f}, y[] = {0.515f, 0.515f, 0.53f, 0.53f};
+        float r[] = {0.044f, 0.05f, 0.05f, 0.044f}, y[] = {0.462f, 0.462f, 0.475f, 0.475f};
         lathe(r, y, 4, 24, 0, 2 * PI);
     }
-    lamp_pos = m4_pt(&D, v3(lp.x, lp.y + 0.55f, lp.z));
+    lamp_pos = m4_pt(&D, v3(lp.x, lp.y + 0.54f, lp.z));
 
     /* tea, going cold */
     V3 cp = v3(0.6f, top, 0.16f);
@@ -1612,6 +1613,7 @@ layout(location = 4) in vec2 aM;
 uniform mat4 uVP;
 out vec3 vP; out vec3 vN; out vec2 vUV; out vec3 vC;
 flat out int vMat; flat out float vVar;
+invariant gl_Position;
 void main() {
     vP = aP; vN = aN; vUV = aUV; vC = aC;
     vMat = int(aM.x + 0.5); vVar = aM.y;
@@ -1723,12 +1725,10 @@ float pt_shadow(samplerCubeShadow sh, vec3 lp, vec3 p, vec3 n) {
     vec3 v = p + n * 0.01 - lp;
     float d = length(v), bias = 0.0015 + 0.002 * d;
     vec3 t1 = normalize(cross(v, abs(v.y) < 0.9 * d ? vec3(0, 1, 0) : vec3(1, 0, 0))), t2 = normalize(cross(v, t1));
-    float r = 0.012 * d, s = 0.0;
-    s += texture(sh, vec4(v + t1 * r, cube_ref(v) - bias));
-    s += texture(sh, vec4(v - t1 * r, cube_ref(v) - bias));
-    s += texture(sh, vec4(v + t2 * r, cube_ref(v) - bias));
-    s += texture(sh, vec4(v - t2 * r, cube_ref(v) - bias));
-    return s * 0.25;
+    float r = 0.01 * d, s = 0.0, ref = cube_ref(v) - bias;
+    s += texture(sh, vec4(v + (t1 + t2 * 0.5) * r, ref));
+    s += texture(sh, vec4(v - (t1 + t2 * 0.5) * r, ref));
+    return s * 0.5;
 }
 
 /* the world outside the windows */
@@ -1806,7 +1806,10 @@ void ashlar(inout S s, vec2 uv, vec3 T) {
     float bev = 1.0 - smoothstep(0.0, 0.03, de);
     vec2 dir = vec2(e.x < e.y ? (f.x < L * 0.5 ? -1.0 : 1.0) : 0.0, e.x < e.y ? 0.0 : (f.y < ch * 0.5 ? -1.0 : 1.0));
     s.n = normalize(s.n + (T * dir.x + vec3(0, 1, 0) * dir.y) * bev * 0.6 * (1.0 - mort)
-                    + (T * (n3(uv * 2.0) - 0.5) + vec3(0, 1, 0) * (n3(uv * 2.0 + 0.5) - 0.5)) * 0.35);
+                    + (T * (n2(uv * 0.7) - 0.5) + vec3(0, 1, 0) * (n2(uv * 0.7 + 0.5) - 0.5)) * 0.18
+                    + (T * (n3(uv * 1.3) - 0.5) + vec3(0, 1, 0) * (n3(uv * 1.3 + 0.5) - 0.5)) * 0.06);
+    /* pitting and lichen-dark weathering in the old stone */
+    s.alb *= 0.92 + 0.12 * n3(uv * 1.1 + id);
 }
 
 vec3 leather(vec3 c, vec2 p) {
@@ -1845,13 +1848,13 @@ void main() {
             float a = atan(p.x, -p.z);
             ashlar(s, vec2(a * RIN, p.y), vec3(cos(a), 0, sin(a)));
         } else {
-            float mott = fbm(p.xz * 0.4 + p.y * 0.3) * 0.6 + fbm(p.zy * 0.4 + p.x * 0.2) * 0.4;
-            s.alb = vC * (0.75 + 0.45 * mott);
-            s.rough = 0.8;
-            s.n = normalize(n + (vec3(n3(p.xy * 2.0), n3(p.yz * 2.0), n3(p.zx * 2.0)) - 0.5) * 0.25);
+            /* dressed stone: courses on whatever way the face looks */
+            vec3 T = abs(n.y) > 0.7 ? vec3(1, 0, 0) : normalize(vec3(-n.z, 0.0, n.x));
+            vec2 uv = abs(n.y) > 0.7 ? p.xz : vec2(dot(p, T), p.y);
+            ashlar(s, uv * (vVar > 2.5 ? 0.8 : 1.0) + 7.3, T);
         }
-        if (vVar > 1.5 && vVar < 2.5) s.alb *= 1.05;
-    } else if (m == 1) {                                   /* floor flags */
+        s.alb *= vec3(1.02, 0.97, 0.9);
+    } else if (m == 1) {    } else if (m == 1) {                                   /* floor flags */
         vec2 q = p.xz;
         float row = floor(q.y / 0.55);
         float x = q.x + h12(vec2(row, 1.3)) * 2.0;
@@ -1870,14 +1873,19 @@ void main() {
         s.rough = mix(0.8, 0.42, wear * (0.6 + 0.4 * n2(q * 0.3))) + mort * 0.2;
         s.n = normalize(n + vec3(n3(q * 1.7) - 0.5, 0, n3(q * 1.7 + 0.5) - 0.5) * 0.2);
     } else if (m == 2 || m == 3 || m == 17) {              /* oak, shelving, roof timber */
-        vec2 g = vUV * vec2(1.2, 22.0);
-        float grain = n2(vec2(g.x * 0.05 + n1(vUV * 0.2) * 0.6, g.y * 0.012));
-        float rings = smoothstep(0.3, 0.7, fract(grain * 9.0));
-        float fine = n3(vec2(vUV.x * 0.6, vUV.y * 9.0));
-        s.alb = vC * (0.75 + 0.25 * rings) * (0.85 + 0.3 * fine);
-        s.rough = m == 2 ? 0.38 : m == 3 ? 0.55 : 0.75;
-        clearcoat = m == 2 ? 0.6 : m == 3 ? 0.25 : 0.0;
-        s.n = normalize(n + (vec3(fine) - 0.5) * 0.06);
+        vec2 w = vUV;                                      /* along the grain, across it (metres) */
+        float warp = n1(w * vec2(0.15, 0.6)) * 0.8 + n2(w * vec2(0.4, 1.5)) * 0.25;
+        float ring = fract((w.y + warp * 0.12) * 38.0);
+        float late = smoothstep(0.55, 0.9, ring) * (1.0 - smoothstep(0.9, 1.0, ring));
+        float fig = n2(vec2(w.x * 0.08, w.y * 1.2 + warp));
+        float pores = n3(vec2(w.x * 0.9, w.y * 60.0));
+        vec3 c = vC * vec3(0.78, 0.76, 0.74) * (0.8 + 0.35 * fig);
+        c = mix(c, c * 0.6, late * 0.65);
+        c *= 0.88 + 0.18 * pores;
+        s.alb = mix(vec3(dot(c, vec3(0.333))), c, 0.85);
+        s.rough = m == 2 ? 0.42 : m == 3 ? 0.55 : 0.75;
+        clearcoat = m == 2 ? 0.5 : m == 3 ? 0.2 : 0.0;
+        s.n = normalize(n + (vec3(pores) - 0.5) * 0.04);
     } else if (m == 4) {                                   /* a book's spine or covers */
         if (vVar < -0.5) {
             s.alb = leather(vC, p.xy * 7.0 + p.zx * 5.0) * 0.85;
@@ -1964,15 +1972,15 @@ void main() {
                 vec3 c = sel == 1 ? texture(uAgeLive, aq).rgb : texture(uAgeOld, aq).rgb;
                 /* like an old hand-tinted plate: warm, a little faded, grainy */
                 float l = dot(c, vec3(0.3, 0.55, 0.15));
-                c = mix(c, vec3(l) * vec3(1.08, 0.98, 0.82), 0.22);
-                c = c * 0.9 + vec3(0.035, 0.03, 0.02);
+                c = mix(c, vec3(l) * vec3(1.08, 0.98, 0.82), 0.12);
+                c = smoothstep(0.0, 1.0, c * 1.08) * 0.92 + vec3(0.02, 0.016, 0.01);
                 float gr = h12(floor(q * vec2(420.0, 350.0)) + floor(uTime * 12.0)) - 0.5;
                 c *= 1.0 + gr * 0.07;
                 vec2 e = min(q, 1.0 - q);
                 float vig = smoothstep(0.0, 0.16, e.x) * smoothstep(0.0, 0.16, e.y);
                 vig = mix(0.35, 1.0, vig) * (1.0 - 0.25 * length(q - 0.5));
                 c *= vig;
-                s.alb = mix(s.alb, c * pg.rgb * 1.25, 0.92);
+                s.alb = mix(s.alb, c * pg.rgb * 1.2, 0.95);
                 s.emis = c * uPanelGlow * vig;
                 s.rough = 0.6;
             }
@@ -1980,20 +1988,40 @@ void main() {
     } else if (m == 10) {                                  /* the rug */
         vec2 q = vUV;
         float r = length(q), a = atan(q.y, q.x);
-        vec3 red = vec3(0.32, 0.06, 0.05), ind = vec3(0.06, 0.07, 0.16), och = vec3(0.55, 0.38, 0.14), crm = vec3(0.6, 0.53, 0.4);
-        vec3 c = red;
-        float motif = sin(a * 24.0) * 0.5 + 0.5;
-        if (r > 1.45) c = ind;
-        if (r > 1.52 && r < 1.64) c = mix(och, red, step(0.5, motif));
-        if (abs(r - 1.45) < 0.015 || abs(r - 1.68) < 0.012) c = crm;
-        if (r < 1.3 && r > 1.22) c = mix(ind, och, step(0.6, sin(a * 16.0 + r * 30.0) * 0.5 + 0.5));
-        float med = abs(q.x) * 0.7 + abs(q.y);
-        if (med < 0.55) c = mix(ind, red, step(0.45, med));
-        if (abs(med - 0.3) < 0.03) c = och;
-        if (abs(med - 0.5) < 0.012) c = crm;
+        vec3 mad = vec3(0.30, 0.065, 0.045), ind = vec3(0.045, 0.06, 0.12), ivo = vec3(0.56, 0.5, 0.38),
+             gold = vec3(0.42, 0.27, 0.09), grn = vec3(0.1, 0.15, 0.09);
+        vec3 c = mad;
+        /* the field: a fine lattice of lozenges, each holding a flower */
+        vec2 lq = mat2(0.7071, 0.7071, -0.7071, 0.7071) * q * 9.0;
+        vec2 lf = abs(fract(lq) - 0.5);
+        float lz = lf.x + lf.y;
+        c = mix(c, ind, (1.0 - smoothstep(0.035, 0.06, abs(lz - 0.47))) * 0.9);
+        float fl = length(fract(lq) - 0.5);
+        c = mix(c, mix(gold, ivo, 0.4), (1.0 - smoothstep(0.08, 0.11, fl)) * 0.8);
+        c = mix(c, ind * 1.5, (1.0 - smoothstep(0.03, 0.05, abs(fl - 0.2))) * 0.5);
+        /* the medallion: an eight-pointed star */
+        float star = 0.48 + 0.07 * cos(a * 8.0);
+        if (r < star) c = ind;
+        if (r < star - 0.05) c = mix(ivo * 0.8, gold, smoothstep(0.3, 0.7, n2(vec2(a * 2.0, r * 3.0))));
+        if (r < 0.26) c = mad;
+        if (r < 0.1) c = ind;
+        /* borders */
+        if (r > 1.36) c = gold;
+        if (r > 1.4) {
+            c = ind;
+            float k = a / 6.2831853 * 40.0;
+            vec2 m2 = vec2(fract(k) - 0.5, (r - 1.56) / 0.14);
+            float d = abs(m2.x) * 2.0 + abs(m2.y);
+            if (d < 0.75) c = mad;
+            if (d < 0.35) c = ivo;
+            if (abs(m2.y) > 0.9) c = grn;
+        }
+        if (abs(r - 1.4) < 0.012 || abs(r - 1.72) < 0.012) c = ivo;
         float fib = n3(q * 30.0) * 0.5 + n3(q * 70.0) * 0.5;
         s.alb = c * (0.8 + 0.35 * fib) * (0.85 + 0.2 * fbm(q * 0.8));
-        s.alb *= 1.0 - 0.25 * smoothstep(0.9, 0.0, length(q - vec2(-0.05, -0.35)));   /* worn under the desk */
+        /* worn under the desk and where the chair goes */
+        float wear = smoothstep(0.9, 0.0, length(q - vec2(-0.25, 0.55)));
+        s.alb = mix(s.alb, vec3(dot(s.alb, vec3(0.33))) * 1.2, wear * 0.35);
         s.rough = 0.95;
         s.wrap = 0.2;
     } else if (m == 11) {                                  /* iron */
@@ -2026,8 +2054,9 @@ void main() {
         if (vVar < 0.5) { s.alb = vec3(0.1); s.emis = warm * 0.9 * uLampOn; s.rough = 0.05; }
         else {
             s.alb = vC * 0.9; s.rough = 0.3; s.wrap = 0.6;
-            float side = clamp(0.4 + 0.6 * dot(n, normalize(p - uLampPos)), 0.0, 1.0);
-            s.emis = warm * (0.12 + 0.2 * side) * uLampOn;
+            float facing = abs(dot(n, V));
+            float lowr = smoothstep(0.24, 0.0, abs(p.y - uLampPos.y + 0.02));
+            s.emis = warm * vec3(1.0, 0.85, 0.7) * (0.05 + 0.25 * facing * facing + 0.25 * lowr) * uLampOn;
         }
     } else if (m == 16) {                                  /* cloth */
         float wv = n3(p.xy * 40.0 + p.z * 30.0);
@@ -2097,14 +2126,18 @@ void main() {
     col += diffc * (E + hemi) * ao;
     /* a little sheen of the window light on metal and varnish */
     vec3 R = reflect(-V, s.n);
-    float env = 0.0;
-    for (int i = 0; i < 3; i++) {
-        vec3 l = normalize(uWinC[i].xyz - p);
-        env += pow(max(dot(R, l), 0.0), mix(400.0, 8.0, s.rough)) * mix(60.0, 1.0, s.rough);
-    }
     vec3 F0 = mix(vec3(s.spec), s.alb, s.metal);
     float fres = pow(1.0 - max(dot(s.n, V), 0.0), 5.0);
-    col += (F0 + (1.0 - F0) * fres * (1.0 - s.rough)) * (uWinL * 0.04 * env + hemi * 0.6) * ao * (s.metal > 0.5 ? 1.0 : 0.5);
+    if (s.metal > 0.3 || s.rough < 0.3 || clearcoat > 0.0) {
+        float env = 0.0;
+        for (int i = 0; i < 3; i++) {
+            vec3 l = normalize(uWinC[i].xyz - p);
+            env += pow(max(dot(R, l), 0.0), mix(400.0, 8.0, s.rough)) * mix(60.0, 1.0, s.rough);
+        }
+        /* the room itself, warm and dim, in everything polished */
+        vec3 room = mix(uGndAmb * 6.0 + uFireCol * 0.02 + uLampCol * uLampOn * 0.03, uSkyAmb * 3.0, R.y * 0.5 + 0.5);
+        col += (F0 + (1.0 - F0) * fres * (1.0 - s.rough)) * (uWinL * 0.04 * env + room) * ao;
+    } else col += F0 * fres * hemi * 0.6 * ao;
     if (clearcoat > 0.0) {
         float cc = 0.04 + 0.96 * fres;
         float g = 0.0;
@@ -2168,11 +2201,11 @@ uniform vec3 uTint;
 void main() {
     vec2 q = vUV;
     float t = uTime;
-    float sway = (n1(vec2(q.y * 0.3 - t * 0.05, 0.3)) - 0.5) * 0.6 * q.y;
+    float sway = (n1(vec2(q.y * 0.08 - t * 0.02, 0.3)) - 0.5) * 0.7 * q.y;
     float x = q.x - 0.5 - sway;
-    float wisp = n3(vec2(x * 0.4 + 0.2, q.y * 0.25 - t * 0.06)) * n2(vec2(x * 0.7, q.y * 0.4 - t * 0.09));
-    float a = smoothstep(0.18, 0.4, wisp) * smoothstep(0.32, 0.0, abs(x)) * smoothstep(0.0, 0.15, q.y) * smoothstep(1.0, 0.3, q.y);
-    oCol = vec4(uTint * a * 0.3, 1.0);
+    float wisp = n1(vec2(x * 0.12 + 0.2, q.y * 0.08 - t * 0.025)) * n1(vec2(x * 0.2 + 0.7, q.y * 0.12 - t * 0.04));
+    float a = smoothstep(0.2, 0.5, wisp) * smoothstep(0.4, 0.05, abs(x)) * smoothstep(0.0, 0.2, q.y) * smoothstep(1.0, 0.2, q.y);
+    oCol = vec4(uTint * a * 0.12, 1.0);
 }
 );
 
@@ -2254,15 +2287,16 @@ void main() {
     const int N = 22;
     float dt = tmax / float(N);
     float j = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + float(uFrame % 16) * 0.618034);
-    float cth = dot(rd, uKeyDir), g = 0.55;
-    float hg = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cth, 1.5) * 0.25 + 0.06;
+    float cth = dot(rd, uKeyDir), g = 0.68;
+    float hg = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cth, 1.5) * 0.2 + 0.025;
     vec3 L = vec3(0);
     bool key = dot(uKeyCol, vec3(1.0)) > 0.0;
     for (int i = 0; i < N; i++) {
         float t = (float(i) + j) * dt;
         vec3 p = uCam + rd * t;
         float dn = texture(uNoise3, p * 0.23 + vec3(uTime * 0.004, uTime * 0.002, 0.0)).r;
-        dn = 0.35 + 1.3 * dn * dn;
+        float d2 = texture(uNoise3, p * 0.9 + vec3(0.0, uTime * 0.01, 0.3)).r;
+        dn = 0.15 + 2.2 * dn * dn * dn + 0.6 * d2 * d2;
         vec3 s = vec3(0);
         if (key) {
             vec4 q = uKeyVP * vec4(p, 1.0);
@@ -2318,6 +2352,7 @@ uniform sampler2D uScene, uVol, uBloom;
 uniform vec2 uTexel, uVolTexel;
 uniform float uExposure, uTime, uSharp;
 uniform vec4 uVig;                       /* this view in the layout, normalised: x0 y0 w h */
+uniform int uDebug;
 float h12(vec2 p) { p = fract(p * vec2(443.897, 441.423)); p += dot(p, p.yx + 19.19); return fract((p.x + p.y) * p.x); }
 vec3 aces(vec3 x) { return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }
 void main() {
@@ -2329,7 +2364,8 @@ void main() {
     }
     vec3 v = texture(uVol, vUV).rgb * 0.4 + (texture(uVol, vUV + uVolTexel * vec2(1, 0.5)).rgb + texture(uVol, vUV - uVolTexel * vec2(1, 0.5)).rgb +
              texture(uVol, vUV + uVolTexel * vec2(-0.5, 1)).rgb + texture(uVol, vUV - uVolTexel * vec2(-0.5, 1)).rgb) * 0.15;
-    c += v;
+    if (uDebug == 3) c = v * 4.0;
+    else c += v;
     c += texture(uBloom, vUV).rgb * 0.06;
     c *= uExposure;
     /* grade before the curve: cool the shadows, warm the lights */
@@ -2459,6 +2495,8 @@ vec3 cam_ray(vec2 uv, vec3 ro, vec3 ta, float fl) { \
 } \
 vec3 tone(vec3 c) { c = max(c, 0.0); return c / (1.0 + c * 0.9); } \
 float sdBox(vec3 p, vec3 b) { vec3 q = abs(p) - b; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0); } \
+float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); \
+    return mix(mix(h12(i), h12(i + vec2(1, 0)), f.x), mix(h12(i + vec2(0, 1)), h12(i + vec2(1, 1)), f.x), f.y); } \
 float sdCyl(vec3 p, float r, float h) { vec2 d = vec2(length(p.xz) - r, abs(p.y) - h); return min(max(d.x, d.y), 0.0) + length(max(d, 0.0)); } \
 float sdCone(vec3 p, float r, float h) { float q = length(p.xz); return max(dot(vec2(h, r) / length(vec2(h, r)), vec2(q, p.y - h)), -p.y); } \
 )
@@ -2679,9 +2717,10 @@ vec3 shade_house(vec3 p, vec3 rd) {
     vec2 uv = a.x > 0.5 ? p.zy : a.z > 0.5 ? p.xy : p.xz;
     vec2 g = abs(fract(uv / vec2(0.55, 0.5)) - 0.5);
     float frame = 1.0 - smoothstep(0.03, 0.06, min(g.x, g.y) * 0.55);
-    vec3 edge = abs(p - vec3(0, 1.4, 0)) - vec3(3.2, 1.4, 2.0);
-    frame = max(frame, 1.0 - smoothstep(0.04, 0.08, min(abs(edge.x), abs(edge.z)) * step(p.y, 2.8)));
-    vec3 glass = interior(p - rd * 0.6, rd);
+    vec3 e3 = abs(abs(p - vec3(0, 1.4, 0)) - vec3(3.2, 1.4, 2.0));
+    float two = e3.x + e3.y + e3.z - max(e3.x, max(e3.y, e3.z));
+    frame = max(frame, (1.0 - smoothstep(0.06, 0.12, two)) * step(p.y, 2.85));
+    vec3 glass = interior(p + rd * 0.8, rd);
     vec3 r = reflect(rd, n);
     float fr = 0.06 + 0.9 * pow(1.0 - max(dot(-rd, n), 0.0), 5.0);
     glass = mix(glass, sky(r), fr);
@@ -2764,8 +2803,8 @@ float island(vec3 p, vec4 c) {
     /* trees on top */
     for (int i = 0; i < 3; i++) {
         vec2 o = vec2(cos(c.w * 3.0 + float(i) * 2.1), sin(c.w * 3.0 + float(i) * 2.1)) * R * 0.45;
-        vec3 tq = q - vec3(o.x, 0.1 * R + R * 0.25, o.y);
-        d = min(d, length(tq * vec3(1.0, 0.8, 1.0)) - R * 0.18);
+        vec3 tq = q - vec3(o.x, 0.1 * R + R * 0.12, o.y);
+        d = min(d, length(tq * vec3(1.0, 0.7, 1.0)) - R * 0.09);
     }
     return d;
 }
@@ -2819,8 +2858,6 @@ void main() {
         vec3 c = a * (dif * vec3(1.4, 0.85, 0.55) + (0.5 + 0.5 * n.y) * vec3(0.25, 0.2, 0.35) + max(-n.y, 0.0) * vec3(0.3, 0.2, 0.25));
         col = mix(c, sky(rd) * 0.95, 1.0 - exp(-hit * 0.008));
     }
-    /* a waterfall from the near island, its spray lit by the sun */
-    vec2 sp = vUV - vec2(0.36, 0.0);
     col = tone(col * 1.15);
     oCol = vec4(col, 1.0);
 }
@@ -2830,9 +2867,10 @@ void main() {
 static const char *FS_AGE4 = "#version 330 core\n" NOISE AGE_COMMON GLSL(
 const vec3 SUN = normalize(vec3(0.6, 0.5, -0.6));
 float dune(vec2 p) {
-    float a = p.x * 0.045 + sin(p.y * 0.03) * 1.6 + n1(p * 0.003) * 4.0;
-    float d = 1.0 - abs(sin(a));
-    return d * d * 6.0 + n1(p * 0.006) * 6.0 - 2.0;
+    float a = p.x * 0.045 + sin(p.y * 0.03) * 1.6 + vn(p * 0.05) * 4.0;
+    float sa = sin(a);
+    float d = 1.0 - sqrt(sa * sa + 0.03);
+    return d * d * 6.0 + vn(p * 0.02) * 6.0 - 2.0;
 }
 float tower(vec3 p, out float id) {
     vec2 c = floor(p.xz / 50.0);
@@ -2866,15 +2904,15 @@ void main() {
     /* heat shimmer near the ground line */
     uv.x += (n3(vec2(uv.y * 6.0, uT * 0.6)) - 0.5) * 0.006 * smoothstep(0.65, 0.3, uv.y);
     vec3 ro = vec3(uT * 2.0, 6.0, 0.0);
-    ro.y = max(dune(ro.xz), 0.0) + 5.0;
-    vec3 rd = cam_ray(uv, ro, ro + vec3(-3.0, 1.2, -20.0), 1.4);
+    ro.y = max(dune(ro.xz), 0.0) + 9.0;
+    vec3 rd = cam_ray(uv, ro, ro + vec3(-3.0, 0.4, -20.0), 1.4);
     vec3 col = sky(rd);
     float t = 0.5, hit = -1.0, kind = 0.0, id = 0.0;
     for (int i = 0; i < 110; i++) {
         vec3 p = ro + rd * t;
         float tid;
         float dt = tower(p, tid);
-        float dg = (p.y - dune(p.xz)) * 0.5;
+        float dg = (p.y - dune(p.xz)) * 0.35;
         float d = min(dt, dg);
         if (d < 0.003 * t) { hit = t; kind = dt < dg ? 1.0 : 0.0; id = tid; break; }
         t += d;
@@ -2890,7 +2928,7 @@ void main() {
             n = normalize(vec3(tower(p + e.xyy, q1) - tower(p - e.xyy, q2), tower(p + e.yxy, q3) - tower(p - e.yxy, q4),
                                tower(p + e.yyx, q5) - tower(p - e.yyx, q6)));
             float streak = smoothstep(0.45, 0.7, n2(vec2(atan(n.z, n.x) * 3.0 + id * 10.0, p.y * 0.02)) + 0.2 * n3(p.xz + p.y * 0.1));
-            vec3 copper = vec3(0.75, 0.38, 0.18), verd = vec3(0.25, 0.6, 0.5);
+            vec3 copper = vec3(0.8, 0.36, 0.14), verd = vec3(0.2, 0.62, 0.5);
             vec3 a = mix(copper, verd, streak);
             float dif = max(dot(n, SUN), 0.0);
             vec3 r = reflect(rd, n);
@@ -2899,12 +2937,12 @@ void main() {
         } else {
             vec2 e = vec2(0.1, 0);
             n = normalize(vec3(dune(p.xz - e.xy) - dune(p.xz + e.xy), 2.0 * e.x, dune(p.xz - e.yx) - dune(p.xz + e.yx)));
-            float rip = sin(p.x * 3.0 + n1(p.xz * 0.1) * 10.0) * 0.5 + 0.5;
-            vec3 a = vec3(0.86, 0.66, 0.44) * (0.9 + 0.12 * rip);
+            float rip = sin(p.x * 3.0 + vn(p.xz * 0.15) * 10.0) * 0.5 + 0.5;
+            vec3 a = vec3(0.86, 0.62, 0.4) * (0.94 + 0.08 * rip * exp(-hit * 0.02));
             float dif = max(dot(n, SUN), 0.0);
-            c = a * (dif * 1.3 + 0.35 * vec3(0.7, 0.8, 1.0));
+            c = a * (dif * 1.5 + 0.25 * vec3(0.6, 0.7, 1.0));
         }
-        col = mix(c, sky(vec3(rd.x, 0.05, rd.z)), 1.0 - exp(-hit * 0.005));
+        col = mix(c, sky(vec3(rd.x, 0.05, rd.z)), 1.0 - exp(-hit * (kind > 0.5 ? 0.0028 : 0.005)));
     }
     /* blown sand */
     float sand = fbm(vec2(uv.x * 3.0 - uT * 0.12, uv.y * 14.0)) * smoothstep(0.5, 0.15, uv.y);
@@ -3237,7 +3275,7 @@ static void sky_light(double wt) {
     lt.sky_hor = vmul(hor, bright);
     /* the sun reddens towards the horizon */
     float hi = smoothf(0.0f, 0.4f, s);
-    lt.sun_col = vmul(vlerp(v3(1.0f, 0.42f, 0.16f), v3(1.0f, 0.92f, 0.8f), hi), 9.0f * smoothf(-0.03f, 0.05f, s));
+    lt.sun_col = vmul(vlerp(v3(1.0f, 0.42f, 0.16f), v3(1.0f, 0.92f, 0.8f), hi), 7.0f * smoothf(-0.03f, 0.05f, s));
     if (s > -0.03f) { lt.key_dir = lt.sun_dir; lt.key_col = lt.sun_col; }
     else if (mel > 0.03f) {
         lt.key_dir = lt.moon_dir;
@@ -3246,12 +3284,13 @@ static void sky_light(double wt) {
     /* light through the windows and about the room */
     V3 sky = vlerp(lt.sky_hor, lt.sky_zen, 0.35f);
     lt.win_l = vmul(sky, 1.6f);
-    lt.sky_amb = vmul(sky, 0.025f);
-    lt.gnd_amb = vadd(vmul(sky, 0.012f), v3(0.004f, 0.0025f, 0.0012f));
-    float in = s > 0 ? clampf(lt.key_dir.y < 0.95f ? 1 : 0, 0, 1) : 0;
-    lt.bounce = vmul(lt.key_col, 0.006f * in);
+    lt.sky_amb = vmul(sky, 0.05f);
+    lt.gnd_amb = vadd(vmul(sky, 0.03f), v3(0.004f, 0.0025f, 0.0012f));
+    /* sun on the floor lights the whole room a little, warm */
+    lt.bounce = vmul(vmul(lt.key_col, 0.018f), s > 0 ? 1.0f : 0.4f);
+    lt.bounce.z *= 0.8f;
     float lum = 0.3f * lt.win_l.x + 0.55f * lt.win_l.y + 0.15f * lt.win_l.z;
-    lt.exposure = 1.25f / (0.12f + lum * 1.2f);
+    lt.exposure = 1.5f / (0.14f + lum);
     if (lt.exposure > 3.4f) lt.exposure = 3.4f;
     lt.lamp_on = 1 - smoothf(0.05f, 0.2f, s);
 }
@@ -3808,7 +3847,33 @@ static void set_scene_uniforms(GLuint p, double t, float flick) {
     glUniform4fv(U(p, "uWinC"), NWIN, &wc[0][0]);
 }
 
+/* --bench with LIBRARY_PROF set: where the time goes */
+static int prof_on, prof_cur = -1;
+static double prof_ms[8];
+static GLuint prof_q[8];
+static const char *prof_name[8] = {"setup", "age", "pages", "room", "fx", "shafts", "bloom", "finish"};
+/* GPU time of each stage, from timer queries: stage i starts now */
+static void prof(int i) {
+    if (!prof_on) return;
+    if (!prof_q[0]) glGenQueries(8, prof_q);
+    if (prof_cur >= 0) glEndQuery(GL_TIME_ELAPSED);
+    if (i == 7 || i < 0) {
+        /* collect the frame's */
+        for (int k = 0; k < 8 && i == 7; k++) {
+            GLuint64 ns = 0;
+            glGetQueryObjectui64v(prof_q[k], GL_QUERY_RESULT, &ns);
+            prof_ms[k] += ns / 1e6;
+        }
+        prof_cur = i < 0 ? 0 : -1;
+        if (i < 0) glBeginQuery(GL_TIME_ELAPSED, prof_q[0]);
+        return;
+    }
+    prof_cur = i + 1;
+    glBeginQuery(GL_TIME_ELAPSED, prof_q[i + 1]);
+}
+
 static void render(double t, double wt, GLuint target) {
+    prof(-1);
     setup_view();
     scene_targets();
     sky_light(wt);
@@ -3830,6 +3895,7 @@ static void render(double t, double wt, GLuint target) {
     /* shadows of the sun or moon: again whenever it has moved a little */
     if (!key_drawn || vdot(key_dir_drawn, lt.key_dir) < cosf(0.15f * DEG)) key_shadow_render();
 
+    prof(0);
     /* the picture: as sharp as it is big on screen, at a third of the frames */
     {
         float dist = vlen(vsub(panel_c, cam_eye));
@@ -3838,15 +3904,17 @@ static void render(double t, double wt, GLuint target) {
         int aw = (int)(ah * (float)AGE_W / AGE_H);
         int changed = abs(ah - age_px_h) > 24;
         if (changed || !age_px_h) { age_px_w = aw; age_px_h = ah; }
-        int due = opt_shot || opt_bench ? 1 : (frame_no % 3 == 0 || changed || last_age_t < 0);
+        int due = opt_shot ? 1 : (frame_no % 3 == 0 || changed || last_age_t < 0);
         if (due) {
             age_render(0, age, t);
             if (u < TURN_T) age_render(1, age_prev, t);
             last_age_t = t;
         }
     }
+    prof(1);
     pages_update(tl, wt);
     leaves_build(u);
+    prof(2);
 
     /* the room */
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_scene);
@@ -3856,6 +3924,14 @@ static void render(double t, double wt, GLuint target) {
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     float flick = fire_flicker(t);
+    /* depth first, so the expensive shading runs once a pixel */
+    glUseProgram(p_shadow);
+    set_wins(p_shadow);
+    glUniform1i(U(p_shadow, "uSkip"), -1);
+    glUniformMatrix4fv(U(p_shadow, "uVP"), 1, GL_FALSE, vp_m.m);
+    glColorMask(0, 0, 0, 0);
+    draw_room();
+    glColorMask(1, 1, 1, 1);
     GLuint p = p_scene;
     glUseProgram(p);
     set_scene_uniforms(p, t, flick);
@@ -3897,6 +3973,7 @@ static void render(double t, double wt, GLuint target) {
         glDrawArrays(GL_TRIANGLES, 0, leaf_nv);
     }
 
+    prof(3);
     /* fire, steam, dust: added light */
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE);
@@ -3926,7 +4003,7 @@ static void render(double t, double wt, GLuint target) {
         /* the tea's last steam */
         V3 cf = vsub(cup_pos, cam_eye);
         V3 cr = vnorm(v3(-cf.z, 0, cf.x));
-        fx_quad(fx, vadd(cup_pos, v3(0, -0.005f, 0)), cr, 0.12f, 0.3f, 0, 1);
+        fx_quad(fx, vadd(cup_pos, v3(0, -0.005f, 0)), cr, 0.2f, 0.34f, 0, 1);
         glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(float) * 42, fx);
         glUseProgram(p_steam);
         glUniformMatrix4fv(U(p_steam, "uVP"), 1, GL_FALSE, vp_m.m);
@@ -3953,6 +4030,7 @@ static void render(double t, double wt, GLuint target) {
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
 
+    prof(4);
     /* light shafts */
     {
         glBindFramebuffer(GL_FRAMEBUFFER, fbo_vol);
@@ -3982,7 +4060,7 @@ static void render(double t, double wt, GLuint target) {
                 for (int j = 0; j < 4; j++) inv.m[j * 4 + i] = (float)a[i][j + 4];
         }
         glUniformMatrix4fv(U(q, "uInvVP"), 1, GL_FALSE, inv.m);
-        glUniform1f(U(q, "uDens"), 0.05f);
+        glUniform1f(U(q, "uDens"), 0.035f);
         glUniform1i(U(q, "uFrame"), frame_no);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_depth); glUniform1i(U(q, "uDepth"), 0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, tex_keysh); glUniform1i(U(q, "uKeySh"), 1);
@@ -3990,6 +4068,7 @@ static void render(double t, double wt, GLuint target) {
         glBindVertexArray(vao_empty);
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
+    prof(5);
     /* bloom */
     {
         glUseProgram(p_down);
@@ -4017,6 +4096,7 @@ static void render(double t, double wt, GLuint target) {
         }
         glDisable(GL_BLEND);
     }
+    prof(6);
     /* the finish */
     glBindFramebuffer(GL_FRAMEBUFFER, target);
     glViewport(0, 0, W, H);
@@ -4027,11 +4107,13 @@ static void render(double t, double wt, GLuint target) {
     glUniform2f(U(p_comp, "uTexel"), 1.0f / scene_w, 1.0f / scene_h);
     glUniform2f(U(p_comp, "uVolTexel"), 1.0f / vol_w, 1.0f / vol_h);
     glUniform1f(U(p_comp, "uExposure"), lt.exposure);
+    glUniform1i(U(p_comp, "uDebug"), getenv("LIBRARY_DEBUG") ? atoi(getenv("LIBRARY_DEBUG")) : 0);
     glUniform1f(U(p_comp, "uTime"), (float)fmod(t, 1000.0));
     glUniform1f(U(p_comp, "uSharp"), render_scale < 0.95f ? 0.35f : 0.12f);
     glUniform4f(U(p_comp, "uVig"), (view_x - lay_x0) / lay_w, (view_y - lay_y0) / lay_h, view_w / lay_w, view_h / lay_h);
     glBindVertexArray(vao_empty);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    prof(7);
     frame_no++;
 }
 
@@ -4252,6 +4334,7 @@ int main(int argc, char **argv) {
         render(opt_at, wt0, fbo);
         glFinish();
         double sum = 0, worst = 0;
+        prof_on = getenv("LIBRARY_PROF") != NULL;
         for (int i = 0; i < opt_bench; i++) {
             double f0 = now();
             double t = opt_at + (i + 1) / 60.0;
@@ -4264,6 +4347,8 @@ int main(int argc, char **argv) {
         printf("library: %dx%d scale %.2f, %d frames: avg %.3f ms, worst %.3f ms per frame\n", W, H, render_scale, opt_bench,
                sum / opt_bench, worst);
         printf("library: GL renderer: %s; hand: %s\n", (const char *)glGetString(GL_RENDERER), hand_family);
+        if (prof_on)
+            for (int i = 0; i < 8; i++) printf("  %-8s %6.2f ms\n", prof_name[i], prof_ms[i] / opt_bench);
         return 0;
     }
 
