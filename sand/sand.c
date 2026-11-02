@@ -419,7 +419,7 @@ static float tenv(int x, int y) {
         t = ts + (520 - ts) * smooth(0, 1, d) + 1100 * expf(-(y - j_mag) / 7.0f);
     }
     float dx = (x - vent_x) / (float)(crater_w + 4);
-    if (y < vent_top - 2) t += 800 * expf(-dx * dx) * smooth(vent_bot - 30, vent_bot, y);
+    if (y < vent_top - 2) t += 620 * expf(-dx * dx) * smooth(vent_bot - 30, vent_bot, y);
     float ex = (x - ch_x) / (ch_rx + 6.0f), ey = (y - ch_y) / (ch_ry + 6.0f);
     t += 900 * expf(-2 * (ex * ex + ey * ey));
     return t;
@@ -479,10 +479,20 @@ static void worldgen(void) {
     for (size_t i = 0; i < n; i++) cells[4 * i] = (uint16_t)((hash32((uint32_t)i * 2654435761u ^ opt_seed) & 0xff) << 8);
 
     /* the ground's profile */
-    float Hv = vent_top - j_sea, Hm = Ufeat * 0.38f;
+    float Hv = vent_top - j_sea, Hm = fminf(Ufeat * 0.38f, (mt_x1 - mt_x0) * 1.25f);
     int ld = clampi((int)(Ufeat * 0.075f), 9, 34);
     for (int x = 0; x < NX; x++) {
         float h = j_sea + 5 + Ufeat * 0.035f * fbm1(x * 0.02f, 4, 11) + Ufeat * 0.02f * fbm1(x * 0.08f, 2, 12);
+        /* rolling hills across the lowlands */
+        float hill = fbm1(x * 0.0045f + 3.7f, 3, 13) + 0.25f;
+        h += Ufeat * 0.10f * fmaxf(hill, 0) + Ufeat * 0.025f * fbm1(x * 0.02f, 2, 14);
+        /* and a line of downs between the lake and the sea */
+        {
+            float xh = lake_x + 0.55f * (sea_end - lake_x), wh = fmaxf(NX * 0.1f, 30);
+            float e2 = clampf(1 - fabsf(x - xh) / wh, 0, 1);
+            e2 = e2 * e2 * (3 - 2 * e2);
+            h += Ufeat * 0.12f * e2 * (0.6f + 0.6f * (1 - fabsf(fbm1(x * 0.03f, 3, 16))));
+        }
         /* the range */
         float mc = (mt_x0 + mt_x1) * 0.5f, mh = (mt_x1 - mt_x0) * 0.5f;
         float e = clampf(1 - fabsf(x - mc) / (mh * 1.5f), 0, 1);
@@ -505,6 +515,10 @@ static void worldgen(void) {
         h = mixf(sf, h, smooth(-NX * 0.06f, 14, ds));
         surf0[x] = h;
     }
+    if (getenv("SAND_SURF")) {
+        for (int x = 0; x < NX; x += 10) fprintf(stderr, "%d:%.0f ", x, surf0[x]);
+        fprintf(stderr, "\nsea %d lake %d w %d mt %d-%d vent %d sea_end %d\n", j_sea, lake_x, lake_w, mt_x0, mt_x1, vent_x, sea_end);
+    }
     /* the lake's level: the lower of its rims */
     float rimL = 0, rimR = 0;
     for (int x = lake_x; x >= 0 && x > lake_x - lake_w * 3; x--) if (surf0[x] > rimL) rimL = surf0[x];
@@ -517,12 +531,13 @@ static void worldgen(void) {
         int dir = sea_side;                        /* towards the sea */
         int x0 = lake_x + dir * (int)(lake_w * 1.1f);
         int n = abs(sea_end - x0);
-        for (int k = 0; k <= n; k++) {
+        for (int k = 0, below = 0; k <= n; k++) {
             int x = x0 + dir * k;
             if (x < 0 || x >= NX) break;
             float f = (float)k / n;
-            float prof = mixf(lake_lv + 0.5f, j_sea + 2, f) + 2.5f * fbm1(x * 0.06f, 2, 15) * sinf(f * PI);
-            if (surf0[x] > prof) surf0[x] = prof;
+            float prof = fmaxf(lake_lv + 0.5f - k * 0.3f, mixf(lake_lv + 0.5f, j_sea + 2, f));
+            if (surf0[x] > prof) surf0[x] = prof, below = 0;
+            else if (++below > 6) break;           /* the land falls away by itself from here */
         }
     }
 
@@ -545,7 +560,13 @@ static void worldgen(void) {
                 m = M_STONE;
                 if (y > h - dirt) m = beach ? M_SAND : M_DIRT;
                 if (beach && y > h - 6) m = M_SAND;
-                if (volc && y > h - (int)(Hv * 0.9f) && y > j_sea - 10 + 4 * vnoise1(x * 0.2f, 52)) m = M_BASALT;
+                {   /* the volcano's own rock: under its cone, down into a bowl */
+                    float cone = j_sea + Hv - dv * 0.78f + 2;
+                    float q = dv / (Hv * 1.3f);
+                    float base = j_sea - 4 - Hv * 0.55f * fmaxf(1 - q * q, 0) + 6 * vnoise1(x * 0.08f, 52);
+                    if (y <= cone && y > base && dv < Hv * 1.3f && m != M_SAND) m = M_BASALT;
+                    (void)volc;
+                }
                 if (m == M_DIRT && y == h && !beach && alt < 0.33f) m = M_GRASS;
                 /* a coal seam, or a vein of obsidian in the old flows */
                 if (m == M_STONE && fbm2(x * 0.02f, y * 0.06f, 3, 61) > 0.56f && y < h - 14) m = M_COAL;
@@ -573,7 +594,7 @@ static void worldgen(void) {
             float depth = h - y;
             float dv = fabsf((float)(x - vent_x));
             if (dv < crater_w + 10 && y > ch_y - ch_ry) continue;
-            if (y > j_sea - 6 && dv < (vent_top - j_sea) * 1.3f) continue;
+            if (y > j_sea - 40 && dv < (vent_top - j_sea) * 1.3f) continue;
             /* winding galleries, and here and there a great hall */
             float n1 = fbm2(x * 0.008f, y * 0.015f, 3, 71);
             float n2 = fbm2(x * 0.0075f, y * 0.013f, 3, 72);
@@ -697,7 +718,7 @@ static const char *VS = "#version 330 core\n" GLSL(
     /* running sideways (liquids) or wandering (gases), of 256 */ \
     const int HMV[32] = int[32](0,0,0,0,0,0,0,0,0,0, 256,220,50,110,90,0,110,0,0,0, 0,0,0,0,110,0,0,0,0,0, 0,0); \
     /* thermal conductivity, of 1024 a tick */ \
-    const int CND[32] = int[32](4,20,20,20,10,10,12,24,6,30, 40,16,32,12,6,4,48,6,10,48, 6,8,10,8,24,96,10,10,20,20, 20,20); \
+    const int CND[32] = int[32](4,20,20,20,10,10,12,24,6,30, 40,16,3,12,6,4,48,6,10,48, 6,8,10,8,24,96,10,10,20,20, 20,20); \
     const uint TIP = 128u, DIRR = 64u; \
     uint hsh(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; } \
     uint rnd(ivec2 p, uint salt) { return hsh(uint(p.x) * 0x9E3779B1u ^ hsh(uint(p.y) * 0x85EBCA77u ^ hsh(tick * 0xC2B2AE3Du ^ hsh(salt + seed)))); } \
@@ -808,9 +829,13 @@ static const char *FS_MOVE = "#version 330 core\n" SIM_COMMON GLSL(
             } else if ((cl == 3 && cr == 4) || (cl == 4 && cr == 3)) {
                 int g = cl == 3 ? L : R;
                 int m = MAT(c[g]);
-                int h = m == LAVA ? 60 : HMV[m];
+                int h = HMV[m];
                 int pr = m == CLOUD ? 0 : h * (256 + wind) / 512;
                 int pl = m == CLOUD ? 0 : h * (256 - wind) / 512;
+                if (m == LAVA) {           /* flung lava flies out the way it was thrown */
+                    bool right = (c[g].x & DIRR) != 0u;
+                    pr = right ? 120 : 6; pl = right ? 6 : 120;
+                }
                 if (g == L ? r8 < pr : r8 < pl) swp = true;
             } else if ((cl == 1 && cr == 4) || (cl == 4 && cr == 1)) {
                 int g = cl == 1 ? L : R;
@@ -838,6 +863,8 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
     uniform ivec2 magma;               /* the magma column's level in the throat (row), how fast it fills */
     uniform ivec4 water;               /* evaporation, rain, cloud dissipation (of 65536), storm spawn */
     uniform ivec2 storm;               /* x range the storm spawns clouds over */
+    uniform ivec4 puff;                /* a cumulus being born: centre of its base, half width, height */
+    uniform ivec4 puff2;               /* its moisture, on, salt */
     uniform ivec4 grow;                /* tree growth, leaf growth, leaf drop, seed drop (of 65536) */
     uniform ivec4 grow2;               /* sprouting, grass, magma flow, weathering */
     uniform ivec4 bolt;                /* x, top row, on, salt */
@@ -855,12 +882,31 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
             t = ts + (520.0 - ts) * smoothstep(0.0, 1.0, d) + 1000.0 * exp(-(y - clim.w) / 7.0);
         }
         float dx = (float(p.x) - vent.x) / (vent.w + 4.0);
-        if (y < vent.z - 2.0) t += 800.0 * exp(-dx * dx) * smoothstep(vent.y - 30.0, vent.y, y);
+        if (y < vent.z - 2.0) t += 620.0 * exp(-dx * dx) * smoothstep(vent.y - 30.0, vent.y, y);
         vec2 e = (vec2(p) - chamber.xy) / (chamber.zw + 6.0);
         t += 900.0 * exp(-2.0 * dot(e, e));
         return t;
     }
-    bool invent(ivec2 p) { return abs(float(p.x) - vent.x) <= 3.0 && float(p.y) > vent.y && float(p.y) <= vent.z + 4.0; }
+    /* the throat, opening into a funnel of a crater at the top */
+    bool invent(ivec2 p) {
+        float w = 3.0 + max(float(p.y) - vent.z + 3.0, 0.0) * 0.8;
+        return abs(float(p.x) - vent.x) <= w && float(p.y) > vent.y && float(p.y) <= vent.z + 24.0;
+    }
+    /* a cumulus: a few lumps on a flat base */
+    bool inpuff(ivec2 p) {
+        if (puff2.y == 0) return false;
+        vec2 d = vec2(p - puff.xy);
+        if (d.y < 0.0 || abs(d.x) > float(puff.z) * 1.3) return false;
+        for (int i = 0; i < 5; i++) {
+            float h = float(hsh(uint(puff2.z) + uint(i) * 77u) & 255u) / 255.0;
+            float cx = (float(i) - 2.0) / 2.0 * float(puff.z) * 0.8 + (h - 0.5) * float(puff.z) * 0.3;
+            float r = float(puff.w) * (0.45 + 0.55 * h) * (1.0 - abs(float(i) - 2.0) * 0.18);
+            vec2 e = d - vec2(cx, r * 0.35);
+            float n = float(hsh(uint(p.x) * 7919u ^ uint(p.y) * 104729u ^ uint(puff2.z)) & 255u) / 255.0;
+            if (dot(e, e) < r * r * (0.85 + 0.3 * n)) return true;
+        }
+        return false;
+    }
     bool inchamber(ivec2 p) { vec2 e = (vec2(p) - chamber.xy) / chamber.zw; return dot(e, e) < 0.8; }
     int boltx(int y) {
         float f = float(y) * 0.13;
@@ -885,7 +931,7 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
     }
     /* the pull rules' shared decisions: computed by both cells of a pair */
     int rainp(uvec4 cl) {
-        if (cl.z < 5u) return 0;
+        if (cl.z < 5u || cl.w < 2u) return 0;                /* fair-weather cloud: no rain */
         return water.y * int(min(cl.w, 4u));
     }
     bool rains(ivec2 q, uvec4 cl) { return int(rnd(q, 11u) & 65535u) < rainp(cl); }
@@ -919,7 +965,7 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
         int T = int(c.y);
         int k = CND[m], acc = 0;
         for (int i = 0; i < 4; i++) acc += min(k, CND[MAT(nb[i])]) * (int(nb[i].y) - T);
-        T += (acc + 512) >> 10;
+        if (!(m == LAVA && c.w > 0u)) T += (acc + 512) >> 10;     /* (flung lava keeps its heat) */
         float te = tenv(p);
         int TE = int(te * 16.0);
 
@@ -940,20 +986,37 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
         /* water passes through trees (they'd dam it otherwise): a drop with a
          * trunk, leaf or blade next to it hops over to the air beyond; one
          * direction a tick (down, right, left), so no air gets two drops */
-        int sd = int(tick % 3u);
-        ivec2 dd = sd == 0 ? ivec2(0, -1) : sd == 1 ? ivec2(1, 0) : ivec2(-1, 0);
+        ivec2 dd = (tick & 1u) == 0u ? ivec2(1, 0) : ivec2(-1, 0);
         bool seep = false;
+        /* and down through the canopy: a leaf (or a blade) holds a drop, hands
+         * it to the leaf below or lets it fall out underneath */
+        bool wetU = (mU == LEAF || mU == PLANT) && (nU.w & 512u) != 0u;
+        bool soft = m == LEAF || m == PLANT, wet = soft && (c.w & 512u) != 0u;
+        bool softD = mD == LEAF || mD == PLANT, wetD = softD && (nD.w & 512u) != 0u;
+        bool dripme = (rnd(p, 16u) & 3u) != 0u, dripU = (rnd(p + ivec2(0, 1), 16u) & 3u) != 0u;
+        if (m == WATER && softD && !wetD && dripme) { seep = true; nm = AIR; T = TE; life = 0; aux = 0; }
+        else if (soft && !wet && mU == WATER && dripU) { seep = true; aux |= 512; }
+        else if (wet && (mD == AIR || softD && !wetD) && dripme) { seep = true; aux &= ~512; }
+        else if (m == AIR && wetU && dripU) { seep = true; nm = WATER; T = int(nU.y); life = 0; aux = 0; }
+        else if (softD && !wetD && wetU && dripU && soft && !wet) {}
+        if (!seep && soft && !wet && wetU && dripU) { seep = true; aux |= 512; }
         if (m == AIR || m == WATER) {
-            ivec2 mid = m == AIR ? p - dd : p + dd, oth = m == AIR ? p - 2 * dd : p + 2 * dd;
-            int mm = MAT(at(mid));
-            if (mm == WOOD || mm == LEAF || mm == PLANT) {
-                uvec4 o2 = at(oth);
-                ivec2 src = m == AIR ? oth : p;
-                if ((m == AIR ? MAT(o2) == WATER : MAT(o2) == AIR) && (rnd(src, 15u) & 1u) != 0u) {
-                    seep = true;
-                    if (m == AIR) { nm = WATER; T = int(o2.y); x = (x & 0xff00u) | (o2.x & DIRR); life = 0; aux = 0; }
-                    else { nm = AIR; T = int(nb[0].y + nb[1].y) / 2; life = 0; aux = 0; }
+            /* walk away from the cell (back for air, on for water) through up
+             * to three cells of tree to the water (air) on the far side */
+            ivec2 w = m == AIR ? -dd : dd;
+            for (int k = 1; k <= 4 && !seep; k++) {
+                uvec4 o2 = at(p + k * w);
+                int mm = MAT(o2);
+                if (k > 1 && (m == AIR ? mm == WATER : mm == AIR)) {
+                    ivec2 src = m == AIR ? p + k * w : p;
+                    if ((rnd(src, 15u) & 1u) != 0u) {
+                        seep = true;
+                        if (m == AIR) { nm = WATER; T = int(o2.y); x = (x & 0xff00u) | (o2.x & DIRR); life = 0; aux = 0; }
+                        else { nm = AIR; T = int(nb[0].y + nb[1].y) / 2; life = 0; aux = 0; }
+                    }
+                    break;
                 }
+                if (mm != WOOD && mm != LEAF && mm != PLANT && mm != LITTER && mm != SEED) break;
             }
         }
         /* the open sea beyond the edge keeps the sea at its level */
@@ -962,6 +1025,12 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
         if (p.x == seaedge.x && (m == AIR || m == WATER || CLS[m] == 3) && R8 < 64) {
             if (p.y <= seaedge.y && m != WATER && CLS[mD] != 3 && mD != AIR) { nm = WATER; T = TE; aux = 0; life = 0; }
             else if (p.y > seaedge.y && m == WATER) nm = AIR;
+        }
+        /* magma welling up into the chamber and the throat, through whatever
+         * air or fumes are in the way */
+        else if (m != LAVA && m != MAGMA && m != BOLT && (invent(p) && p.y <= magma.x || CLS[m] >= 3 && (inchamber(p) || nMagma > 0)) &&
+                 R16 < magma.y) {
+            nm = LAVA; T = 1550 * 16; aux = 0; life = 0;
         }
         /* lightning: the path from the cloud down to the first thing it hits */
         else if (bolt.z > 0 && onbolt(p) && boltclear(p.y)) {
@@ -989,9 +1058,6 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
             } else if (MAT(nb[5]) == WOOD && (nb[5].x & TIP) != 0u && nb[5].z >= 4u && (nb[5].w & 256u) == 0u &&
                        int(rnd(p, 14u) & 65535u) < grow.x / 5) {
                 nm = WOOD; x |= TIP; life = min(int(nb[5].z) / 2, 6); aux = 0; T = TE;
-            } else if ((nMagma > 0 || inchamber(p) || invent(p) && p.y <= magma.x) && R16 < magma.y) {
-                /* magma welling up into the chamber and the throat */
-                nm = LAVA; T = 1550 * 16; aux = 0;
             } else if (vtop && R16 < erupt.w) {
                 nm = SMOKE; life = 0; T = 600 * 16;
             } else {
@@ -1012,8 +1078,9 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
                     nm = PLANT; life = int(nD.z) - 1; T = TE;
                 } else if (mU == LEAF && (nU.w & 256u) == 0u && Q16 < grow.w) {
                     nm = SEED; life = 0; aux = 0;
-                } else if (p.y >= cb0 && p.y <= cb1 && p.x >= storm.x && p.x < storm.y &&
-                           Q16 < (nCloud >= 3 ? water.w * 24 : nCloud >= 1 ? water.w * 3 : water.w / 8)) {
+                } else if (inpuff(p)) {
+                    nm = CLOUD; aux = puff2.x; life = 0; T = min(T, TE);
+                } else if (p.y >= cb0 && p.y <= cb1 && p.x >= storm.x && p.x < storm.y && Q16 < (nCloud >= 4 ? water.w * 6 : 0)) {
                     /* storm cloud: a few seeds, then billowing out from them */
                     nm = CLOUD; aux = 1 + R8b % 3; life = 0;
                 }
@@ -1088,13 +1155,14 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
         else if (m == LAVA) {
             if (aux > 0) aux -= 1;
             if (invent(p) && R16 < erupt.x) aux = max(aux, 3 + R8b % 4);
-            if (invent(p) && float(p.y) > vent.z - 30.0 && Q16 < erupt.y) { aux = 30 + R8b % 70; T = max(T, 1500 * 16); }
+            bool launch = invent(p) && float(p.y) > vent.z - 30.0 && Q16 < erupt.y * (mU != LAVA && CLS[mU] != 0 ? 8 : 1);
+            if (launch) { aux = 25 + R8b % 60; T = max(T, 1500 * 16); x = (r1 & 0x10000u) != 0u ? x | DIRR : x & ~DIRR; }
             if (TE > T) T += (TE - T) >> 4;
             /* the column sinks back when the pressure's off */
             if (invent(p) && p.y > magma.x + 2 && aux == 0 && mU != LAVA && R16 < 1500) { nm = AIR; T = TE; }
             int exposed = 0;
             for (int i = 0; i < 4; i++) exposed += int(CLS[MAT(nb[i])] >= 3);
-            T -= exposed * 5;
+            T -= exposed * 3;
             if (nWater > 0 && R8 < 40) { nm = OBSID; aux = 0; }
             else if (T < 1000 * 16 && R8 < 24) {
                 /* it sets: as rock where it lies, as cinders in the air */
@@ -1181,6 +1249,7 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
                 bool fir = (nD.w & 256u) != 0u;
                 aux = fir ? 256 + 1 + min(life, 9) / 3 : 0;
             } else if ((aux & 256) == 0 && Q16 < grow.z) { nm = LITTER; life = 0; aux = 0; }
+            else if ((aux & 512) != 0 && Q16 < 20) aux &= ~512;          /* a held drop dries */
         }
 
         /* fire: anything that burns catches when hot enough or alongside a flame */
@@ -1204,11 +1273,14 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
  * to the magma), above the floor row. */
 static const char *FS_SHIFT = "#version 330 core\n" SIM_COMMON GLSL(
     uniform isampler2D shift;
-    uniform int base;
+    uniform sampler2D surf;
+    uniform int base0;
     out uvec4 o;
     void main() {
         ivec2 p = ivec2(gl_FragCoord.xy);
         int s = texelFetch(shift, ivec2(p.x, 0), 0).r;
+        /* only the upper crust moves: what's deep (the chamber, the floor) stays */
+        int base = max(base0, int(texelFetch(surf, ivec2(p.x, 0), 0).r) - 40);
         uvec4 c = at(p);
         if (p.y >= base && s > 0) c = p.y == base ? uvec4((c.x & 0xff00u) | uint(STONE), at(p).y, 0u, 0u) : at(p - ivec2(0, 1));
         else if (p.y >= base && s < 0) c = p.y == N.y - 1 ? uvec4(c.x & 0xff00u, c.y, 0u, 0u) : at(p + ivec2(0, 1));
@@ -1528,8 +1600,8 @@ static const char *FS_CELL = "#version 330 core\n" NOISE_COMMON GLSL(
             rock *= 1.0 - occ * 0.07;
             bg = rock * (cut * 0.85 + lin * 0.6 * sun_col + glo * vec3(1.3, 1.1, 1.0));
         } else {
-            float hz = clamp((cf.y - sea) / (U * 1.2), 0.0, 1.0);
-            bg = mix(sky_hor, sky_top, pow(hz, 0.8));
+            float hz = 1.0 - exp(-max(cf.y - sea, 0.0) / (U * 0.55));
+            bg = mix(sky_hor, sky_top, hz);
             skyvis = hz;
             /* sun and moon: pixel-art discs, with a halo */
             vec2 wc = vec2(cf.x, float(N.y) - cf.y) * CS;
@@ -1604,9 +1676,9 @@ static const char *FS_CELL = "#version 330 core\n" NOISE_COMMON GLSL(
             vec2 uv = cf / vec2(N);
             vec2 g = textureLod(gas, uv, 0.0).rg * 0.4 + textureLod(gas, uv, 1.0).rg * 0.35 + textureLod(gas, uv, 2.0).rg * 0.45;
             float sm = clamp(g.r * 1.1, 0.0, 0.85), st = clamp(g.g * 1.0, 0.0, 0.75);
-            vec3 lt = sun_col * max(lin, 0.3) + amb + glo * 0.8;
+            vec3 lt = (sun_col * max(lin, 0.3) + amb) * (1.0 - inside) + cutl * 0.8 + glo * 0.8;
             c = mix(c, vec3(0.20, 0.19, 0.19) * lt + glo * 0.15, sm);
-            c = mix(c, vec3(0.90, 0.92, 0.95) * lt, st);
+            c = mix(c, vec3(0.90, 0.92, 0.95) * lt, st * (1.0 - inside * 0.6));
         }
         /* bloom over everything */
         c += glo * 0.1 * (1.0 - cover * 0.5);
@@ -1718,7 +1790,7 @@ static GLuint t_surf, t_back, t_shift, t_stats, fb_stats, t_cap, t_mat, p_wind;
 static GLuint p_glow, p_cell, t_glow, fb_glow, t_cell, t_over, fb_cell, t_gas;
 static int cur, lt_cur;
 static struct { GLint S, N, tick, seed, off, wind, cb0, cb1; } um;
-static struct { GLint S, N, tick, seed, surf, clim, vent, chamber, erupt, magma, water, storm, grow, grow2, bolt, cb0, cb1, seaedge; } ur;
+static struct { GLint S, N, tick, seed, surf, clim, vent, chamber, erupt, magma, water, storm, grow, grow2, bolt, cb0, cb1, seaedge, puff, puff2; } ur;
 
 static GLuint tex2d(GLenum ifmt, int w, int h, GLenum fmt, GLenum type, const void *data, GLint filt) {
     GLuint t;
@@ -1770,7 +1842,7 @@ static void gl_init(void) {
     ur.surf = U(p_react, "surf"); ur.clim = U(p_react, "clim"); ur.vent = U(p_react, "vent"); ur.chamber = U(p_react, "chamber"); ur.erupt = U(p_react, "erupt"); ur.magma = U(p_react, "magma");
     ur.water = U(p_react, "water"); ur.storm = U(p_react, "storm"); ur.grow = U(p_react, "grow"); ur.grow2 = U(p_react, "grow2");
     ur.bolt = U(p_react, "bolt"); ur.cb0 = U(p_react, "cb0"); ur.cb1 = U(p_react, "cb1");
-    ur.seaedge = U(p_react, "seaedge");
+    ur.seaedge = U(p_react, "seaedge"); ur.puff = U(p_react, "puff"); ur.puff2 = U(p_react, "puff2");
 
     for (int i = 0; i < 2; i++) {
         t_st[i] = tex2d(GL_RGBA16UI, NX, NY, GL_RGBA_INTEGER, GL_UNSIGNED_SHORT, cells, GL_NEAREST);
@@ -1830,7 +1902,7 @@ static struct {
     int wind, wind_step, storm_x0, storm_x1, bolt[4];
     double wind_acc;
     float clim[4], vent[4];
-    int erupt[4], water[4], grow[4], grow2[4], magma[2];
+    int erupt[4], water[4], grow[4], grow2[4], magma[2], puff[4], puff2[4];
     float season[4], storm_i, volc_phase, flash_tick;
 } sc;
 static uint32_t last_bolt = 0xffffffffu;
@@ -1872,6 +1944,23 @@ static void schedule(uint32_t tk) {
     sc.water[1] = (int)(8 + 260 * si);
     sc.water[2] = (int)(1 + 5 * (1 - si) + 30 * fmax(-wdef - 0.03, 0));
     sc.water[3] = (int)(si * si * 40 * (wdef > 0.08 ? 2 : 1) * (wdef < -0.05 ? 0 : 1));
+    /* cumulus: now and then in fair weather, one after another in a storm */
+    sc.puff2[1] = 0;
+    {
+        float pp = 1.0f / (HZ * 14) + si * si / (HZ * 6.0f);
+        if (h01((int)tk, 3, 361) < pp) {
+            int stormy = h01((int)tk, 4, 361) < si;
+            float sz = (stormy ? 1.3f : 0.8f) * (0.6f + 0.8f * h01((int)tk, 5, 361)) * fmaxf(Ufeat / 300, 0.6f);
+            sc.puff[0] = stormy ? sc.storm_x0 + (int)(h01((int)tk, 6, 361) * (sc.storm_x1 - sc.storm_x0))
+                                : (int)(h01((int)tk, 6, 361) * NX);
+            sc.puff[1] = cb0 + (int)((cb1 - cb0) * (0.1f + 0.35f * h01((int)tk, 7, 361)));
+            sc.puff[2] = (int)(18 * sz) + 4;
+            sc.puff[3] = (int)(9 * sz) + 3;
+            sc.puff2[0] = stormy ? 2 + (h01((int)tk, 8, 361) < 0.4f) : 1;
+            sc.puff2[1] = 1;
+            sc.puff2[2] = (int)(hash3((int)tk, 9, 361) & 0xffff);
+        }
+    }
     /* lightning in the thick of it */
     sc.bolt[2] = 0;
     float lp = (si - 0.6f) * 0.0016f;
@@ -1904,7 +1993,7 @@ static void schedule(uint32_t tk) {
     sc.erupt[3] = (int)(6 + 150 * build * build + 900 * erupt);
     sc.grow2[2] = 0;
     {
-        float lo = vent_top - 0.25f * (vent_top - vent_bot), hi = vent_top - 1;
+        float lo = vent_top - 0.25f * (vent_top - vent_bot), hi = vent_top + 3;
         sc.magma[0] = (int)mixf(lo, hi, fmaxf(smooth(0.6f, 0.78f, f) * (1 - smooth(0.9f, 0.98f, f)), 0));
         sc.magma[1] = (int)(300 + 3000 * (build + erupt));
     }
@@ -1954,7 +2043,7 @@ static void stats_and_geology(void) {
     int best = -1;
     float be = 0;
     for (int x = 4; x < NX - 4; x++) {
-        if (abs(x - vent_x) < crater_w + 12) continue;
+        if (abs(x - vent_x) < 6) continue;
         float e = 0;
         for (int i = -4; i <= 4; i++) e += surf_meas[x + i] - target[x + i];
         e /= 9;
@@ -2025,6 +2114,8 @@ static void sim_tick(void) {
     glUniform2iv(ur.magma, 1, sc.magma);
     glUniform4iv(ur.water, 1, sc.water);
     glUniform2i(ur.storm, sc.storm_x0, sc.storm_x1);
+    glUniform4iv(ur.puff, 1, sc.puff);
+    glUniform4iv(ur.puff2, 1, sc.puff2);
     glUniform4iv(ur.grow, 1, sc.grow);
     glUniform4iv(ur.grow2, 1, sc.grow2);
     glUniform4iv(ur.bolt, 1, sc.bolt);
@@ -2060,7 +2151,9 @@ static void sim_tick(void) {
         glUniform1i(U(p_shift, "S"), 0);
         glUniform1i(U(p_shift, "shift"), 1);
         glUniform2i(U(p_shift, "N"), NX, NY);
-        glUniform1i(U(p_shift, "base"), j_mag + 4);
+        glUniform1i(U(p_shift, "base0"), j_mag + 4);
+        bind_tex(2, t_surf);
+        glUniform1i(U(p_shift, "surf"), 2);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         cur = 1 - cur;
         shift_pending = 0;
