@@ -1009,6 +1009,7 @@ static void panel_init(Panel *P, const PanelSpec *ps, uint64_t seed) {
             /* rotation numbers near 2/5, 2/7 and 1/8: slowly precessing stars */
             double th[3] = {0.4021, 0.2834 + 0.004 * j1, 0.1309};
             for (int i = 0; i < 3; i++) { ball_on(&b[n], T, 0, urand(&rs), th[i] * M_PI); b[n].u = (i + 0.5f) / 3; n++; }
+            P->r1 = 5;                  /* slow enough that the stars stay distinct */
         } break;
         case TB_ELLIPSE: {
             /* two orbits round confocal ellipses, two between confocal hyperbolas */
@@ -1020,6 +1021,7 @@ static void panel_init(Panel *P, const PanelSpec *ps, uint64_t seed) {
                 ball_on(&b[n], T, 0, u, ell_angle_for(T, u, lam[i]));
                 b[n].u = (i + 0.5f) / 4; n++;
             }
+            P->r1 = 10;
         } break;
         case TB_SQUARE:
             ball_in(&b[n], T, -0.31, -0.77, atan2(2, 3), 0); b[n].u = 0.15f; n++;             /* slope 2/3 */
@@ -1034,7 +1036,7 @@ static void panel_init(Panel *P, const PanelSpec *ps, uint64_t seed) {
             double fang = atan2(m2y - my, m2x - mx);
             ball_on(&b[n], T, 0, 0.5, fang); b[n].u = 0.85f; n++;
             ball_on(&b[n], T, 0, 0.36, fang); b[n].u = 0.6f; n++;
-            ball_on(&b[n], T, 0, 0.29 + 0.05 * j1, 1.0 + 0.618034 * 0.01); b[n].u = 0.2f; n++;
+            ball_on(&b[n], T, 0, 0.29 + 0.05 * j1, 0.7854 * 0.9787); b[n].u = 0.2f; n++;
             P->uorb = 2;
             P->ux = b[2].px; P->uy = b[2].py; P->udx = b[2].dx; P->udy = b[2].dy;
             P->r1 = 6;
@@ -2356,6 +2358,9 @@ int main(int argc, char **argv) {
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
         if (opt_shot) {
             double wt = opt_epoch ? opt_epoch + opt_at : wall();
+            /* with --bench N too: arrive at --at frame by frame, from N/60 s
+             * before it (the live path, decay ticks and all) */
+            for (int i = opt_bench; i > 0; i--) render(opt_at - i / 60.0, wt - i / 60.0, fbo);
             render(opt_at, wt, fbo);
             glFinish();
             save_ppm(opt_shot);
@@ -2365,18 +2370,29 @@ int main(int argc, char **argv) {
         double t0 = now();
         render(opt_at, wall(), fbo);
         glFinish();
-        double tb = now() - t0, sum = 0, worst = 0;
+        double tb = now() - t0, sum = 0, worst = 0, cpu = 0, gpu = 0, gmin = 1e9;
+        GLuint q;
+        glGenQueries(1, &q);
         for (int i = 0; i < opt_bench; i++) {
             double f0 = now();
             double t = opt_at + (i + 1) / 60.0;
+            glBeginQuery(GL_TIME_ELAPSED, q);
             render(t, wall(), fbo);
+            glEndQuery(GL_TIME_ELAPSED);
+            cpu += now() - f0;
             glFinish();
             double ms = (now() - f0) * 1000;
+            GLuint64 ns = 0;
+            glGetQueryObjectui64v(q, GL_QUERY_RESULT, &ns);
+            gpu += ns * 1e-6;
+            if (ns * 1e-6 < gmin) gmin = ns * 1e-6;
             sum += ms;
             if (ms > worst) worst = ms;
         }
         printf("billiards: %dx%d, %d frames: avg %.3f ms, worst %.3f ms per frame (act set up and caught up in %.1f ms)\n",
                W, H, opt_bench, sum / opt_bench, worst, tb * 1000);
+        printf("billiards: of which CPU %.3f ms; GPU time avg %.3f ms, best %.3f ms\n", cpu * 1000 / opt_bench,
+               gpu / opt_bench, gmin);
         printf("billiards: GL renderer: %s\n", (const char *)glGetString(GL_RENDERER));
         return 0;
     }
