@@ -692,10 +692,10 @@ static void put_far(double *p, int m) {
 
 /* triangulate the live sites at positions (px, py) per slot; fills g_slot
  * and the CSR neighbour lists; returns how many */
-static int triangulate(const double *px, const double *py) {
+static int triangulate(const double *px, const double *py, const double *keep) {
     int m = 0;
     for (int s = 0; s < S.n; s++)
-        if (S.alive[s]) { g_slot[m] = s; g_pts[2 * m] = px[s]; g_pts[2 * m + 1] = py[s]; m++; }
+        if (S.alive[s] && (!keep || (px[s] > keep[0] && px[s] < keep[2] && py[s] > keep[1] && py[s] < keep[3]))) { g_slot[m] = s; g_pts[2 * m] = px[s]; g_pts[2 * m + 1] = py[s]; m++; }
     put_far(g_pts, m);
     del_build(g_pts, m + NFAR);
     return m;
@@ -719,7 +719,7 @@ static int walk_nearest(int i, double x, double y) {
 /* one Lloyd step (weighted by the text density at weight wt); returns the
  * largest move */
 static double lloyd(double wt, double alpha) {
-    int m = triangulate(S.x, S.y);
+    int m = triangulate(S.x, S.y, NULL);
     double vx[MAXV + 8], vy[MAXV + 8];
     int nb[MAXV], o = 0;
     for (int i = 0; i < m; i++) {
@@ -1355,7 +1355,7 @@ static void frame_positions(double t) {
 /* shared by the cell shaders: uniforms, noise, colours */
 static const char *CELL_COMMON = GLSL(
     uniform int uStyle;
-    uniform float uSp, uPx, uArea, uCen, uTime;
+    uniform float uSp, uPx, uArea, uCen, uTime, uTextOn;
     uniform vec3 uLight;
 
     float h21(vec2 p) { p = fract(p * vec2(234.34, 435.345)); p += dot(p, p + 34.23); return fract(p.x * p.y); }
@@ -1484,13 +1484,16 @@ static const char *FS_CELL = GLSL(
         vec2 G = ss > 0.0 ? normalize(sg + 1e-6) : gmin;
 
         float area = t1.w, tA = clamp(0.3 - 0.5 * log2(max(area, 1e-3)), 0.0, 1.0);
+        /* area colouring: everything while text is up, otherwise only the
+         * cells whose size stands out */
+        float am = max(uTextOn, uArea * clamp(abs(log2(max(area, 1e-3))) * 2.5, 0.0, 1.0));
         vec3 fill = vFill;
         vec3 col, ink = vec3(0.0);
         vec2 cen = vKey.zw;
         if (uTime < 0.0) { o = vec4(fill * (1.0 - cov) + 0.001 * Ds, 1.0); return; }
 
         if (uStyle == 0) {                       /* stained glass */
-            vec3 g = mix(fill, areaRamp(tA), uArea * 0.9);
+            vec3 g = mix(fill, areaRamp(tA), am * 0.9);
             vec2 dl = p - uLight.xy;
             float bl = 0.30 + 0.95 * exp(-dot(dl, dl) / (uLight.z * uLight.z)) + 0.35 * (fbm(p / (uSp * 6.0)) - 0.5);
             float kk = t1.z < 0.5 ? t1.x : t1.y;
@@ -1510,7 +1513,7 @@ static const char *FS_CELL = GLSL(
             col = mix(col, lead, cov);
             ink = vec3(1.0, 0.86, 0.45);
         } else if (uStyle == 1) {                /* giraffe */
-            vec3 pt = mix(fill, areaRamp(tA), uArea * 0.85);
+            vec3 pt = mix(fill, areaRamp(tA), am * 0.85);
             pt *= 0.82 + 0.22 * smoothstep(hw, hw + 0.35 * uSp * cs, Ds);
             pt *= 0.9 + 0.16 * vn(vec2(p.x / (uSp * 0.012), p.y / (uSp * 0.05)));
             vec3 net = vec3(0.93, 0.86, 0.70) * (0.93 + 0.08 * vn(p / (uSp * 0.08)));
@@ -1518,7 +1521,7 @@ static const char *FS_CELL = GLSL(
             col = mix(net, pt, m);
             ink = vec3(0.22, 0.10, 0.03);
         } else if (uStyle == 2) {                /* celadon crackle */
-            vec3 gl = mix(fill, areaRamp(tA), uArea * 0.8);
+            vec3 gl = mix(fill, areaRamp(tA), am * 0.8);
             gl *= 0.92 + 0.12 * fbm(p / (uSp * 3.0));
             float halo = exp(-max(abs(dmin), 0.0) / (0.05 * uSp));
             gl = mix(gl, gl * vec3(0.78, 0.76, 0.62), 0.45 * halo);
@@ -1530,7 +1533,7 @@ static const char *FS_CELL = GLSL(
             ink = vec3(0.35, 0.18, 0.10);
         } else if (uStyle == 3) {                /* blueprint */
             vec3 bg = vec3(0.07, 0.22, 0.46) * (0.93 + 0.1 * fbm(p / (uSp * 1.5)));
-            bg = mix(bg, areaRamp(tA), uArea * 0.55);
+            bg = mix(bg, areaRamp(tA), am * 0.55);
             float g = uSp * 0.5;
             vec2 gd = abs(fract(p / g + 0.5) - 0.5) * g / uPx;
             vec2 gD = abs(fract(p / (4.0 * g) + 0.5) - 0.5) * 4.0 * g / uPx;
@@ -1546,7 +1549,7 @@ static const char *FS_CELL = GLSL(
             float gran = 0.75 + 0.5 * fbm(p / (uSp * 0.05));
             vec3 wc = fill;
             col = mix(paper, paper * wc, wash * (0.32 + 0.35 * pool) * gran);
-            col = mix(col, areaRamp(tA) * paper, uArea * 0.25);
+            col = mix(col, areaRamp(tA) * paper, am * 0.25);
             vec3 inkc = vec3(0.12, 0.10, 0.09);
             col = mix(col, inkc, cov * (0.85 + 0.15 * vn(p / (uSp * 0.03))));
             ink = vec3(0.70, 0.16, 0.10);
@@ -1557,7 +1560,7 @@ static const char *FS_CELL = GLSL(
             honey += vec3(0.45, 0.22, 0.0) * exp(-dot(p - s, p - s) / (0.05 * uSp * uSp)) * 0.5;
             float rim = (1.0 - smoothstep(hw, hw + 0.16 * uSp * cs, Ds)) * max(dot(G, normalize(vec2(0.6, 0.8))), 0.0);
             honey += vec3(1.0, 0.90, 0.60) * rim * 0.4;
-            float capped = step(kh(kk, 5.0), 0.16 + 0.6 * uArea * tA);
+            float capped = step(kh(kk, 5.0), 0.16 + 0.6 * am * tA);
             vec3 cap = vec3(0.94, 0.80, 0.47) * (0.82 + 0.22 * depth) * (0.95 + 0.08 * vn(p / (uSp * 0.06)));
             vec3 cell = mix(honey, cap, capped);
             cell = mix(cell, cell * vec3(0.55, 0.40, 0.30), step(0.94, kh(kk, 8.0)) * (1.0 - capped));
@@ -1580,10 +1583,10 @@ static const char *FS_CELL = GLSL(
             col = mix(col, ink, uCen * max(max(dot_, ring), seg * 0.8));
         }
         /* stippling: in the text, a dot per site */
-        if ((uStyle == 3 || uStyle == 4) && uArea > 0.0) {
+        if ((uStyle == 3 || uStyle == 4) && am > 0.0) {
             float rd = 0.11 * uSp;
             float dt = 1.0 - smoothstep(rd - aa, rd + aa, length(p - s));
-            col = mix(col, uStyle == 3 ? vec3(0.92, 0.96, 1.0) : vec3(0.12, 0.10, 0.09), uArea * dt);
+            col = mix(col, uStyle == 3 ? vec3(0.92, 0.96, 1.0) : vec3(0.12, 0.10, 0.09), am * dt);
         }
         o = vec4(col, 1.0);
     });
@@ -1928,9 +1931,37 @@ static float edge_alpha(int si, int n, int m) {
     return 1;
 }
 
+/* everything the geometry depends on, to skip rebuilding a still frame */
+static unsigned char *last_key;
+static size_t last_len;
+static int frame_unchanged(void) {
+    size_t n = (size_t)S.n, len = n * (4 * sizeof(double) + 4 * sizeof(float) + sizeof(int) + 1) + 6 * sizeof(double);
+    static unsigned char *k;
+    static size_t cap;
+    if (len > cap) { k = realloc(k, len); last_key = realloc(last_key, len); cap = len; }
+    unsigned char *o = k;
+#define PUT(src, sz) do { memcpy(o, (src), (sz)); o += (sz); } while (0)
+    PUT(fx_, n * sizeof(double)); PUT(fy_, n * sizeof(double)); PUT(fcx, n * sizeof(double)); PUT(fcy, n * sizeof(double));
+    PUT(fkA, n * sizeof(float)); PUT(fkB, n * sizeof(float)); PUT(fmix, n * sizeof(float)); PUT(fea, n * sizeof(float));
+    PUT(ftw, n * sizeof(int)); PUT(S.alive, n);
+    double v[6] = {v_ox, v_oy, v_sc, (double)W, (double)H, f_dual_on > 0};
+    PUT(v, sizeof v);
+#undef PUT
+    int same = len == last_len && !memcmp(k, last_key, len);
+    memcpy(last_key, k, len);
+    last_len = len;
+    return same;
+}
+
 static void frame_geometry(void) {
     double t0 = now();
-    int m = triangulate(fx_, fy_);
+    if (frame_unchanged()) { t_tri = (now() - t0) * 1000; return; }
+    /* only the sites near this output: 5 spacings out, every cell that
+     * reaches the screen still has all its true neighbours (cells are about
+     * one spacing across, a little more in the sparse parts of a text
+     * cycle), so the slices of neighbouring outputs agree exactly */
+    double mg = 5 * sp, keep[4] = {v_ox - mg, v_oy - mg, v_ox + W / v_sc + mg, v_oy + H / v_sc + mg};
+    int m = triangulate(fx_, fy_, getenv("VORONOI_FULL") ? NULL : keep);
     int c = S.cap + NFAR;
     if (!tri_buf) {
         slot2i = malloc(sizeof(int) * c);
@@ -2034,11 +2065,12 @@ static void render(double t, double wall, GLuint target) {
     glUniform1f(U(prog_cell, "uSp"), (float)sp);
     glUniform1f(U(prog_cell, "uPx"), (float)(1.0 / v_sc));
     glUniform1f(U(prog_cell, "uArea"), (float)f_area_on);
+    glUniform1f(U(prog_cell, "uTextOn"), (float)f_text_on);
     glUniform1f(U(prog_cell, "uCen"), (float)(palettes[pal].name[0] == 'b' ? fmax(f_cen_on, 0.6 * (1 - f_text_on)) : f_cen_on));
     glUniform1f(U(prog_cell, "uTime"), getenv("VPROBE") ? -1.0f : (float)fmod(t, 1000.0));
     /* the light behind the glass drifts slowly across the front screen */
     glUniform3f(U(prog_cell, "uLight"), (float)(fr[0] + fr[2] * (0.5 + 0.3 * cos(t * 0.011))),
-                (float)(fr[1] + fr[3] * (0.4 + 0.25 * sin(t * 0.017))), (float)(0.75 * fmax(fr[2], fr[3])));
+                (float)(fr[1] + fr[3] * (0.4 + 0.25 * sin(t * 0.017))), (float)(span_me >= 0 ? 0.4 * bw : 0.75 * fmax(fr[2], fr[3])));
     glUniform1i(U(prog_cell, "uNoise"), 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex_noise);
