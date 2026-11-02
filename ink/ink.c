@@ -303,6 +303,34 @@ static const char *FS_JACOBI = GLSL(
                     at(uP, p + ivec2(0, 1)).x + at(uP, p - ivec2(0, 1)).x - at(uDiv, p).x);
     });
 
+/* multigrid: what the pressure leaves of the divergence, summed 2x2 into
+ * the next level down, and that level's correction brought back up */
+static const char *FS_RESID = GLSL(
+    uniform sampler2D uP, uDiv;
+    out float o;
+    void main() {
+        ivec2 p = P();
+        o = at(uDiv, p).x - (at(uP, p + ivec2(1, 0)).x + at(uP, p - ivec2(1, 0)).x +
+                             at(uP, p + ivec2(0, 1)).x + at(uP, p - ivec2(0, 1)).x - 4.0 * at(uP, p).x);
+    });
+static const char *FS_RESTRICT = GLSL(
+    uniform sampler2D uSrc;
+    out float o;
+    void main() {
+        ivec2 b = 2 * P(), n = textureSize(uSrc, 0);
+        float r = 0.0;
+        for (int j = 0; j < 2; j++)
+            for (int i = 0; i < 2; i++) {
+                ivec2 q = b + ivec2(i, j);
+                if (q.x < n.x && q.y < n.y) r += texelFetch(uSrc, q, 0).x;
+            }
+        o = r;
+    });
+static const char *FS_PROLONG = GLSL(
+    uniform sampler2D uP, uE;
+    out float o;
+    void main() { o = at(uP, P()).x + texture(uE, gl_FragCoord.xy * 0.5 / vec2(textureSize(uE, 0))).x; });
+
 static const char *FS_GRAD = GLSL(
     uniform sampler2D uVel, uP;
     out vec2 o;
@@ -605,16 +633,22 @@ static GLuint mk_sim(const char *fs) { return mk_link(vs_full, compile(GL_FRAGME
 #define U(p, n) glGetUniformLocation(p, n)
 
 /* ---- the simulation: a slice of the tank ---- */
+#define NLEV 3
 typedef struct {
     int nx, ny, f, dx, dy;             /* velocity grid, ink resolution factor, ink grid */
     float cph;                         /* velocity cells per canvas height */
     float dom[4];                      /* its domain, in canvas heights */
-    GLuint vel[2], curl, div, prs[2], dye[3], tmp[2], now;
-    GLuint fvel[2], fcurl, fdiv, fprs[2], fdye[3], ftmp[2], fnow;
-    int v, p, prev, cur;               /* which of each is current */
+    GLuint vel[2], curl, dye[3], tmp[2], now;
+    GLuint fvel[2], fcurl, fdye[3], ftmp[2], fnow;
+    struct {                           /* the pressure, at each multigrid level */
+        int w, h, c;
+        GLuint p[2], rhs, res, fp[2], frhs, fres;
+    } lv[NLEV];
+    int v, prev, cur;                  /* which of each is current */
 } Slice;
 static Slice sl[2];                    /* near, far */
 
+static GLuint prog_resid, prog_restrict, prog_prolong;
 static GLuint prog_final, prog_now, prog_curl, prog_vel, prog_div, prog_jac, prog_grad, prog_adv, prog_dye, prog_show;
 static GLuint vao;
 
@@ -638,9 +672,12 @@ static void tex_fbo(GLuint *tex, GLuint *fbo, int w, int h, GLenum ifmt, GLenum 
 
 static void slice_free(Slice *s) {
     if (!s->nx) return;
-    GLuint *t = &s->vel[0];
-    glDeleteTextures(12, t);
-    glDeleteFramebuffers(12, &s->fvel[0]);
+    glDeleteTextures(9, &s->vel[0]);
+    glDeleteFramebuffers(9, &s->fvel[0]);
+    for (int l = 0; l < NLEV; l++) {
+        glDeleteTextures(4, &s->lv[l].p[0]);
+        glDeleteFramebuffers(4, &s->lv[l].fp[0]);
+    }
     s->nx = 0;
 }
 
@@ -653,8 +690,12 @@ static void slice_init(Slice *s, float cells, int f) {
     s->f = f; s->dx = s->nx * f; s->dy = s->ny * f;
     for (int i = 0; i < 2; i++) tex_fbo(&s->vel[i], &s->fvel[i], s->nx, s->ny, GL_RG16F, GL_RG, 0);
     tex_fbo(&s->curl, &s->fcurl, s->nx, s->ny, GL_R16F, GL_RED, 0);
-    tex_fbo(&s->div, &s->fdiv, s->nx, s->ny, GL_R32F, GL_RED, 0);
-    for (int i = 0; i < 2; i++) tex_fbo(&s->prs[i], &s->fprs[i], s->nx, s->ny, GL_R32F, GL_RED, 0);
+    for (int l = 0, w = s->nx, h = s->ny; l < NLEV; l++, w = (w + 1) / 2, h = (h + 1) / 2) {
+        s->lv[l].w = w; s->lv[l].h = h;
+        for (int i = 0; i < 2; i++) tex_fbo(&s->lv[l].p[i], &s->lv[l].fp[i], w, h, GL_R32F, GL_RED, 0);
+        tex_fbo(&s->lv[l].rhs, &s->lv[l].frhs, w, h, GL_R32F, GL_RED, 0);
+        tex_fbo(&s->lv[l].res, &s->lv[l].fres, w, h, GL_R32F, GL_RED, 0);
+    }
     for (int i = 0; i < 3; i++) tex_fbo(&s->dye[i], &s->fdye[i], s->dx, s->dy, GL_RGBA16F, GL_RGBA, 1);
     for (int i = 0; i < 2; i++) tex_fbo(&s->tmp[i], &s->ftmp[i], s->dx, s->dy, GL_RGBA16F, GL_RGBA, 0);
     tex_fbo(&s->now, &s->fnow, s->dx, s->dy, GL_RGBA16F, GL_RGBA, 0);
@@ -663,15 +704,21 @@ static void slice_init(Slice *s, float cells, int f) {
 static void slice_clear(Slice *s) {
     static const float z[4] = {0, 0, 0, 0};
     GLuint *f = &s->fvel[0];
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < 9; i++) {
         glBindFramebuffer(GL_FRAMEBUFFER, f[i]);
         glClearBufferfv(GL_COLOR, 0, z);
     }
+    for (int l = 0; l < NLEV; l++)
+        for (int i = 0; i < 4; i++) {
+            glBindFramebuffer(GL_FRAMEBUFFER, (&s->lv[l].fp[0])[i]);
+            glClearBufferfv(GL_COLOR, 0, z);
+        }
     for (int i = 0; i < 3; i++) {
         glBindTexture(GL_TEXTURE_2D, s->dye[i]);
         glGenerateMipmap(GL_TEXTURE_2D);
     }
-    s->v = s->p = 0; s->prev = 0; s->cur = 1;
+    for (int l = 0; l < NLEV; l++) s->lv[l].c = 0;
+    s->v = 0; s->prev = 0; s->cur = 1;
 }
 
 static void bind(int unit, GLuint tex) {
@@ -703,6 +750,41 @@ static float drop_x(const Drop *d) { return d->layer ? CAMX + (d->x - CAMX) / ZO
 #define IMPULSE 0.30f                  /* the slug of ink going in, seconds */
 #define TAIL 2.2f
 #define RING 2.6f                      /* the ring helped along this long */                      /* the rest draining off the surface */
+
+static void jacobi(Slice *s, int l, int n) {
+    glUseProgram(prog_jac);
+    bind(1, s->lv[l].rhs);
+    for (int i = 0; i < n; i++) {
+        bind(0, s->lv[l].p[s->lv[l].c]);
+        pass(prog_jac, s->lv[l].fp[1 - s->lv[l].c], s->lv[l].w, s->lv[l].h);
+        s->lv[l].c ^= 1;
+    }
+}
+
+/* the pressure, by a V-cycle from last step's: smooth, hand what's left
+ * down a level to be solved there (where long waves take few sweeps), add
+ * that back, smooth again */
+static void vcycle(Slice *s, int l) {
+    static const int pre[NLEV] = {4, 4, 0}, post[NLEV] = {6, 6, 40};
+    jacobi(s, l, pre[l]);
+    if (l + 1 < NLEV) {
+        glUseProgram(prog_resid);
+        bind(0, s->lv[l].p[s->lv[l].c]); bind(1, s->lv[l].rhs);
+        pass(prog_resid, s->lv[l].fres, s->lv[l].w, s->lv[l].h);
+        glUseProgram(prog_restrict);
+        bind(0, s->lv[l].res);
+        pass(prog_restrict, s->lv[l + 1].frhs, s->lv[l + 1].w, s->lv[l + 1].h);
+        static const float z[4] = {0, 0, 0, 0};
+        glBindFramebuffer(GL_FRAMEBUFFER, s->lv[l + 1].fp[s->lv[l + 1].c]);
+        glClearBufferfv(GL_COLOR, 0, z);
+        vcycle(s, l + 1);
+        glUseProgram(prog_prolong);
+        bind(0, s->lv[l].p[s->lv[l].c]); bind(1, s->lv[l + 1].p[s->lv[l + 1].c]);
+        pass(prog_prolong, s->lv[l].fp[1 - s->lv[l].c], s->lv[l].w, s->lv[l].h);
+        s->lv[l].c ^= 1;
+    }
+    jacobi(s, l, post[l]);
+}
 
 static void step_slice(Slice *s, int layer, double t) {
     float dt = (float)(1.0 / SIM_HZ);
@@ -761,18 +843,11 @@ static void step_slice(Slice *s, int layer, double t) {
 
     glUseProgram(prog_div);
     bind(0, s->vel[s->v]);
-    pass(prog_div, s->fdiv, s->nx, s->ny);
-
-    glUseProgram(prog_jac);
-    bind(1, s->div);
-    for (int i = 0; i < 28; i++) {
-        bind(0, s->prs[s->p]);
-        pass(prog_jac, s->fprs[1 - s->p], s->nx, s->ny);
-        s->p = 1 - s->p;
-    }
+    pass(prog_div, s->lv[0].frhs, s->nx, s->ny);
+    vcycle(s, 0);
 
     glUseProgram(prog_grad);
-    bind(0, s->vel[s->v]); bind(1, s->prs[s->p]);
+    bind(0, s->vel[s->v]); bind(1, s->lv[0].p[s->lv[0].c]);
     pass(prog_grad, s->fvel[1 - s->v], s->nx, s->ny);
     s->v = 1 - s->v;
 
@@ -1050,6 +1125,9 @@ static void gl_init(void) {
     prog_adv = mk_sim(FS_ADV);
     prog_dye = mk_sim(FS_DYE);
     prog_now = mk_sim(FS_NOW);
+    prog_resid = mk_sim(FS_RESID);
+    prog_restrict = mk_sim(FS_RESTRICT);
+    prog_prolong = mk_sim(FS_PROLONG);
     prog_show = mk_link(vs_full, compile(GL_FRAGMENT_SHADER, "#version 330 core\n", FS_SHOW));
     prog_final = mk_link(vs_full, compile(GL_FRAGMENT_SHADER, "#version 330 core\n#define FINAL 1\n", FS_SHOW));
     glGenVertexArrays(1, &vao);
@@ -1059,6 +1137,9 @@ static void gl_init(void) {
     glUseProgram(p = prog_curl); glUniform1i(U(p, "uVel"), 0);
     glUseProgram(p = prog_div); glUniform1i(U(p, "uVel"), 0);
     glUseProgram(p = prog_jac); glUniform1i(U(p, "uP"), 0); glUniform1i(U(p, "uDiv"), 1);
+    glUseProgram(p = prog_resid); glUniform1i(U(p, "uP"), 0); glUniform1i(U(p, "uDiv"), 1);
+    glUseProgram(p = prog_restrict); glUniform1i(U(p, "uSrc"), 0);
+    glUseProgram(p = prog_prolong); glUniform1i(U(p, "uP"), 0); glUniform1i(U(p, "uE"), 1);
     glUseProgram(p = prog_grad); glUniform1i(U(p, "uVel"), 0); glUniform1i(U(p, "uP"), 1);
     glUseProgram(p = prog_adv); glUniform1i(U(p, "uSrc"), 0); glUniform1i(U(p, "uVel"), 1);
     glUseProgram(p = prog_dye);
