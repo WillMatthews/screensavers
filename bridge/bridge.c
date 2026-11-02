@@ -94,7 +94,8 @@ static int opt_act;                    /* 1..3: loop one act */
 static double opt_at = 30;
 static int off_w = 1920, off_h = 1080;
 static double opt_epoch;
-static float opt_budget = 4;           /* ms of solver work per frame, live */
+static float opt_budget = 3;           /* ms of solver work per frame, live */
+static int opt_msaa = 4;
 
 static float span[MAX_OUT][4];
 static int span_n, span_me = -1, front = 1;
@@ -104,6 +105,12 @@ static void die(const char *what) { fprintf(stderr, "bridge: %s\n", what); exit(
 static double now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+static double cpu_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
@@ -942,18 +949,23 @@ static void cont_trajectories(Cont *c) {
 
 /* geometric multigrid on the optimiser's structured grid, as the CG's
  * preconditioner (MGCG, after Amir, Aage & Lazarov 2014): bilinear
- * prolongation, Galerkin coarse operators P^T A P, damped Jacobi
- * smoothing (the same before and after, so the V-cycle is symmetric), a
- * dense Cholesky at the bottom */
+ * prolongation P, Galerkin coarse operators P^T A P built element by
+ * element (a coarse element's matrix is the sum over its 2x2 children of
+ * P_s^T k_child P_s), damped Jacobi smoothing (the same before and after,
+ * so the V-cycle is symmetric), a dense Cholesky at the bottom */
 #define MAXLVL 6
 typedef struct {
     int nl, nx[MAXLVL], ny[MAXLVL], n[MAXLVL];
     Csr A[MAXLVL];
+    int *map[MAXLVL];           /* element -> CSR slots, levels >= 1 */
+    double *ke[MAXLVL];         /* element matrices, levels >= 1 */
+    unsigned char *fx[MAXLVL];  /* fixed dofs at each level */
     int *par[MAXLVL];           /* fine dof -> 4 coarse parents (-1 none) */
     double *pw[MAXLVL];
     double *dinv[MAXLVL], *b[MAXLVL], *x[MAXLVL], *t[MAXLVL];
+    double Ps[4][64];           /* a child element's dofs from its parent's */
+    double Ms[4][64];           /* P_s^T KE P_s */
     double *L;                  /* coarsest, dense Cholesky factor */
-    const unsigned char *fix;
 } Mg;
 
 static void grid_edof(int nx, int ny, int *edof) {
@@ -965,13 +977,45 @@ static void grid_edof(int nx, int ny, int *edof) {
         }
 }
 
-static void mg_init(Mg *g, const Csr *K, int nelx, int nely, const unsigned char *fix) {
+/* o = P^T k P, all 8x8 */
+static void ptkp(const double *Pm, const double *k, double *o) {
+    double t[64];
+    for (int i = 0; i < 8; i++)
+        for (int j = 0; j < 8; j++) {
+            double s = 0;
+            for (int m = 0; m < 8; m++) s += k[i * 8 + m] * Pm[m * 8 + j];
+            t[i * 8 + j] = s;
+        }
+    for (int i = 0; i < 8; i++)
+        for (int j = 0; j < 8; j++) {
+            double s = 0;
+            for (int m = 0; m < 8; m++) s += Pm[m * 8 + i] * t[m * 8 + j];
+            o[i * 8 + j] = s;
+        }
+}
+
+static void mg_init(Mg *g, const Csr *K, int nelx, int nely, const unsigned char *fix, const double *KE) {
     memset(g, 0, sizeof *g);
-    g->fix = fix;
+    /* corners in the element's dof order (LL, LR, UR, UL), as (column, row) with rows downward */
+    static const int cc[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
+    for (int s = 0; s < 4; s++) {
+        int sx = s & 1, sy = s >> 1;
+        memset(g->Ps[s], 0, sizeof g->Ps[s]);
+        for (int f = 0; f < 4; f++) {
+            double X = (sx + cc[f][0]) * 0.5, Y = (sy + cc[f][1]) * 0.5;
+            for (int c = 0; c < 4; c++) {
+                double w = (cc[c][0] ? X : 1 - X) * (cc[c][1] ? Y : 1 - Y);
+                for (int d = 0; d < 2; d++) g->Ps[s][(2 * f + d) * 8 + 2 * c + d] = w;
+            }
+        }
+        ptkp(g->Ps[s], KE, g->Ms[s]);
+    }
     int nx = nelx, ny = nely;
     for (int l = 0; l < MAXLVL; l++) {
         g->nx[l] = nx; g->ny[l] = ny; g->n[l] = 2 * (nx + 1) * (ny + 1);
         g->nl = l + 1;
+        int n = g->n[l];
+        g->fx[l] = calloc((size_t)n, 1);
         if (l == 0) {
             Csr *A = &g->A[0];
             *A = *K;
@@ -979,13 +1023,20 @@ static void mg_init(Mg *g, const Csr *K, int nelx, int nely, const unsigned char
             A->ci = malloc(sizeof(int) * K->nnz); memcpy(A->ci, K->ci, sizeof(int) * K->nnz);
             A->v = malloc(sizeof(double) * K->nnz);
             A->diag = malloc(sizeof(double) * K->n);
+            memcpy(g->fx[0], fix, (size_t)n);
         } else {
-            int *ed = malloc(sizeof(int) * 8 * nx * ny), *map;
+            int *ed = malloc(sizeof(int) * 8 * nx * ny);
             grid_edof(nx, ny, ed);
-            csr_pattern(&g->A[l], g->n[l], nx * ny, 8, ed, &map);
-            free(ed); free(map);
+            csr_pattern(&g->A[l], n, nx * ny, 8, ed, &g->map[l]);
+            free(ed);
+            g->ke[l] = malloc(sizeof(double) * 64 * nx * ny);
+            /* a coarse dof is held where the fine node it sits on is */
+            int fny = g->ny[l - 1];
+            for (int ix = 0; ix <= nx; ix++)
+                for (int iy = 0; iy <= ny; iy++)
+                    for (int d = 0; d < 2; d++)
+                        g->fx[l][2 * (ix * (ny + 1) + iy) + d] = g->fx[l - 1][2 * (2 * ix * (fny + 1) + 2 * iy) + d];
         }
-        int n = g->n[l];
         g->dinv[l] = malloc(sizeof(double) * n);
         g->b[l] = malloc(sizeof(double) * n);
         g->x[l] = malloc(sizeof(double) * n);
@@ -997,7 +1048,7 @@ static void mg_init(Mg *g, const Csr *K, int nelx, int nely, const unsigned char
         int cny = ny / 2;
         for (int ix = 0; ix <= nx; ix++)
             for (int iy = 0; iy <= ny; iy++) {
-                int cx[2], cy[2], ncx = 0, ncy = 0;
+                int cx[2], cy[2], ncx, ncy;
                 double wx[2], wy[2];
                 if (ix % 2 == 0) { cx[0] = ix / 2; wx[0] = 1; ncx = 1; }
                 else { cx[0] = ix / 2; cx[1] = ix / 2 + 1; wx[0] = wx[1] = 0.5; ncx = 2; }
@@ -1023,46 +1074,45 @@ static void mg_init(Mg *g, const Csr *K, int nelx, int nely, const unsigned char
 static void mg_free(Mg *g) {
     for (int l = 0; l < g->nl; l++) {
         csr_free(&g->A[l]);
+        free(g->map[l]); free(g->ke[l]); free(g->fx[l]);
         free(g->par[l]); free(g->pw[l]); free(g->dinv[l]); free(g->b[l]); free(g->x[l]); free(g->t[l]);
     }
     free(g->L);
     memset(g, 0, sizeof *g);
 }
 
-static int csr_find(const Csr *A, int r, int c) {
-    int lo = A->rp[r], hi = A->rp[r + 1] - 1;
-    while (lo <= hi) {
-        int m = (lo + hi) / 2;
-        if (A->ci[m] < c) lo = m + 1; else if (A->ci[m] > c) hi = m - 1; else return m;
-    }
-    return -1;
+/* held dofs: rows and columns out, a one on the diagonal */
+static void csr_mask(Csr *A, const unsigned char *fx) {
+    for (int i = 0; i < A->n; i++)
+        for (int k = A->rp[i]; k < A->rp[i + 1]; k++)
+            if (fx[i] || fx[A->ci[k]]) A->v[k] = A->ci[k] == i ? 1 : 0;
 }
 
-/* the operators for the current K */
-static void mg_setup(Mg *g, const Csr *K) {
+/* the operators for the current design (Ee: each element's modulus) */
+static void mg_setup(Mg *g, const Csr *K, const double *Ee) {
     Csr *A0 = &g->A[0];
     memcpy(A0->v, K->v, sizeof(double) * K->nnz);
-    for (int i = 0; i < A0->n; i++)
-        for (int k = A0->rp[i]; k < A0->rp[i + 1]; k++)
-            if (g->fix[i] || g->fix[A0->ci[k]]) A0->v[k] = A0->ci[k] == i ? 1 : 0;
-    for (int l = 0; l + 1 < g->nl; l++) {
-        const Csr *F = &g->A[l];
-        Csr *C = &g->A[l + 1];
-        memset(C->v, 0, sizeof(double) * C->nnz);
-        for (int i = 0; i < F->n; i++)
-            for (int k = F->rp[i]; k < F->rp[i + 1]; k++) {
-                int j = F->ci[k];
-                double v = F->v[k];
-                if (v == 0) continue;
-                for (int a = 0; a < 4 && g->par[l][i * 4 + a] >= 0; a++) {
-                    int ca = g->par[l][i * 4 + a];
-                    double wa = g->pw[l][i * 4 + a] * v;
-                    for (int b = 0; b < 4 && g->par[l][j * 4 + b] >= 0; b++) {
-                        int at = csr_find(C, ca, g->par[l][j * 4 + b]);
-                        C->v[at] += wa * g->pw[l][j * 4 + b];
+    csr_mask(A0, g->fx[0]);
+    for (int l = 1; l < g->nl; l++) {
+        int nx = g->nx[l], ny = g->ny[l], fny = g->ny[l - 1];
+        for (int cx = 0; cx < nx; cx++)
+            for (int cy = 0; cy < ny; cy++) {
+                double *k = g->ke[l] + (size_t)(cx * ny + cy) * 64, m[64];
+                memset(k, 0, sizeof(double) * 64);
+                for (int s = 0; s < 4; s++) {
+                    int fe = (2 * cx + (s & 1)) * fny + 2 * cy + (s >> 1);
+                    if (l == 1) { for (int i = 0; i < 64; i++) k[i] += Ee[fe] * g->Ms[s][i]; }
+                    else {
+                        ptkp(g->Ps[s], g->ke[l - 1] + (size_t)fe * 64, m);
+                        for (int i = 0; i < 64; i++) k[i] += m[i];
                     }
                 }
             }
+        Csr *A = &g->A[l];
+        memset(A->v, 0, sizeof(double) * A->nnz);
+        for (int e = 0; e < nx * ny; e++)
+            for (int i = 0; i < 64; i++) A->v[g->map[l][e * 64 + i]] += g->ke[l][(size_t)e * 64 + i];
+        csr_mask(A, g->fx[l]);
     }
     for (int l = 0; l < g->nl; l++) {
         csr_diag(&g->A[l]);
@@ -1142,7 +1192,7 @@ typedef struct {
     double volfrac, penal, rmin, E0, Emin, nu, KE[64];
     int *edof, *map;
     Csr K;
-    double *x, *xPhys, *xnew, *dc, *ce, *F, *U;
+    double *x, *xPhys, *xnew, *dc, *ce, *F, *U, *Ee;
     unsigned char *fix, *passive;
     int *Hp, *Hi;               /* the filter, element-by-element (CSR) */
     double *Hv, *Hs;
@@ -1232,7 +1282,8 @@ static void top_build(Top *T, int kind, int nelx, int nely, double volfrac, doub
     T->Hp[T->ne] = k;
     pcg_init(&T->pcg, &T->K, T->fix);
     T->pcg.tol = 1e-6;
-    mg_init(&T->mg, &T->K, nelx, nely, T->fix);
+    mg_init(&T->mg, &T->K, nelx, nely, T->fix, T->KE);
+    T->Ee = malloc(sizeof(double) * T->ne);
     T->pcg.prec = mg_prec;
     T->pcg.pctx = &T->mg;
     T->hist = malloc(sizeof(float) * (size_t)(TOP_MAXIT + 1) * T->ne);
@@ -1243,7 +1294,7 @@ static void top_build(Top *T, int kind, int nelx, int nely, double volfrac, doub
 
 static void top_free(Top *T) {
     free(T->edof); free(T->map); csr_free(&T->K);
-    free(T->x); free(T->xPhys); free(T->xnew); free(T->dc); free(T->ce); free(T->F); free(T->U);
+    free(T->Ee); free(T->x); free(T->xPhys); free(T->xnew); free(T->dc); free(T->ce); free(T->F); free(T->U);
     free(T->fix); free(T->passive); free(T->Hp); free(T->Hi); free(T->Hv); free(T->Hs);
     pcg_free(&T->pcg); mg_free(&T->mg); free(T->hist);
     memset(T, 0, sizeof *T);
@@ -1252,7 +1303,7 @@ static void top_free(Top *T) {
 static void top_assemble(Top *T) {
     memset(T->K.v, 0, sizeof(double) * T->K.nnz);
     for (int e = 0; e < T->ne; e++) {
-        double Ee = T->Emin + pow(T->xPhys[e], T->penal) * (T->E0 - T->Emin);
+        double Ee = T->Ee[e] = T->Emin + pow(T->xPhys[e], T->penal) * (T->E0 - T->Emin);
         const int *m = T->map + e * 64;
         for (int i = 0; i < 64; i++) T->K.v[m[i]] += Ee * T->KE[i];
     }
@@ -1322,18 +1373,20 @@ static void top_update(Top *T) {
     if (ch < 0.01 || T->iter >= TOP_MAXIT) T->done = 1;
 }
 
-/* do up to budget ms of work (budget <= 0: until done); returns done */
+/* do up to budget ms of work (budget <= 0: until done), a small piece at
+ * a time so a frame never waits long: assemble, set up the multigrid, a
+ * couple of CG iterations, the update; returns done */
 static int top_work(Top *T, double budget_ms) {
     double t0 = now();
     while (!T->done) {
-        if (T->phase == 0) {
-            top_assemble(T);
-            mg_setup(&T->mg, &T->K);
+        if (T->phase == 0) { top_assemble(T); T->phase = 1; }
+        else if (T->phase == 1) {
+            mg_setup(&T->mg, &T->K, T->Ee);
             pcg_begin(&T->pcg, T->F);       /* pcg.x still holds the last U: the warm start */
-            T->phase = 1;
-        }
-        int fin = pcg_run(&T->pcg, 4);
-        if (fin) {
+            T->phase = 2;
+        } else if (T->phase == 2) {
+            if (pcg_run(&T->pcg, 2)) T->phase = 3;
+        } else {
             T->cg_last = T->pcg.it;
             top_update(T);
             T->phase = 0;
@@ -2283,6 +2336,8 @@ static float mrun(const char **pp, float px, int mode, int depth, float x, float
             float sx = last_x + last_w;
             float dy = sup ? -fmaxf(px * 0.42f, last_top - spx * 0.3f) : px * 0.24f;
             float w = matom(&p, spx, mode, depth + 1, sx, y + dy, col, &b);
+            bx->asc = fmaxf(bx->asc, b.asc - dy);
+            bx->desc = fmaxf(bx->desc, b.desc + dy);
             if ((*p == '^' || *p == '_') && (*p == '^') != sup) {
                 int sup2 = *p == '^';
                 p++;
@@ -2290,10 +2345,9 @@ static float mrun(const char **pp, float px, int mode, int depth, float x, float
                 float dy2 = sup2 ? -fmaxf(px * 0.42f, last_top - spx * 0.3f) : px * 0.24f;
                 float w2 = matom(&p, spx, mode, depth + 1, sx, y + dy2, col, &b2);
                 w = fmaxf(w, w2);
-                b.asc = fmaxf(b.asc, b2.asc - dy2); b.desc = fmaxf(b.desc, b2.desc + dy2);
+                bx->asc = fmaxf(bx->asc, b2.asc - dy2);
+                bx->desc = fmaxf(bx->desc, b2.desc + dy2);
             }
-            bx->asc = fmaxf(bx->asc, b.asc - dy);
-            bx->desc = fmaxf(bx->desc, b.desc + dy);
             x = sx + w + px * 0.04f;
             last_w = 0;
             continue;
@@ -2337,14 +2391,14 @@ static float mrun(const char **pp, float px, int mode, int depth, float x, float
                 const char *q = p;
                 MBox b = {0, 0};
                 float w = matom(&q, px, mode, depth, 0, 0, NULL, &b);
-                /* the radical, grown to clear what's under it */
+                /* the radical, grown to span what's under it, its top on the vinculum */
                 const Glyph *rg = glyph(si, 0x221A);
-                float t0 = rg->top / sc, need = b.asc + px * 0.16f, f = fmaxf(1, need / t0);
+                float need = b.asc + px * 0.14f, span_h = need + b.desc + px * 0.04f;
+                float f = fmaxf(1, fminf(2.5f, span_h / fmaxf(rg->h / sc, 1e-3f)));
                 int rs = style(F_MATH, px * f);
                 const Glyph *rg2 = glyph(rs, 0x221A);
-                float top = rg2->top / sc, th = fmaxf(px * 0.045f, 1.0f / sc);
-                float rw = put_glyph(rs, 0x221A, x, y + (f - 1) * px * 0.12f, col);
-                top -= (f - 1) * px * 0.12f;
+                float top = need, th = fmaxf(px * 0.045f, 1.0f / sc);
+                float rw = put_glyph(rs, 0x221A, x, y - need + rg2->top / sc, col);
                 matom(&p, px, mode, depth, x + rw + px * 0.04f, y, col, &b);
                 if (col) rect(x + rw - th * 0.5f, y - top, x + rw + w + px * 0.1f, y - top + th, col);
                 rw += px * 0.04f;
@@ -2693,8 +2747,8 @@ static float top_frac;
 
 #define TOP_START 5.0
 #define TOP_RATE 1.6
-#define SOLVE0 2.6
-#define SOLVE1 8.0
+#define SOLVE0 4.6
+#define SOLVE1 10.5
 
 static int same_scene(const Scene *a, const Scene *b) {
     return a->type == b->type && a->kind == b->kind && a->t0 == b->t0;
@@ -3441,7 +3495,7 @@ static void draw_cont(void) {
 static GLuint tex_topo;
 static float top_sharp = 1;
 static unsigned char *topo_px;
-static int topo_w, topo_h;
+static int topo_w, topo_h, topo_tw, topo_th;
 
 static void draw_top(void) {
     const Top *T = &top;
@@ -3474,7 +3528,12 @@ static void draw_top(void) {
         }
     }
     glBindTexture(GL_TEXTURE_2D, tex_topo);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, full, ny, 0, GL_RGBA, GL_UNSIGNED_BYTE, topo_px);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (topo_tw != full || topo_th != ny) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, full, ny, 0, GL_RGBA, GL_UNSIGNED_BYTE, topo_px);
+        topo_tw = full; topo_th = ny;
+    } else
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, full, ny, GL_RGBA, GL_UNSIGNED_BYTE, topo_px);
     float a = smooth01(0.3f, 1.6f, (float)ts);
     float sc4[4];
     col_a(sc4, P->solid, a);
@@ -4270,7 +4329,7 @@ static void msaa_size(void) {
     if (msaa_w == W && msaa_h == H) return;
     msaa_w = W; msaa_h = H;
     glBindRenderbuffer(GL_RENDERBUFFER, msaa_rb);
-    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_RGBA8, W, H);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, opt_msaa, GL_RGBA8, W, H);
     glBindFramebuffer(GL_FRAMEBUFFER, msaa_fbo);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, msaa_rb);
 }
@@ -4442,7 +4501,8 @@ static void usage(void) {
         "usage: bridge [--window | --root | --layer] [--seed N] [--fps N] [--palette cae|blueprint|paper|mono]\n"
         "              [--act 1|2|3] [--model warren|pratt|arch|stayed|suspension|plate|cantilever|bracket|mbb|deck]\n"
         "              [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
-        "              [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--budget MS] [--check]\n");
+        "              [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--budget MS] [--msaa 0|2|4]\n"
+        "              [--check]\n");
     exit(1);
 }
 
@@ -4470,6 +4530,11 @@ static void save_ppm(const char *path) {
     free(px);
 }
 
+static int cmp_dbl(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return x < y ? -1 : x > y;
+}
+
 static void pick_model(const char *m) {
     for (int i = 0; i < NBRIDGE; i++) if (!strcmp(m, bridge_names[i])) { force_type = S_BRIDGE; force_kind = i; }
     for (int i = 0; i < NCONT; i++) if (!strcmp(m, cont_names[i])) { force_type = S_CONT; force_kind = i; }
@@ -4491,6 +4556,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-act") && i + 1 < argc) opt_act = atoi(argv[++i]);
         else if (!strcmp(a, "-model") && i + 1 < argc) opt_model = argv[++i];
         else if (!strcmp(a, "-budget") && i + 1 < argc) opt_budget = strtof(argv[++i], NULL);
+        else if (!strcmp(a, "-msaa") && i + 1 < argc) opt_msaa = atoi(argv[++i]);
         else if (!strcmp(a, "-shot") && i + 1 < argc) opt_shot = argv[++i];
         else if (!strcmp(a, "-bench") && i + 1 < argc) opt_bench = atoi(argv[++i]);
         else if (!strcmp(a, "-size") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &off_w, &off_h) != 2) usage(); }
@@ -4582,19 +4648,29 @@ int main(int argc, char **argv) {
         render(wall(), fbo);
         glFinish();
         double sum = 0, worst = 0, solve = 0, wsolve = 0;
+        double *gpu = malloc(sizeof(double) * opt_bench);
+        GLuint q;
+        glGenQueries(1, &q);
+        double cpu0 = cpu_now();
         for (int i = 0; i < opt_bench; i++) {
             double t = opt_at + i / 60.0;
             double f0 = now();
             scene_update(t, opt_budget);
             double f1 = now();
+            glBeginQuery(GL_TIME_ELAPSED, q);
             render(wall(), fbo);
+            glEndQuery(GL_TIME_ELAPSED);
             glFinish();
+            GLuint64 ns = 0;
+            glGetQueryObjectui64v(q, GL_QUERY_RESULT, &ns);
+            gpu[i] = ns * 1e-6;
             double ms = (now() - f1) * 1000;
             solve += (f1 - f0) * 1000;
             wsolve = fmax(wsolve, (f1 - f0) * 1000);
             sum += ms;
             if (ms > worst) worst = ms;
         }
+        double cpu_frame = (cpu_now() - cpu0) * 1000 / opt_bench;
         double c0 = now();
         for (int i = 0; i < opt_bench; i++) { layout(); build_frame(wall()); }
         double build = (now() - c0) * 1000 / opt_bench;
@@ -4603,6 +4679,24 @@ int main(int argc, char **argv) {
                W, H, opt_bench, opt_at,
                cur.type == S_BRIDGE ? bridge_names[cur.kind] : cur.type == S_CONT ? cont_names[cur.kind] : top_names[cur.kind],
                sum / opt_bench, worst, build, nvb, solve / opt_bench, wsolve);
+        qsort(gpu, (size_t)opt_bench, sizeof *gpu, cmp_dbl);
+        printf("bridge: GPU time (timer query): median %.3f ms, 10th percentile %.3f ms, 90th %.3f ms\n",
+               gpu[opt_bench / 2], gpu[opt_bench / 10], gpu[opt_bench * 9 / 10]);
+        printf("bridge: process CPU (user + sys, all threads) %.3f ms a frame, solver included\n", cpu_frame);
+        /* the solver over a whole scene, live: stepped at 60 fps with the
+         * per-frame budget, from the scene's start to its end */
+        {
+            Scene sc0 = cur;
+            have_cur = 0;
+            scene_free();
+            double t1 = cpu_now(), w0 = now();
+            scene_build(&sc0);
+            int nf = (int)(sc0.dur * 60);
+            for (int i = 0; i < nf; i++) scene_update(sc0.t0 + i / 60.0, opt_budget);
+            double c = cpu_now() - t1;
+            printf("bridge: the solver over the whole %.0f s scene, live at 60 fps: %.2f s of CPU, %.1f%% of a core "
+                   "(%.2f s wall)\n", sc0.dur, c, 100 * c / sc0.dur, now() - w0);
+        }
         printf("bridge: GL renderer: %s\n", (const char *)glGetString(GL_RENDERER));
         return 0;
     }
