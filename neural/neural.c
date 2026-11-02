@@ -11,9 +11,9 @@
  *   I    IMPLICIT IMAGE   a coordinate network, (x, y) -> (r, g, b), learns
  *                         one procedurally drawn picture (the clock at the
  *                         time the act began, the hostname in large type, a
- *                         mountain sunset, a zone plate). Either a SIREN (sine
- *                         activations) or a ReLU MLP on random Fourier
- *                         features. Its output is shown beside the target,
+ *                         mountain sunset, a zone plate). A SIREN (sine
+ *                         activations; --model fourier for a ReLU MLP on random Fourier
+ *                         features instead). Its output is shown beside the target,
  *                         sharpening from blur to crisp, with the loss on a
  *                         log axis and an error spectrogram (error per spatial
  *                         frequency band over time): the low bands go dark
@@ -25,15 +25,15 @@
  *                         diagram has its edges coloured and thickened by
  *                         weight sign and size, pulsing with the gradient
  *                         flowing back through them.
- *   III  CHARACTER MODEL  an MLP language model (12 characters of context,
+ *   III  CHARACTER MODEL  an MLP language model (8 characters of context,
  *                         learned embeddings, one tanh layer, softmax) learns
  *                         to write away-messages from a small embedded corpus;
  *                         it types a fresh sample every few seconds, with its
  *                         next-character distribution under the cursor, and
  *                         keeps a log of samples epoch by epoch, plus its
  *                         character embeddings projected to 2D (PCA).
- *   IV   OPTIMISERS       SGD, momentum, RMSProp and Adam race on Rosenbrock,
- *                         Rastrigin and Himmelblau surfaces, drawn in 3D and as
+ *   IV   OPTIMISERS       SGD, momentum, RMSProp and Adam race on Rosenbrock, then
+ *                         Rastrigin (noisy gradients) or Himmelblau, drawn in 3D and as
  *                         a contour map, with their losses.
  *
  * Training is deterministic: each act's net starts from an init seeded by
@@ -1709,23 +1709,36 @@ static const char *FS_FIELD = "#version 330 core\n" CMAPS GLSL(
         float x0 = p.x * uScale, x1 = p.y * uScale;
         float h1[12], h2[12], h3[12];
         float v = 0.0;
-        for (int i = 0; i < 12; i++) h1[i] = tanh(uB1[i] + x0 * uW1[i] + x1 * uW1[12 + i]);
-        for (int j = 0; j < 12; j++) {
-            float s = uB2[j];
-            for (int i = 0; i < 12; i++) s += h1[i] * uW2[i * 12 + j];
-            h2[j] = tanh(s);
-        }
-        for (int j = 0; j < 12; j++) {
-            float s = uB3[j];
-            for (int i = 0; i < 12; i++) s += h2[i] * uW3[i * 12 + j];
-            h3[j] = tanh(s);
-        }
         float z = uB4;
-        for (int i = 0; i < 12; i++) z += h3[i] * uW4[i];
+        /* a unit's map only needs the layers up to it (uniform branches) */
         if (uLayer == 0) v = uUnit == 0 ? p.x : p.y;
-        else if (uLayer == 1) v = h1[uUnit];
-        else if (uLayer == 2) v = h2[uUnit];
-        else if (uLayer == 3) v = h3[uUnit];
+        else if (uLayer == 1) v = tanh(uB1[uUnit] + x0 * uW1[uUnit] + x1 * uW1[12 + uUnit]);
+        else {
+            for (int i = 0; i < 12; i++) h1[i] = tanh(uB1[i] + x0 * uW1[i] + x1 * uW1[12 + i]);
+            if (uLayer == 2) {
+                float s = uB2[uUnit];
+                for (int i = 0; i < 12; i++) s += h1[i] * uW2[i * 12 + uUnit];
+                v = tanh(s);
+            } else {
+                for (int j = 0; j < 12; j++) {
+                    float s = uB2[j];
+                    for (int i = 0; i < 12; i++) s += h1[i] * uW2[i * 12 + j];
+                    h2[j] = tanh(s);
+                }
+                if (uLayer == 3) {
+                    float s = uB3[uUnit];
+                    for (int i = 0; i < 12; i++) s += h2[i] * uW3[i * 12 + uUnit];
+                    v = tanh(s);
+                } else {
+                    for (int j = 0; j < 12; j++) {
+                        float s = uB3[j];
+                        for (int i = 0; i < 12; i++) s += h2[i] * uW3[i * 12 + j];
+                        h3[j] = tanh(s);
+                    }
+                    for (int i = 0; i < 12; i++) z += h3[i] * uW4[i];
+                }
+            }
+        }
         vec3 c;
         if (uLayer >= 0) c = divc(v);
         else {
@@ -2351,7 +2364,6 @@ static void fit_spec(Rect r) {
         seg(a.x0 - 3 * Uu, y, a.x0, y, 1 * Uu, P.dim);
         textf(st_tiny, a.x0 - 7 * Uu, y + cap_h(st_tiny) * 0.5f, 1, P.dim, 0, "%d", f);
     }
-    text(st_tiny, a.x0 - 7 * Uu, a.y0 - 8 * Uu, -1, "cycles / image", P.dim, 0);
     float st = F.nsteps > 600 ? 250 : 100;
     for (float v = 0; v <= F.nsteps; v += st) {
         float x = a.x0 + v / F.nsteps * rw(a);
@@ -2511,7 +2523,7 @@ static void cls_net(Rect r) {
     float top = in.y0 + 22 * Uu, bot = in.y1 - 4 * Uu;
     float cw = rw(in) / ncol;
     float rowh = (bot - top) / H2;
-    float ts = floorf(fminf(cw * 0.46f, rowh * 0.84f));
+    float ts = floorf(fminf(cw * 0.34f, rowh * 0.8f));
     float colx[NL2 + 1];
     for (int c = 0; c < ncol; c++) colx[c] = in.x0 + cw * (c + 0.5f);
 #define NY(c, i) (top + (bot - top) / 2 + ((i) - (CLS_DIMS[c] - 1) / 2.0f) * rowh)
@@ -2770,7 +2782,7 @@ static void opt_mvp(float aspect, int top, float *m) {
         m[0] = kx; m[6] = -0.3f; m[9] = -ky; m[15] = 1; m[14] = 0;
         return;
     }
-    float az = 0.75f + (float)draw_t * 0.035f, el = 0.58f, R = 4.9f, ty = 0.12f;
+    float az = 0.75f + (float)draw_t * 0.035f, el = 0.58f, R = 4.1f, ty = 0.12f;
     float ex = R * cosf(el) * cosf(az), ey = R * sinf(el) + ty, ez = R * cosf(el) * sinf(az);
     float fx = -ex, fy = ty - ey, fz = -ez, fl = sqrtf(fx * fx + fy * fy + fz * fz);
     fx /= fl; fy /= fl; fz /= fl;
@@ -3053,7 +3065,10 @@ static void compose(Rect c) {
         }
     } else {
         if (rl == R_FRONT) opt_view(c, 0);
-        else if (rl == R_DIAG) opt_view(c, 1);
+        else if (rl == R_DIAG) {
+            if (land) opt_view(c, 1);
+            else { vsplit(c, 0.62f, g, &a, &b); opt_view(a, 1); opt_loss(b); }
+        }
         else if (rl == R_STATS) opt_loss(c);
         else if (land) {
             hsplit(c, 0.6f, g * 1.5f, &a, &b);
