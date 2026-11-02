@@ -462,7 +462,7 @@ static float fire_door(double t) {
 }
 static int sim_started;
 static void physics(double dt) {
-    float load = clampf(sens.load, 0, 1);
+    float load = clampf(getenv("STEAM_LOAD") ? (float)atof(getenv("STEAM_LOAD")) : sens.load, 0, 1);
     tr.load_s += (load - tr.load_s) * (float)(dt / 4.0);
     tr.temp_s += (sens.temp - tr.temp_s) * (float)(dt / 6.0);
     /* she runs between 34 and 90 mph by how hard the CPU works */
@@ -509,7 +509,7 @@ static void advance(double t, double wt) {
         /* the train is where a steady run from the epoch would have put it,
          * with the last half minute run for real (so the smoke's there) */
         sim_started = 1;
-        double t0 = floor(fmax(t - 30, 0) / 10) * 10;   /* on a 10 s grid, so outputs started together agree */
+        double t0 = getenv("STEAM_FULLSIM") ? 0 : floor(fmax(t - 30, 0) / 10) * 10;   /* on a 10 s grid, so outputs started together agree */
         sim_t = t0;
         tr.z = 600 + 20 * t0;
         director_init(t0);
@@ -914,6 +914,10 @@ static void render(GLuint target) {
     fog_col[0] = 0.006f + 0.008f * ml; fog_col[1] = 0.008f + 0.010f * ml; fog_col[2] = 0.013f + 0.017f * ml;
     fog_den = sky.weather == 3 ? 1 / 700.0f : sky.weather == 1 ? 1 / 1300.0f : sky.weather == 2 ? 1 / 1000.0f : 1 / 3000.0f;
     mist_y = (float)(-22 - cam.p[1]);
+    if (lineside_in_tunnel(cam.p[2]) && fabs(cam.p[0] - track_x(cam.p[2])) < 6 && cam.p[1] < track_y(cam.p[2]) + 6) {
+        /* underground: no moon, no sky; only what the train brings */
+        for (int k = 0; k < 3; k++) { moon_col[k] *= 0.01f; sky_col[k] *= 0.08f; fog_col[k] *= 0.1f; }
+    }
     flick = 0.6f * sinf((float)t_now * 7.3f) * sinf((float)t_now * 3.1f + 1) + 0.4f * sinf((float)t_now * 13.7f + 2);
 
     /* lights: the fire under the engine and in the cab, the lamps; the carriages' windows */
@@ -921,7 +925,7 @@ static void render(GLuint target) {
     Frame f0 = veh_frame(0);
     double wp[3];
     float fi = tr.fire * (0.85f + 0.15f * flick);
-    fpt(&f0, 0, 0.45f, -3.3f, wp); add_light(wp, 1.3f, 4.0f * fi, 1.3f * fi, 0.3f * fi);
+    fpt(&f0, 0, 0.45f, -3.3f, wp); add_light(wp, 1.0f, 2.6f * fi, 0.8f * fi, 0.18f * fi);
     float door = fire_door(t_now);
     door_now = door;
     float ci = fi * (0.6f + 3.2f * door * (0.85f + 0.3f * flick));

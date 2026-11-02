@@ -82,7 +82,7 @@ static void trees_init(void) {
     mb_begin(&m);
     for (int lod = 0; lod < 2; lod++)
     for (int k = 0; k < NTREEKIND; k++) {
-        tree_sub = lod ? 1 : 3;
+        tree_sub = lod ? 1 : 2;
         int sk = lod ? 6 : 11;
         tree_first[lod][k] = m.n / VF;
         mb->mat = (float)k;

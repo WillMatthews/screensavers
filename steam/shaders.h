@@ -659,7 +659,7 @@ static const char *FS_SMOKE = GLSL(
         }
         float seed = vA.z;
         vec2 q = vQ * 1.6 + seed;
-        float n = vnoise(q * 1.3 + vL.w * 0.6) * 0.55 + vnoise(q * 2.9 - vL.w * 0.9) * 0.3 + vnoise(q * 6.1) * 0.15;
+        float n = vnoise(q * 1.3 + vL.w * 0.6) * 0.62 + vnoise(q * 3.3 - vL.w * 0.9) * 0.38;
         float dens = smoothstep(1.0, 0.15, d + (n - 0.5) * 0.9);
         float a = vA.x * dens;
         /* soften where it meets solid things */
@@ -678,7 +678,8 @@ static const char *FS_SMOKE = GLSL(
         float fwd = pow(max(dot(V, uMoonDir), 0.0), 6.0) * (1.0 - dens * 0.7);
         vec3 c = alb * (uMoonCol * (ml * 0.8 + fwd * 1.5) * mix(1.0, 0.5, dens) + uSkyCol * 1.2);
         /* the lamps and the fire, stronger on the underside */
-        c += alb * vL.rgb * (0.3 + 0.7 * max(-N.y, 0.0)) * 0.35;
+        vec3 lc = mix(vec3(dot(vL.rgb, vec3(0.33))), vL.rgb, 0.6);
+        c += alb * lc * (0.3 + 0.7 * max(-N.y, 0.0)) * 0.3;
         c = fogApply(c, vC);
         o = vec4(c * a, a);
     });

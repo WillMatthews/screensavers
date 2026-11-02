@@ -152,6 +152,8 @@ static void shot_pick(double t) {
             shot.fz0 = f.z0; shot.fz1 = f.z1;
         }
     }
+    /* in a tunnel (or about to be): only the footplate, lit by the fire, will do */
+    if (kind < 0 && (in_tunnel_z(head_z()) || in_tunnel_z(head_z() + v * 10) || in_tunnel_z(tr.z - 6))) kind = SH_FIRE;
     /* a round of firing about to begin: be on the footplate for it */
     if (kind < 0 && prev != SH_FIRE) {
         double nr = next_round(t);
@@ -202,6 +204,10 @@ static void director_init(double t) {
 
 static void director_update(double t) {
     if (t >= shot.t1) shot_pick(t);
+    /* a camera riding outside the train mustn't follow her into a tunnel */
+    if (shot.kind != SH_FIRE && shot.kind != SH_TUNNEL && in_tunnel_z(cam.p[2]) && fabs(cam.p[0] - track_x(cam.p[2])) < 10 &&
+        shot.t1 > t + FADE + 0.05)
+        shot.t1 = t + FADE;
     /* fixed-camera shots end early once the train has gone */
     if ((shot.kind == SH_PASSBY || shot.kind == SH_STATION || shot.kind == SH_CROSSING) && t < shot.t1 - FADE &&
         train_tail_z() > shot.a[2] + 60 && t - shot.t0 > 8)

@@ -63,7 +63,7 @@ static void smoke_step(double dt) {
     while (beats_done + 1 <= tr.beats) {
         beats_done += 1;
         float work = clampf(0.4f + tr.cutoff + 0.5f * tr.load_s, 0.3f, 1.4f);
-        int n = tr.v > 25 ? 1 : 2;
+        int n = tr.v > 12 ? 1 : 2;
         for (int i = 0; i < n; i++)
             emit(&f, 0, 4.15f, 6.15f, v3(0, 7 + 7 * work, 0), 1.6f, 0, 0.4f, 5.5f + 3.0f * work, 9.0f + 4 * work, 0.5f + 0.2f * work);
     }
@@ -142,6 +142,9 @@ static void smoke_init(void) {
     srng = opt_seed | 1;
     sm.blow_next = 20 + 40 * srand01();
     sm.whistle_next = 8 + 20 * srand01();
+    if (getenv("STEAM_BLOW")) {   /* testing: the safety valves and the whistle going from the start */
+        sm.blow_until = 1e9; sm.whistle_until = 1e9; sm.blow_next = 1e9;
+    }
 }
 static void smoke_targets(int sw, int sh) {
     smoke_w = (sw + 1) / 2; smoke_h = (sh + 1) / 2;
