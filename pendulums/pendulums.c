@@ -777,7 +777,7 @@ static const uint32_t XCP[] = {0x3B8, 0x3C9, 0x3BB, 0x3B4, 0x394, 0x3C0, 0x3C4, 
 #define NXCP (int)(sizeof XCP / sizeof *XCP)
 #define NGL (95 + NXCP)
 typedef struct { int face, px; Glyph g[NGL]; } Style;
-#define MAXSTYLE 16
+#define MAXSTYLE 32
 #define NFACE 3
 enum { F_SANS, F_MATH, F_MATHI };
 static Style styles[MAXSTYLE];
@@ -819,6 +819,10 @@ static int style(int face, float px) {
     atlas_dirty = 1;
     return nstyles++;
 }
+
+/* sizes follow the window, so a resize starts the cache afresh (between
+ * frames, so no style index handed out this frame goes stale) */
+static void text_reset(void) { nstyles = 0; atlas_dirty = 1; }
 
 static uint32_t gl_cp(int i) { return i < 95 ? (uint32_t)(32 + i) : XCP[i - 95]; }
 
@@ -2257,6 +2261,7 @@ static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t 
     zwlr_layer_surface_v1_ack_configure(ls, serial);
     if (w && h && ((int)w != W || (int)h != H)) {
         W = (int)w; H = (int)h;
+        text_reset();
         if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
     }
     wl.configured = 1;
@@ -2535,7 +2540,10 @@ int main(int argc, char **argv) {
             XNextEvent(dpy, &ev);
             if (ev.type == ConfigureNotify) {
                 if (ev.xconfigure.window == root) XResizeWindow(dpy, win, ev.xconfigure.width, ev.xconfigure.height);
-                else { W = ev.xconfigure.width; H = ev.xconfigure.height; }
+                else if (ev.xconfigure.width != W || ev.xconfigure.height != H) {
+                    W = ev.xconfigure.width; H = ev.xconfigure.height;
+                    text_reset();
+                }
             } else if (ev.type == KeyPress) {
                 KeySym k = XLookupKeysym(&ev.xkey, 0);
                 if (k == XK_q || k == XK_Escape) return 0;
