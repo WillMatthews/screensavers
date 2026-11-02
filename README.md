@@ -70,11 +70,12 @@ one and carries any clock or caption.
 | ![pendulums](docs/img/pendulums.jpg) | **pendulums**: chaos made visible. A thousand double pendulums started a hair apart swing as one line, fray into a rainbow ribbon and bloom into chaos; also the flip-time chaos map and a Poincaré section building up. Live Lyapunov and energy-error readouts. |
 | ![voronoi](docs/img/voronoi.jpg) | **voronoi**: Lloyd's relaxation: hundreds of Voronoi cells settle into a honeycomb, are stirred by ripples, swirls and wind, divide and fuse, and now and then bud into the time or the hostname. Stained glass, giraffe, crackle, blueprint, paper and honey. |
 | ![bridge](docs/img/bridge.jpg) | **bridge**: a structural-analysis screen with the finite-element solver written from scratch: Warren, Pratt, arch, cable-stayed and suspension bridges with trains crossing (stress-coloured members, the deck ringing after), a plate with a hole against Kirsch, a cantilever and a bracket, and topology optimisation growing a truss out of grey. |
+| ![pipes](docs/img/pipes.jpg) | **pipes**: xscreensaver's classic 3D pipes, growing until they fill the screen. Vendored as a binary from XScreenSaver 6.08. |
+| ![maze](docs/img/maze.jpg) | **maze**: xscreensaver's Maze3D, a walk through a brick labyrinth. Vendored as a binary from XScreenSaver 6.08. |
 
-Also in the rotation on hosts that build them: **pipes** and **maze**, the
-xscreensaver classics, vendored as binaries and run through a private
-Xwayland whose root window `windowtolayer` turns into a layer surface (see
-`lock-bg.sh`).
+**pipes** and **maze** run only on hosts that have built the Xwayland plumbing:
+they draw on the root window of a private Xwayland, which `windowtolayer`
+turns into a layer surface (see `lock-bg.sh`).
 
 ### Benched
 
