@@ -942,6 +942,7 @@ uniform vec3 uWax, uExt, uAbs, uSc, uBulb, uMetal, uGlow;
 uniform int uMetalKind;
 uniform float uGlitter, uTime, uSeed, uWarm;
 uniform int uMode;             /* 1: just the room, for the cached background */
+uniform float uPix;            /* a render pixel's size at the lamp, in lamp units */
 const float ZW = 1.9, ZE = -2.4, FOOT = -1.75;
 
 float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
@@ -1123,6 +1124,7 @@ vec3 bulbE(vec3 q) {
 }
 vec3 E(vec3 q) { float wl = texture(uLight, boxuv(q)).r; return bulbE(q) * (0.3 + 0.7 * exp(-uExt * wl * 1.6)); }
 vec2 fieldAt(vec3 q) { return texture(uField, boxuv(q)).rg; }
+vec3 fieldGrad(vec3 q) { const float e = 0.012; return vec3(fieldAt(q + vec3(e, 0, 0)).r - fieldAt(q - vec3(e, 0, 0)).r, fieldAt(q + vec3(0, e, 0)).r - fieldAt(q - vec3(0, e, 0)).r, fieldAt(q + vec3(0, 0, e)).r - fieldAt(q - vec3(0, 0, e)).r); }
 
 /* glitter: flakes carried round by the convection, flashing as they turn */
 vec3 glint(vec3 q, vec3 d, float ds, vec3 e) {
@@ -1203,6 +1205,8 @@ vec3 interior(vec3 p, vec3 d, float jit) {
     float cloud = 0.10 * (1.0 + 2.5 * (1.0 - uWarm) * (1.0 - uWarm));
     float tt = 0.0;
     float last = 1.0;
+    /* the nearest miss, to soften the wax's silhouette over a pixel */
+    float dmin = 1e9, tmin = 0.0; vec3 accm = vec3(0.0), trm = vec3(1.0);
     for (int i = 0; i < 160; i++) {
         if (tt >= tex) break;
         vec3 q = p + d * tt;
@@ -1214,6 +1218,7 @@ vec3 interior(vec3 p, vec3 d, float jit) {
             vec3 h = p + d * b;
             return acc + tr * shadeWax(h, d, fieldAt(h).g);
         }
+        if (f.r < dmin) { dmin = f.r; tmin = tt; accm = acc; trm = tr; }
         float ds = clamp(f.r * 0.8, 0.008, 0.03);
         ds = min(ds, tex - tt + 1e-3);
         if (i == 0) ds *= jit;
@@ -1226,12 +1231,22 @@ vec3 interior(vec3 p, vec3 d, float jit) {
         tt += ds;
     }
     vec3 q = p + d * tex;
-    if (q.y < 0.05) return acc + tr * uBulb * vec3(1.0, 0.85, 0.6) * 0.06;
-    if (q.y > HG - 0.03) return acc + tr * uSc * uBulb * 0.002;
-    vec3 n = glassNormal(q);
-    vec3 d2 = refract(d, -n, 1.36);
-    if (dot(d2, d2) < 0.5) return acc + tr * uSc * bulbE(q) * 0.02;
-    return acc + tr * bg(toWorld(q + n * 0.03), d2) * 0.96;
+    vec3 miss;
+    if (q.y < 0.05) miss = acc + tr * uBulb * vec3(1.0, 0.85, 0.6) * 0.06;
+    else if (q.y > HG - 0.03) miss = acc + tr * uSc * uBulb * 0.002;
+    else {
+        vec3 n = glassNormal(q);
+        vec3 d2 = refract(d, -n, 1.36);
+        if (dot(d2, d2) < 0.5) miss = acc + tr * uSc * bulbE(q) * 0.02;
+        else miss = acc + tr * bg(toWorld(q + n * 0.03), d2) * 0.96;
+    }
+    if (dmin < uPix) {
+        vec3 h = p + d * tmin;
+        h -= normalize(vec3(0.001) + fieldGrad(h)) * dmin;
+        vec3 w = accm + trm * shadeWax(h, d, fieldAt(h).g);
+        miss = mix(miss, w, 0.5 * (1.0 - dmin / uPix));
+    }
+    return miss;
 }
 
 vec3 metalShade(vec3 p, vec3 rd, int id) {
@@ -1527,6 +1542,8 @@ static void gl_init(void) {
 
 /* the render targets: the scene at the render scale, and the bloom chain */
 static void ensure_targets(void) {
+    /* portrait: the lamp fills more of the screen, so a little coarser */
+    if (opt_scale <= 0) render_scale = H > W * 1.2f ? 0.6f : 0.7f;
     int w = (int)(W * render_scale + 0.5f), h = (int)(H * render_scale + 0.5f);
     if (w < 16) w = 16;
     if (h < 16) h = 16;
@@ -1735,6 +1752,7 @@ static void render(double t, float a, double wt, GLuint target) {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr);
     glViewport(0, 0, rt_w, rt_h);
     glUniform1i(U(p, "uMode"), 0);
+    glUniform1f(U(p, "uPix"), 1.3f * DC / (out_f[me] * rt_h / r[3]) / out_s[me]);
     {   /* the lamp's box on screen: its corners through our camera */
         float S = out_s[me], F = out_f[me], cx = r[0] + r[2] / 2, x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
         for (int k = 0; k < 8; k++) {
@@ -1918,7 +1936,7 @@ static void usage(void) {
         "                [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
         "                [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--stats]\n"
         "  --palette  classic, blue, purple, green, white or glitter (default: from the seed)\n"
-        "  --scale    render scale for the scene (default 0.7; the caption and grain are always full size)\n"
+        "  --scale    render scale for the scene (default 0.7, 0.6 portrait; the caption and grain are always full size)\n"
         "  --cpu      the bulb runs hotter with the CPU load (the wax then no longer repeats run to run)\n"
         "  --at       --shot: that many seconds after switch-on (default 240; 0-120 is the warm-up)\n");
     exit(1);
