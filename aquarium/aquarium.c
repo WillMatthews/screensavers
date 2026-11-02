@@ -1,7 +1,62 @@
 /*
  * aquarium — a planted freshwater aquarium seen through the front glass.
  *
- * HEADER-PLACEHOLDER
+ * A nature-style scape: sand with ripples and leaf litter, seiryu stones,
+ * branching driftwood furred with moss and carrying ferns and Anubias,
+ * stem plants (Rotala, Ludwigia, Hygrophila), Amazon swords, Vallisneria,
+ * a hairgrass and Monte Carlo carpet. The plants sway in the filter's
+ * current. An air stone sends up a bubble column; leaves pearl oxygen in
+ * strong light; motes drift and catch the light.
+ *
+ * Who lives here:
+ *   neon tetras   a school: boids (separation, alignment) anchored to
+ *                 closed-form slots in a wandering school, with darts
+ *   angelfish     silver, four bars running into tall swept fins, feelers
+ *   discus        red with turquoise vermiculation, a fringe of fin
+ *   Corydoras     pandas grazing nose-down, now and then dashing up for air
+ *   a fire eel    cruising the bottom, nosing round the stones, and now and
+ *                 then burrowing right into the sand to wait, head out
+ *   shrimp        cherry and Amano: grazing with alternate picks of the
+ *                 claws, walking, hopping, now and then flicking backwards
+ * Fish are lofted from cross-sections with membrane fins on rays, bent per
+ * vertex by a travelling body wave (tail beat from speed, turning, banking,
+ * pectorals sculling when they hover), with iridescent, silvered, scaled
+ * shading and proper eyes. The eel's body follows its head's track by
+ * arclength; the shrimp are built each frame from segments and limbs.
+ *
+ * The water: refraction through the flat front glass (Snell, per vertex),
+ * caustics splatted from a refracting mesh of the rippled surface, a shadow
+ * map from the lamp, light shafts, absorption and haze with distance, the
+ * underside of the surface and the side panes as mirrors (total internal
+ * reflection), dispersion toward the edges, TAA.
+ *
+ * The lamp follows the local clock: a warm dawn, daylight, a warm, dimmer
+ * evening, blue moonlight at night (the neons fade, everyone slows and
+ * goes low). The machine shows quietly: CPU load stirs the fish and the
+ * current; a thermometer on the glass reads the CPU package temperature;
+ * a small caption names the host and how long the screen has been locked.
+ *
+ * Cost: everything still (tank, sand, stones, wood, carpet, moss) is baked
+ * once, supersampled, into a G-buffer of light-independent terms and relit
+ * each frame; only swaying plants and animals are drawn per frame, at an
+ * internal resolution that follows the output's size (--scale to override).
+ *
+ * Deterministic: everything follows from --seed and the time since
+ * --epoch. The fish run a fixed-step sim in overlapping 24 s chapters, each
+ * replayed from a closed-form start and crossfaded, so any instance (or a
+ * restarted one) agrees; the eel's and shrimps' lives are planned ahead
+ * from the seed. Spanning: one instance per output with the same --seed,
+ * --epoch and --layout, --output = its index; one tank fills the layout's
+ * bounding box through one camera centred on the output under the middle,
+ * so fish swim from one screen to the next. A portrait screen gets a tall
+ * tank.
+ *
+ * Same plumbing as gauges: Xlib + GLX for --window / --root, a native
+ * wlr-layer-shell surface over EGL for --layer, --shot FILE.ppm [--at S]
+ * [--size WxH], --bench N. --hour, --load, --temp, --away fake the clock
+ * and sensors; --focus KIND [--pose YAW] frames a close-up of one animal.
+ *
+ * Keys (window mode): q / Escape quit.
  */
 #define _DEFAULT_SOURCE
 #define GL_GLEXT_PROTOTYPES
@@ -1749,6 +1804,7 @@ static const char *FS_SHAFTS = GLSL(
     in vec2 vUV;
     uniform sampler2D uAux;
     uniform float uShaftK;
+    uniform float uJit;
     void main() {
         vec3 G, d;
         view_ray(vUV, G, d);
@@ -1757,9 +1813,9 @@ static const char *FS_SHAFTS = GLSL(
         zEnd = min(zEnd, uTD);
         float sEnd = zEnd / d.z;
         if (d.y > 0.0) sEnd = min(sEnd, (uYW - G.y) / d.y);
-        const int N = 8;
+        const int N = 6;
         float ds = sEnd / float(N);
-        float j = hash12(gl_FragCoord.xy + fract(uT * 7.13) * 91.0);
+        float j = fract(hash12(gl_FragCoord.xy) + uJit * 0.6180339);
         vec3 acc = vec3(0.0);
         for (int i = 0; i < N; i++) {
             float s = (float(i) + j) * ds;
@@ -4733,6 +4789,7 @@ static void render(double t, double wt, GLuint target) {
     glUniform4fv(U(p_shafts, "uView"), 1, vr);
     glUniform3fv(U(p_shafts, "uCanCam"), 1, cc);
     glUniform1i(U(p_shafts, "uAux"), 3);
+    glUniform1f(U(p_shafts, "uJit"), (float)(frame_no % 61));
     glUniform1f(U(p_shafts, "uShaftK"), 0.06f * lit.shaft);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, tex_shadow);
