@@ -1880,7 +1880,7 @@ static float follow(double wt, float r0, double *tx, double *ty, float *trange) 
         float lead = a->ship ? 0 : 15;
         fol_x = a->x + sin(a->trk * DEG) * a->gs / 3600 * lead;
         fol_y = a->y + cos(a->trk * DEG) * a->gs / 3600 * lead;
-        fol_range = a->ship ? 3.2f : a->emerg ? 14 : 10;
+        fol_range = a->ship ? 5 : a->emerg ? 14 : 10;
         fol_lost = 0;
     } else if (!fol_lost) fol_lost = wt;
     *tx = fol_x; *ty = fol_y; *trange = fol_range;
@@ -2751,12 +2751,11 @@ static void draw_board(float x0, float y0, float x1, float y1, double wt, float 
         (void)ap;
         snprintf(lb, sizeof lb, "%s", BAY_NAME[b]);
         dymo(bx + m * 0.2f, by0, lb, (uint32_t)b * 77u + 5);
-        int cap = (int)((by1 - by0 - lab_h) / (strip_h + gap));
+        int cap = (int)((by1 - by0 - lab_h) / (strip_h + gap) + 0.02f);
         if (nl[b] > cap) {
             char more[16];
-            snprintf(more, sizeof more, "+%d", nl[b] - cap + 1);
+            snprintf(more, sizeof more, "+%d", nl[b] - cap);
             text(st_smb, bx + colw, by0 + lab_h * 0.5f, 1, more, C4(0.75f, 0.77f, 0.8f, 0.8f));
-            cap -= 1;
         }
         for (int k = 0; k < nl[b] && k < cap; k++) {
             Ac *a = &ac[list[b][k]];
@@ -2919,8 +2918,10 @@ static const char *VS_PRIM = "#version 330 core\n" GLSL(
         gl_Position = vec4(aPos.x / uRes.x * 2.0 - 1.0, 1.0 - aPos.y / uRes.y * 2.0, 0.0, 1.0);
     });
 
-static const char *FS_PRIM = "#version 330 core\n" NOISE GLSL(
-    uniform sampler2D uAtlas;
+static const char *FS_PRIM = "#version 330 core\n" GLSL(
+    uniform sampler2D uAtlas, uNoise;
+    float tn(vec2 p) { return texture(uNoise, p * (1.0 / 256.0)).r; }
+    float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
     in vec2 vL;
     in vec4 vP;
     in vec4 vC;
@@ -2951,7 +2952,7 @@ static const char *FS_PRIM = "#version 330 core\n" NOISE GLSL(
             float sd = fract(vP.w) * 977.0;
             if (m == 1) {                       /* paper: fibres, a little tooth, darker at the edge */
                 vec2 p = vL + sd;
-                c *= 0.955 + 0.06 * fbm(p * 0.06) + 0.025 * vnoise(p * vec2(1.3, 0.11)) + 0.015 * (hash(floor(p * 1.5)) - 0.5);
+                c *= 0.955 + 0.06 * tn(p * 0.5) + 0.03 * tn(p * vec2(6.0, 0.4) + 71.0) + 0.015 * (hash(floor(p * 1.5)) - 0.5);
                 c *= 1.0 - 0.07 * smoothstep(-5.0, 0.0, d);
             } else if (m == 2) {                /* moulded plastic: lit from above, a bright top lip */
                 float t = vL.y / vP.y;
@@ -2960,7 +2961,7 @@ static const char *FS_PRIM = "#version 330 core\n" NOISE GLSL(
                 c *= 1.0 - 0.22 * smoothstep(-2.5, 0.0, d);
             } else if (m == 3) {                /* powder-coated steel */
                 vec2 p = gl_FragCoord.xy;
-                c *= 0.95 + 0.06 * vnoise(p * 0.8) + 0.05 * fbm(p * 0.006);
+                c *= 0.95 + 0.06 * tn(p * 4.0) + 0.05 * tn(p * 0.05 + 13.0);
             } else if (m == 4) {                /* smoked glass over the LEDs */
                 float t = vL.y / vP.y * 0.5 + 0.5;
                 c += vec3(0.035) * (1.0 - t) + vec3(0.02) * smoothstep(0.0, 1.0, 1.0 - abs(vL.x / vP.x));
@@ -2968,7 +2969,7 @@ static const char *FS_PRIM = "#version 330 core\n" NOISE GLSL(
             } else if (m == 5) {                /* embossing tape */
                 c *= 0.88 + 0.12 * (0.5 + 0.5 * sin(vL.y * 2.2));
             } else if (m == 6) {
-                c *= 0.97 + 0.03 * vnoise(gl_FragCoord.xy * 0.6);
+                c *= 0.97 + 0.03 * tn(gl_FragCoord.xy * 3.0);
             }
         } else if (vK == 4) {
             float d = sdb(vL, vP.xy, vP.z);
@@ -3044,7 +3045,39 @@ static const char *FS_BG = "#version 330 core\n" NOISE GLSL(
         o = vec4(col, 1.0);
     });
 
-static GLuint prog_prim, prog_bg, vao_prim, vbo_prim, vao_full, tex_atlas;
+static GLuint prog_prim, prog_bg, vao_prim, vbo_prim, vao_full, tex_atlas, tex_noise;
+
+/* a tileable fbm, 256 square, for paper, steel and plastic */
+static void make_noise(void) {
+    enum { N = 256 };
+    static unsigned char img[N * N];
+    static float acc[N * N];
+    memset(acc, 0, sizeof acc);
+    float amp = 0.5f, tot = 0;
+    for (int oct = 0, cell = 32; oct < 5; oct++, cell /= 2, amp *= 0.5f) {
+        int g = N / cell;
+        for (int y = 0; y < N; y++)
+            for (int x = 0; x < N; x++) {
+                int ix = x / cell, iy = y / cell;
+                float fx = (float)(x % cell) / cell, fy = (float)(y % cell) / cell;
+                fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+                #define LAT(i, j) ((hash32((uint32_t)(((i) % g) * 7919 + ((j) % g) * 104729 + oct * 1299709)) & 0xffff) / 65535.0f)
+                float a = LAT(ix, iy), b = LAT(ix + 1, iy), c = LAT(ix, iy + 1), d = LAT(ix + 1, iy + 1);
+                #undef LAT
+                acc[y * N + x] += amp * (a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy);
+            }
+        tot += amp;
+    }
+    for (int i = 0; i < N * N; i++) img[i] = (unsigned char)clampf(acc[i] / tot * 255, 0, 255);
+    glGenTextures(1, &tex_noise);
+    glBindTexture(GL_TEXTURE_2D, tex_noise);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, N, N, 0, GL_RED, GL_UNSIGNED_BYTE, img);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+}
 
 static GLuint compile(GLenum type, const char *srcs) {
     GLuint s = glCreateShader(type);
@@ -3088,6 +3121,7 @@ static void gl_init(void) {
         glEnableVertexAttribArray((GLuint)i);
     }
     glGenTextures(1, &tex_atlas);
+    make_noise();
 }
 
 static void upload_atlas(void) {
@@ -3111,6 +3145,9 @@ static void flush(const float *clip) {
     glUseProgram(prog_prim);
     glUniform2f(U(prog_prim, "uRes"), (float)W, (float)H);
     glUniform1i(U(prog_prim, "uAtlas"), 0);
+    glUniform1i(U(prog_prim, "uNoise"), 1);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, tex_noise);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex_atlas);
     glBindVertexArray(vao_prim);
@@ -3237,6 +3274,11 @@ static void ring_steps(const View *v, float *step, float *step_a) {
     *step = 5 * exp2f(fl) * 2;
     *step_a = 1 - (lvl - fl);
     *step_a = clampf(*step_a * 1.5f, 0, 1);
+    /* far from the rings' centre, close-spaced arcs only make a moire */
+    float hx, hy;
+    vp(v, v->hx, v->hy, &hx, &hy);
+    float dc = hypotf(hx - (v->x0 + v->x1) * 0.5f, hy - (v->y0 + v->y1) * 0.5f) / v->ppn;
+    if (dc > rng * 1.3f && *step < 10) { *step = 10; *step_a = 0; }
 }
 
 static void scope_pass(View *v, double wt, float dt) {
@@ -3618,19 +3660,27 @@ int main(int argc, char **argv) {
         layout();
         double wt0 = t_wall0 + opt_at;
         advance(wt0, 10);
-        double sum = 0, worst = 0;
+        double sum = 0, worst = 0, t_adv = 0, t_cpu = 0;
+        static double samp[4096];
         for (int i = 0; i < opt_bench; i++) {
             double f0 = now();
             double wt = wt0 + i / 60.0;
             advance(wt, 1.0f / 60);
+            double f1 = now();
             render(wt, 1.0f / 60);
+            double f2 = now();
             glFinish();
+            t_adv += f1 - f0; t_cpu += f2 - f1;
             double ms = (now() - f0) * 1000;
+            if (i < 4096) samp[i] = ms;
             sum += ms;
             if (ms > worst) worst = ms;
         }
-        printf("atc: %dx%d role %d, %d frames: avg %.3f ms, worst %.3f ms per frame, %d aircraft\n",
-               W, H, role, opt_bench, sum / opt_bench, worst, count_traffic());
+        int ns = opt_bench < 4096 ? opt_bench : 4096;
+        for (int p = 1; p < ns; p++) for (int q = p; q > 0 && samp[q] < samp[q - 1]; q--) { double t = samp[q]; samp[q] = samp[q - 1]; samp[q - 1] = t; }
+        printf("atc: %dx%d role %d, %d frames: median %.3f ms, avg %.3f ms, worst %.3f ms per frame, %d aircraft\n",
+               W, H, role, opt_bench, samp[ns / 2], sum / opt_bench, worst, count_traffic());
+        printf("atc: of which %.3f ms the traffic, %.3f ms building the frame (CPU)\n", t_adv * 1000 / opt_bench, t_cpu * 1000 / opt_bench);
         printf("atc: GL renderer: %s\n", (const char *)glGetString(GL_RENDERER));
         return 0;
     }
