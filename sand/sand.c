@@ -1117,6 +1117,7 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
             T += (TE - T) >> 8;
             if (T > 274 * 16 && R8 < (T > 282 * 16 ? 48 : 6)) nm = WATER;
             if (nLava + nFlame > 0) nm = WATER;
+            else if (CLS[mU] >= 3 && Q16 < 4 + (T > 268 * 16 ? 8 : 0)) { nm = STEAM; life = 0; }   /* ablation in the open */
         }
         else if (m == SNOW) {
             T += (TE - T) >> 6;
@@ -1124,6 +1125,7 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
             else if (T > 275 * 16 && R8 < 2 + (T - 275 * 16) / 32) nm = WATER;
             else if (nLava + nFlame > 0 && R8 < 64) nm = WATER;
             else if (mU == SNOW && (mD == SNOW || mD == ICE) && Q16 < 3) nm = ICE;
+            else if (CLS[mU] >= 3 && mD != AIR && Q16 < 3 + (T > 268 * 16 ? 6 : 0)) { nm = STEAM; life = 0; }   /* sublimation */
         }
         else if (m == STEAM) {
             T += (TE - T) >> 6;
@@ -1233,7 +1235,8 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
         }
         else if (m == SEED) {
             life = min(life + 1, 65535);
-            if ((mD == DIRT || mD == GRASS) && mU == AIR && nTree == 0 && TE > 277 * 16 && TE < 306 * 16 && Q16 < grow2.x) {
+            bool daylight = float(p.y) > texelFetch(surf, ivec2(p.x, 0), 0).r - 4.0;     /* not down a cave */
+            if ((mD == DIRT || mD == GRASS) && mU == AIR && nTree == 0 && daylight && TE > 277 * 16 && TE < 306 * 16 && Q16 < grow2.x) {
                 nm = WOOD; x |= TIP; life = 7 + R8 % 24;
                 bool fir = TE < 282 * 16;
                 aux = fir ? 256 + 1 + min(life, 9) / 3 : 0;
@@ -2035,7 +2038,7 @@ static void schedule(uint32_t tk) {
     sc.erupt[1] = (int)(1400 * erupt * strength);
     sc.erupt[2] = (int)(60 * build + 300 * erupt);
     sc.erupt[3] = (int)(6 + 150 * build * build + 900 * erupt);
-    sc.grow2[2] = (A > 0.35f && A < 1.3f && tdef > 0.15) ? (int)(tdef * 40) : 0;     /* of 2^20 */
+    sc.grow2[2] = (A > 0.35f && A < 1.3f && tdef > 0.15) ? (int)(tdef * 5) : 0;     /* of 2^20 */
     {
         float lo = vent_top - 0.25f * (vent_top - vent_bot), hi = vent_top + 3;
         sc.magma[0] = (int)mixf(lo, hi, fmaxf(smooth(0.6f, 0.78f, f) * (1 - smooth(0.9f, 0.98f, f)), 0));
@@ -2083,6 +2086,11 @@ static void stats_and_geology(void) {
         for (int x = 0; x < NX; x++) target[x] = surf_meas[x];
     }
     wdef = (W0 - wat) / fmax(W0, 1);
+    if (getenv("SAND_FIRELOG")) {
+        double fire = 0;
+        for (int x = 0; x < NX; x++) fire += st[4 * (NX + x) + 2];
+        if (fire > 30) fprintf(stderr, "fire %5.0f at %.0f s, storm %.2f\n", fire, (tick - PREROLL) / (double)HZ, sc.storm_i);
+    }
     tdef = (TR0 - trees) / fmax(TR0, 1);
 
     /* the geology: where the ground has strayed furthest from its profile */
