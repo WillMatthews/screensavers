@@ -3,7 +3,7 @@
  *
  * Simulated targets (a car on a winding road, aircraft flying legs and
  * coordinated turns, a ship making way) are watched by noisy sensors: GPS
- * fixes, range-bearing radars with a rotating beam, missed detections and
+ * fixes, range-bearing radars (scans, no rotating beam drawn), missed detections and
  * clutter, and a passive sensor that hears only bearings. Trackers written
  * here from scratch estimate where the targets are, and every part of the
  * estimate is drawn: truth paths (faint), raw detections with their
@@ -79,7 +79,7 @@
 #define DEGR (PI / 180)
 
 static int W = 1280, H = 800;
-static int opt_root, opt_layer, opt_bench, opt_check;
+static int opt_root, opt_layer, opt_bench, opt_check, opt_resize;
 static float opt_fps = 30;
 static const char *opt_font = "DejaVu Sans Mono", *opt_math = "Latin Modern Math";
 static uint32_t opt_seed;
@@ -537,7 +537,7 @@ static const char *ACT_LINE[NACT] = {
 static const float ACT_TS[NACT] = {1, 3, 3, 15, 3};   /* sim seconds per real second */
 
 /* palette slots */
-enum { C_BG, C_PANEL, C_GRID, C_FRAME, C_TEXT, C_DIM, C_TRUTH, C_MEAS, C_CLUT, C_F1, C_F2, C_F3, C_WARN, C_SWEEP, NC };
+enum { C_BG, C_PANEL, C_GRID, C_FRAME, C_TEXT, C_DIM, C_TRUTH, C_MEAS, C_CLUT, C_F1, C_F2, C_F3, C_WARN, NC };
 
 #define NSER 1536
 typedef struct { float t[NSER], v[NSER]; int n, col, style; const char *name; } Series;
@@ -566,15 +566,14 @@ static void trail_push(Trail *t, double x, double y) {
 #define TRAIL_AT(tr, i) (((tr)->h - (tr)->n + (i) + TRL) % TRL)
 
 typedef struct { double t, r, b, x, y; int tgt, used; } Det;
-typedef struct { double x, y, T, sr, sb, pd, lam, rmin, rmax, th0; } Radar;
+typedef struct { double x, y, T, sr, sb, pd, lam, rmin, rmax, ph; } Radar;
 
 #define MAXT 10
 #define MAXQ 256
 #define DH 1024
 #define NP 2000
 #define NBRG 400
-#define MAXTRK 192
-#define NSECT 12
+#define MAXTRK 320
 #define RING 160
 
 typedef struct {
@@ -597,7 +596,7 @@ static struct {
     int nt; Path tp[MAXT]; double tb[MAXT], te[MAXT];
     float man[32][2]; int nman;        /* manoeuvre intervals, real seconds */
 
-    Radar rd; int has_radar, scan, sector;
+    Radar rd; int has_radar, scan;
     int q[MAXQ], qn, qi;               /* this scan's detections (indices into dh), by time */
     Det dh[DH]; int dhn;               /* every detection so far (ring) */
     int nfix;
@@ -634,16 +633,12 @@ static int add_det(double t, double r, double b, int tgt) {
     return i;
 }
 
-static double pass_time(double b, int n) {
-    double f = (A.rd.th0 - b) / TAU;
-    f -= floor(f);
-    return (n + f) * A.rd.T;
-}
-static int sector_of(double b) {
-    double f = (A.rd.th0 - b) / TAU;
-    f -= floor(f);
-    int k = (int)(f * NSECT);
-    return k < 0 ? 0 : k >= NSECT ? NSECT - 1 : k;
+/* when in scan n the radar looks at target i: each target keeps its own
+ * phase within the scan (no beam is drawn; the timing just spreads the
+ * detections out so they arrive one by one, not all at once) */
+static double look_time(int i, int n) {
+    double f = A.rd.ph + i * 0.3819660112501051;
+    return (n + f - floor(f)) * A.rd.T;
 }
 
 static void det_R(const Det *d, double *R) {
@@ -652,20 +647,15 @@ static void det_R(const Det *d, double *R) {
     R[0] = c * c * a + s * s * e; R[1] = R[2] = c * s * (a - e); R[3] = s * s * a + c * c * e;
 }
 
-/* one sweep of the beam: each target where the beam passes it (if detected),
- * and Poisson clutter uniform over the coverage */
+/* one scan: each target at its look time (if detected), and Poisson clutter
+ * uniform over the coverage and at random moments within the scan */
 static void radar_scan(int n) {
     Radar *rd = &A.rd;
     A.qn = A.qi = 0;
     for (int i = 0; i < A.nt; i++) {
-        double o[6];
-        path_eval(&A.tp[i], n * rd->T, o);
-        double b = atan2(o[1] - rd->y, o[0] - rd->x), t = pass_time(b, n);
+        double o[6], t = look_time(i, n);
         path_eval(&A.tp[i], t, o);
-        b = atan2(o[1] - rd->y, o[0] - rd->x);
-        t = pass_time(b, n);
-        path_eval(&A.tp[i], t, o);
-        double r = hypot(o[0] - rd->x, o[1] - rd->y);
+        double b = atan2(o[1] - rd->y, o[0] - rd->x), r = hypot(o[0] - rd->x, o[1] - rd->y);
         double u = rn_u(&A.rm), nr = rn_n(&A.rm), nb = rn_n(&A.rm);
         if (t < A.tb[i] || t > A.te[i] || r < rd->rmin || r > rd->rmax || u > rd->pd) continue;
         if (A.qn < MAXQ) A.q[A.qn++] = add_det(t, r + rd->sr * nr, wrap_pi(b + rd->sb * nb), i);
@@ -673,8 +663,8 @@ static void radar_scan(int n) {
     int nc = rd->lam > 0 ? rn_poisson(&A.rm, rd->lam) : 0;
     for (int c = 0; c < nc && A.qn < MAXQ; c++) {
         double r = sqrt(rn_range(&A.rm, rd->rmin * rd->rmin, rd->rmax * rd->rmax));
-        double b = rn_range(&A.rm, -PI, PI);
-        A.q[A.qn++] = add_det(pass_time(b, n), r, b, -1);
+        double b = rn_range(&A.rm, -PI, PI), t = (n + rn_u(&A.rm)) * rd->T;
+        A.q[A.qn++] = add_det(t, r, b, -1);
     }
     for (int i = 1; i < A.qn; i++)            /* by time */
         for (int j = i; j > 0 && A.dh[A.q[j]].t < A.dh[A.q[j - 1]].t; j--) {
@@ -1230,7 +1220,6 @@ static void mtt_init(void) {
     double R = A.rd.rmax * 1.04;
     A.view[0] = (float)-R; A.view[1] = (float)-R; A.view[2] = (float)R; A.view[3] = (float)R;
     A.next_id = 1;
-    A.sector = 0;
     radar_scan(0);
     A.scan = 0;
     chart(0, "NIS", "\xcf\x87\xc2\xb2\xe2\x82\x82 95%, confirmed tracks", 1, 0.01f, 100);
@@ -1274,11 +1263,6 @@ static void hungarian(int n, int m, const double *a, int *ans) {
     }
     for (int i = 0; i < n; i++) ans[i] = -1;
     for (int j = 1; j <= m; j++) if (p[j]) ans[p[j] - 1] = j - 1;
-}
-
-static void trk_pos_at(const Filt *f, double t, double *x, double *y) {
-    *x = f->x[0] + f->x[2] * (t - f->t);
-    *y = f->x[1] + f->x[3] * (t - f->t);
 }
 
 /* squared Mahalanobis distance of detection d from track f (predicted to d's time) */
@@ -1341,60 +1325,58 @@ static void trk_new(const Det *d) {
     trail_push(&k->tr, d->x, d->y);
 }
 
-static void mtt_sector(int j) {
-    double Ts = A.rd.T / NSECT, p = j * Ts;
-    int due_sec = ((j - 2) % NSECT + NSECT) % NSECT;
-    int cand[96], nc = 0;
-    for (int i = A.dhn - 1; i >= 0 && i >= A.dhn - 2 * MAXQ && nc < 96; i--) {
-        Det *d = &A.dh[i % DH];
-        if (!d->used && d->t > p - 3 * Ts && d->t <= p) cand[nc++] = i % DH;
-    }
+/* the end of scan n: global-nearest-neighbour assignment of its detections,
+ * confirmed tracks first, then tentative ones; the rest start tracks */
+static void mtt_scan(int n) {
+    double p = (n + 1) * A.rd.T;
+    int nc = A.qn, *cand = A.q;
     for (int pass = 0; pass < 2; pass++) {
-        int due[48], nd = 0;
-        for (int i = 0; i < A.ntk && nd < 48; i++) {
-            Track *k = &A.tk[i];
-            if (k->st != (pass ? TK_TENT : TK_CONF)) continue;
-            double x, y;
-            trk_pos_at(&k->f, p, &x, &y);
-            if (sector_of(atan2(y - A.rd.y, x - A.rd.x)) == due_sec) due[nd++] = i;
-        }
+        int due[MAXTRK], nd = 0;
+        for (int i = 0; i < A.ntk; i++)
+            if (A.tk[i].st == (pass ? TK_TENT : TK_CONF)) due[nd++] = i;
         if (!nd) continue;
-        int m = nc + nd;
-        double *cost = malloc(sizeof(double) * nd * m), d2s[48][96];
-        int ans[48];
+        int m = nc + nd, *ans = malloc(sizeof(int) * nd);
+        double *cost = malloc(sizeof(double) * nd * m), *d2s = malloc(sizeof(double) * nd * (nc + 1));
         for (int r = 0; r < nd; r++) {
             for (int c = 0; c < nc; c++) {
                 Det *d = &A.dh[cand[c]];
-                double d2 = A.dh[cand[c]].used ? 1e9 : gate_d2(&A.tk[due[r]].f, d, NULL);
-                d2s[r][c] = d2;
+                double d2 = d->used ? 1e9 : gate_d2(&A.tk[due[r]].f, d, NULL);
+                d2s[r * (nc + 1) + c] = d2;
                 cost[r * m + c] = d2 < GATE ? d2 : 1e6;
             }
             for (int c = 0; c < nd; c++) cost[r * m + nc + c] = c == r ? GATE : 1e6;
         }
         hungarian(nd, m, cost, ans);
-        free(cost);
-        if (pass == 0) {               /* keep the problem for the display */
-            int cols[8], ncol = 0;
+        if (pass == 0) {               /* keep (part of) the problem for the display */
+            int rows[6], nr = 0, cols[8], ncol = 0;
+            for (int r = 0; r < nd && nr < 6; r++) {
+                int any = 0;
+                for (int c = 0; c < nc; c++) any |= d2s[r * (nc + 1) + c] < GATE * 4;
+                if (any) rows[nr++] = r;
+            }
             for (int c = 0; c < nc && ncol < 8; c++) {
                 int any = 0;
-                for (int r = 0; r < nd; r++) any |= d2s[r][c] < GATE * 4;
+                for (int k = 0; k < nr; k++) any |= d2s[rows[k] * (nc + 1) + c] < GATE * 4;
                 if (any) cols[ncol++] = c;
             }
-            A.cost_r = nd < 6 ? nd : 6; A.cost_c = ncol; A.cost_t = p;
-            for (int r = 0; r < A.cost_r; r++) {
-                A.cost_id[r] = A.tk[due[r]].id;
-                A.cost_asg[r] = -1;
+            A.cost_r = nr; A.cost_c = ncol; A.cost_t = p;
+            for (int k = 0; k < nr; k++) {
+                int r = rows[k];
+                A.cost_id[k] = A.tk[due[r]].id;
+                A.cost_asg[k] = -1;
                 for (int c = 0; c < ncol; c++) {
-                    A.cost[r][c] = (float)d2s[r][cols[c]];
-                    if (ans[r] == cols[c]) A.cost_asg[r] = c;
+                    A.cost[k][c] = (float)d2s[r * (nc + 1) + cols[c]];
+                    if (ans[r] == cols[c]) A.cost_asg[k] = c;
                 }
             }
         }
         for (int r = 0; r < nd; r++) {
             Track *k = &A.tk[due[r]];
             int c = ans[r];
-            if (c >= 0 && c < nc && d2s[r][c] < GATE && !A.dh[cand[c]].used) trk_update(k, &A.dh[cand[c]]);
-            else { k->miss++; k->nsc++; }
+            if (c >= 0 && c < nc && d2s[r * (nc + 1) + c] < GATE && !A.dh[cand[c]].used) {
+                trk_update(k, &A.dh[cand[c]]);
+                k->f.t_upd = p;            /* ease the update in now, when it is made */
+            } else { k->miss++; k->nsc++; }
             if (k->st == TK_TENT) {
                 if (k->hits >= 3) { k->st = TK_CONF; k->id = A.next_id++; k->t_conf = p; }
                 else if (k->miss >= 2 || k->nsc >= 5) k->st = -1;
@@ -1402,11 +1384,12 @@ static void mtt_sector(int j) {
             double sp = sqrt(k->f.P[0] + k->f.P[5]);
             if (k->st == TK_CONF && sp > 6000) { k->st = TK_DEAD; k->t_dead = p; }
         }
+        free(cost); free(d2s); free(ans);
     }
     /* detections nobody wanted start tentative tracks */
     for (int c = 0; c < nc; c++) {
         Det *d = &A.dh[cand[c]];
-        if (!d->used && d->t > p - 3 * Ts && d->t <= p - 2 * Ts) { trk_new(d); d->used = 1; }
+        if (!d->used) { trk_new(d); d->used = 1; }
     }
     /* compact: drop the failed, and the dead once faded */
     int w = 0;
@@ -1418,7 +1401,7 @@ static void mtt_sector(int j) {
         w++;
     }
     A.ntk = w;
-    if (j % NSECT == 0) {              /* once a scan: counts and the RMS error */
+    {                                  /* counts and the RMS error */
         double rt = rt_of(p), se = 0;
         int nconf = 0, ntent = 0, ntrue = 0, ne = 0;
         for (int i = 0; i < A.nt; i++) {
@@ -1484,12 +1467,11 @@ static void act_advance(double s) {
             if (t > s) break;
             pf_bearing();
         } else if (A.id == A_MTT) {
-            int j = A.sector + 1;
-            double t = j * A.rd.T / NSECT;
+            double t = (A.scan + 1) * A.rd.T;
             if (t > s) break;
-            mtt_sector(j);
-            A.sector = j;
-            if (j % NSECT == 0) { A.scan = j / NSECT; radar_scan(A.scan); }
+            mtt_scan(A.scan);
+            A.scan++;
+            radar_scan(A.scan);
         } else {
             double tn = (A.scan + 1) * A.rd.T, td = A.qi < A.qn ? A.dh[A.q[A.qi]].t : 1e18;
             if (fmin(tn, td) > s) break;
@@ -1506,12 +1488,12 @@ static void act_advance(double s) {
 /* ==================================================================== */
 /* ---- palettes ---- */
 typedef struct { const char *name; const char *c[NC]; int glow; } Pal;
-/*                        bg         panel      grid       frame      text       dim        truth      meas       clutter    f1         f2         f3         warn       sweep */
+/*                        bg         panel      grid       frame      text       dim        truth      meas       clutter    f1         f2         f3         warn */
 static const Pal PALS[] = {
-    {"tactical", {"#030b09", "#06130f", "#0f3a2d", "#1f5b48", "#93ecc4", "#56a084", "#c8dccf", "#d8f59a", "#3f7f55", "#3fe6e0", "#f0b347", "#d77be0", "#ff5a4a", "#39ff8a"}, 1},
-    {"night",    {"#080101", "#100303", "#3c0e08", "#5e1b10", "#ff6e4c", "#a63e27", "#ffb3a0", "#ffcfa4", "#7c2a1a", "#ff4a2e", "#ffa04a", "#ff79a6", "#ffe3a3", "#ff3a20"}, 1},
-    {"paper",    {"#f1ede2", "#e9e4d5", "#d3ccb7", "#8a8270", "#2a2620", "#6e675a", "#57524a", "#2e2b26", "#aaa290", "#1f5fa8", "#c0461f", "#2f8a4a", "#c01818", "#1f5fa8"}, 0},
-    {"mono",     {"#040404", "#0b0b0b", "#282828", "#4c4c4c", "#e6e6e6", "#8c8c8c", "#bdbdbd", "#dadada", "#5c5c5c", "#ffffff", "#a8a8a8", "#787878", "#ffffff", "#e0e0e0"}, 1},
+    {"tactical", {"#030b09", "#06130f", "#0f3a2d", "#1f5b48", "#93ecc4", "#56a084", "#c8dccf", "#d8f59a", "#3f7f55", "#3fe6e0", "#f0b347", "#d77be0", "#ff5a4a"}, 1},
+    {"night",    {"#080101", "#100303", "#3c0e08", "#5e1b10", "#ff6e4c", "#a63e27", "#ffb3a0", "#ffcfa4", "#7c2a1a", "#ff4a2e", "#ffa04a", "#ff79a6", "#ffe3a3"}, 1},
+    {"paper",    {"#f1ede2", "#e9e4d5", "#d3ccb7", "#8a8270", "#2a2620", "#6e675a", "#57524a", "#2e2b26", "#aaa290", "#1f5fa8", "#c0461f", "#2f8a4a", "#c01818"}, 0},
+    {"mono",     {"#040404", "#0b0b0b", "#282828", "#4c4c4c", "#e6e6e6", "#8c8c8c", "#bdbdbd", "#dadada", "#5c5c5c", "#ffffff", "#a8a8a8", "#787878", "#ffffff"}, 1},
 };
 #define NPAL ((int)(sizeof PALS / sizeof PALS[0]))
 static float pal[NC][3];
@@ -1577,9 +1559,21 @@ static int ax = 1, ay = 1, ashelf, atlas_dirty;
 typedef struct { int face, px; } Style;
 #define MAXSTYLE 64
 static Style styles[MAXSTYLE];
-static int nstyles;
+static int nstyles, text_full, text_resets;
 #define GH 8192
 static struct { uint32_t key; Glyph g; } gtab[GH];
+
+/* styles are keyed by pixel size, which follows the window: forget every
+ * style and glyph (on a resize, or when a table fills) and start again */
+static void text_reset(void) {
+    nstyles = 0;
+    memset(gtab, 0, sizeof gtab);
+    if (atlas) memset(atlas, 0, (size_t)AW * AH);
+    ax = ay = 1; ashelf = 0;
+    atlas_dirty = 1;
+    text_full = 0;
+    text_resets++;
+}
 
 static FT_Face load_face(const char *pat_s) {
     FcPattern *pat = FcNameParse((const FcChar8 *)pat_s);
@@ -1613,7 +1607,7 @@ static int style(int face, float px) {
     if (p < 7) p = 7;
     for (int i = 0; i < nstyles; i++)
         if (styles[i].face == face && styles[i].px == p) return i;
-    if (nstyles == MAXSTYLE) return nstyles - 1;
+    if (nstyles == MAXSTYLE) { text_full = 1; return nstyles - 1; }
     styles[nstyles].face = face;
     styles[nstyles].px = p;
     return nstyles++;
@@ -1637,7 +1631,7 @@ static const Glyph *glyph(int s, uint32_t cp) {
         if (!gtab[h].key) break;
     }
     if (!gtab[h].key) gtab[h].key = key;
-    else return &none;
+    else { text_full = 1; return &none; }
     Glyph *gl = &gtab[h].g;
     memset(gl, 0, sizeof *gl);
     FT_Face f = faces[styles[s].face];
@@ -1652,7 +1646,7 @@ static const Glyph *glyph(int s, uint32_t cp) {
     FT_GlyphSlot g = f->glyph;
     int w = (int)g->bitmap.width, hh = (int)g->bitmap.rows;
     if (ax + w + 2 > AW) { ax = 1; ay += ashelf + 2; ashelf = 0; }
-    if (ay + hh + 2 > AH) { gl->adv = (short)(g->advance.x >> 6); return gl; }
+    if (ay + hh + 2 > AH) { gl->adv = (short)(g->advance.x >> 6); text_full = 1; return gl; }
     for (int yy = 0; yy < hh; yy++)
         memcpy(atlas + (size_t)(ay + yy) * AW + ax, g->bitmap.buffer + yy * g->bitmap.pitch, (size_t)w);
     *gl = (Glyph){(short)ax, (short)ay, (short)w, (short)hh, (short)g->bitmap_left, (short)g->bitmap_top,
@@ -2311,11 +2305,9 @@ static void draw_grid(void) {
     text(s_small, nx, ny + 12 * U + cap_h(s_small), 0, "N", pal[C_DIM], 1);
 }
 
-static double beam(double s) { return A.rd.th0 - TAU * s / A.rd.T; }
-
-static void draw_radar(double s, int rings) {
+static void draw_radar(int rings) {
     const Radar *rd = &A.rd;
-    float cx = WX(rd->x), cy = WY(rd->y), R = (float)(rd->rmax * vk);
+    float cx = WX(rd->x), cy = WY(rd->y);
     if (rings) {
         double st = nice_step(rd->rmax, 5);
         for (double r = st; r <= rd->rmax + 1; r += st) {
@@ -2325,22 +2317,7 @@ static void draw_radar(double s, int rings) {
             text(s_small, cx + (float)(r * vk) * 0.7071f + 3 * U, cy - (float)(r * vk) * 0.7071f - 3 * U, -1, b, pal[C_DIM], 0.9f);
         }
     }
-    /* the beam and its afterglow, trailing behind the sweep */
-    double th = beam(s);
-    const int nseg = 28;
-    float span = 0.75f, Rr = fminf(R, 4000.0f);
-    for (int i = 0; i < nseg; i++) {
-        float a0 = (float)th + span * i / nseg, a1 = (float)th + span * (i + 1) / nseg;
-        float al0 = 0.1f * powf(1 - (float)i / nseg, 2), al1 = 0.1f * powf(1 - (float)(i + 1) / nseg, 2);
-        if (paper()) { al0 *= 0.6f; al1 *= 0.6f; }
-        V(cx, cy, 0, 0, pal[C_SWEEP], al0 * 0.4f, K_FLAT, 0);
-        V(cx + Rr * cosf(a0), cy - Rr * sinf(a0), 0, 0, pal[C_SWEEP], al0, K_FLAT, 0);
-        V(cx + Rr * cosf(a1), cy - Rr * sinf(a1), 0, 0, pal[C_SWEEP], al1, K_FLAT, 0);
-    }
-    float bx = cx + Rr * cosf((float)th), by = cy - Rr * sinf((float)th);
-    if (glow_on) seg_k(cx, cy, bx, by, 6 * U, pal[C_SWEEP], 0.25f, K_SOFT);
-    seg(cx, cy, bx, by, 1.4f * U, pal[C_SWEEP], 0.8f);
-    /* the site */
+    /* the site: a small diamond, nothing that turns */
     float h = 6 * U;
     seg(cx, cy - h, cx + h, cy, 1.4f * U, pal[C_TEXT], 1); seg(cx + h, cy, cx, cy + h, 1.4f * U, pal[C_TEXT], 1);
     seg(cx, cy + h, cx - h, cy, 1.4f * U, pal[C_TEXT], 1); seg(cx - h, cy, cx, cy - h, 1.4f * U, pal[C_TEXT], 1);
@@ -2428,7 +2405,7 @@ static void draw_plot(const Rect *r, double s, double rt) {
     }
     draw_grid();
     char lab[64];
-    if (A.has_radar) draw_radar(s, 1);
+    if (A.has_radar) draw_radar(1);
     if (A.id == A_KF) {
         draw_truth(&A.tp[0], fmax(0, s - 60), s, 0.35f);
         for (int i = A.dhn - 1; i >= 0 && i >= A.dhn - 40; i--) {
@@ -2527,7 +2504,7 @@ static void draw_plot(const Rect *r, double s, double rt) {
             }
             double sw = (s - k->t_swap) / A.TS;
             if (sw >= 0 && sw < 5) {
-                float fa = (float)(1 - sw / 5) * (0.6f + 0.4f * (float)fabs(sin(sw * 6)));
+                float fa = smooth01((float)(sw / 0.6)) * (1 - smooth01((float)((sw - 3) / 2)));   /* a steady fade, no blinking */
                 circle(WX(x[0]), WY(x[1]), 16 * U, 1.6f * U, pal[C_WARN], fa, 0);
                 text(s_hudb, WX(x[0]) + 8 * U, WY(x[1]) + 20 * U, -1, "SWAP?", pal[C_WARN], fa);
             }
@@ -2671,7 +2648,7 @@ static void draw_mats(const Rect *r, double s) {
         }
         for (int j = 0; j < nc; j++) { snprintf(cl[j], 8, "z%d", j + 1); cp[j] = cl[j]; }
         if (nr && nc) heat(in.x + 6 * U, in.y, cs, nr, nc, C, 2, rp, cp, A.cost_asg);
-        else text(s_small, in.x, in.y + cs, -1, "no confirmed track in this sector", pal[C_DIM], 1);
+        else text(s_small, in.x, in.y + cs, -1, "no confirmed track near a detection", pal[C_DIM], 1);
         if (A.last_trk >= 0 && A.last_trk < A.ntk) {
             const Track *k = &A.tk[A.last_trk];
             float cs2 = fminf(fminf(in.h / 4.0f, in.w * 0.4f / 4.0f), 48 * U), x2 = in.x + in.w - cs2 * 4;
@@ -2937,8 +2914,6 @@ static void draw_meas(const Rect *r, double s, double rt) {
         ring(sx, sy, 4 * U, pal[C_F1], 1);
         textf(s_small, sx + 6 * U, sy - 5 * U, -1, pal[C_F1], 1, "T%02d", k->id);
     }
-    float x = SBX(beam(s));
-    seg(x, in.y, x, in.y + in.h, 1.4f * U, pal[C_SWEEP], 0.7f);
     #undef SBX
     #undef SRY
 }
@@ -3271,7 +3246,12 @@ static void build_static(void) {
 
 /* s: sim seconds into the act, rt: real seconds into it, wt: wall clock */
 static void render(double s, double rt, double wt, GLuint target) {
-    if (W != lay_w || H != lay_h) { layout(); lay_w = W; lay_h = H; st_act = -1; }
+    /* a new size (or a full glyph cache): new styles, a new layout */
+    if (W != lay_w || H != lay_h || text_full || (st_act != A.id && (nstyles > MAXSTYLE * 3 / 4 || ay > AH * 3 / 4))) {
+        text_reset();
+        layout();
+        lay_w = W; lay_h = H; st_act = -1;
+    }
     if (st_act != A.id || st_w != W || st_h != H) build_static();
     glBindFramebuffer(GL_FRAMEBUFFER, target);
     glViewport(0, 0, W, H);
@@ -3503,7 +3483,7 @@ static void usage(void) {
         "usage: kalman [--window | --root | --layer] [--seed N] [--fps N] [--palette tactical|night|paper|mono]\n"
         "              [--act 1-5] [--act-len SECONDS] [--font FAMILY] [--math-font FAMILY]\n"
         "              [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
-        "              [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--check]\n");
+        "              [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--check] [--resize-test N]\n");
     exit(1);
 }
 
@@ -3568,6 +3548,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-act-len") && i + 1 < argc) { opt_act_len = strtod(argv[++i], NULL); if (opt_act_len < 20) opt_act_len = 20; }
         else if (!strcmp(a, "-shot") && i + 1 < argc) opt_shot = argv[++i];
         else if (!strcmp(a, "-bench") && i + 1 < argc) opt_bench = atoi(argv[++i]);
+        else if (!strcmp(a, "-resize-test") && i + 1 < argc) opt_resize = atoi(argv[++i]);
         else if (!strcmp(a, "-size") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &off_w, &off_h) != 2 || off_w < 64 || off_h < 64) usage(); }
         else if (!strcmp(a, "-at") && i + 1 < argc) opt_at = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-epoch") && i + 1 < argc) opt_epoch = strtod(argv[++i], NULL);
@@ -3589,7 +3570,7 @@ int main(int argc, char **argv) {
     /* the palette: from the seed unless asked for */
     if (opt_pal < 0) opt_pal = (int)(((opt_seed * 0x9E3779B1u) >> 16) % NPAL);
     set_palette(opt_pal);
-    int offscreen = opt_shot || opt_bench > 0;
+    int offscreen = opt_shot || opt_bench > 0 || opt_resize > 0;
     if (opt_at < 0) opt_at = 45;
     fonts_init();
 
@@ -3647,6 +3628,22 @@ int main(int argc, char **argv) {
             render(A.s, A.s / A.TS, t_wall0 + t, fbo);
             glFinish();
             save_ppm(opt_shot, fbo);
+            return 0;
+        }
+        if (opt_resize > 0) {          /* many sizes in one process, every act */
+            int maxst = 0, r0 = text_resets;
+            Rng rr = {opt_seed};
+            for (int i = 0; i < opt_resize; i++) {
+                W = 200 + (int)(rn_u(&rr) * (off_w - 200)); H = 160 + (int)(rn_u(&rr) * (off_h - 160));
+                if (i % 7 == 6) { W = off_w; H = off_h; }
+                double t = opt_at + i * 37.0;
+                sim_to(t);
+                render(A.s, A.s / A.TS, t_wall0 + t, fbo);
+                if (nstyles > maxst) maxst = nstyles;
+            }
+            glFinish();
+            printf("kalman: %d resizes: %d text resets, at most %d of %d styles, atlas rows used %d of %d, %s\n",
+                   opt_resize, text_resets - r0, maxst, MAXSTYLE, ay + ashelf, AH, text_full ? "TABLE FULL" : "ok");
             return 0;
         }
         GLuint q;
