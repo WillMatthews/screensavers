@@ -245,7 +245,7 @@ static double energy(const Phys *p, const St *s) {
 /* the energy scale for relative errors: the potential's whole range */
 static double escale(const Phys *p) { return 2 * ((p->m1 + p->m2) * p->l1 + p->m2 * p->l2); }
 
-#define HZ 240                         /* physics steps per real second */
+#define HZ 180                         /* physics steps per real second */
 
 /* ---- palettes ---- */
 typedef struct {
@@ -379,7 +379,7 @@ static void scene_make(int k, Scene *S) {
     S->variant = k == 0 ? V_CLASSIC : u < 0.6 ? V_CLASSIC : u < 0.8 ? V_LOW : V_SWEEP;
     if (opt_variant >= 0) S->variant = opt_variant;
     double nr = rnd(&r);
-    S->n = S->variant == V_CLASSIC ? 900 + (int)(1500 * nr) : S->variant == V_LOW ? 500 + (int)(600 * nr) : 900 + (int)(700 * nr);
+    S->n = S->variant == V_CLASSIC ? 800 + (int)(1200 * nr) : S->variant == V_LOW ? 500 + (int)(600 * nr) : 900 + (int)(700 * nr);
     if (opt_load) S->n = (int)(S->n * (0.4 + 1.2 * cpu_load()));
     if (opt_count > 0) S->n = opt_count;
     if (S->n < 2) S->n = 2;
@@ -1254,15 +1254,7 @@ static void cap_add(float ax, float ay, float bx, float by, float r, float gr, f
 
 static float *sv;                      /* trail strip vertices, 7 floats each */
 static int svn, svcap;
-static GLint *sfirst;
-static GLsizei *scount;
-static int nstrips, strips_cap;
-static void sv_add(float x, float y, float side, const float *c) {
-    if (svn + 7 > svcap) sv = realloc(sv, (size_t)(svcap = svcap ? svcap * 2 : 1 << 18) * sizeof *sv);
-    float *o = sv + svn;
-    o[0] = x; o[1] = y; o[2] = side; o[3] = c[0]; o[4] = c[1]; o[5] = c[2]; o[6] = c[3];
-    svn += 7;
-}
+static int nstrips;
 
 static void draw_caps(int light) {
     if (!cvn) return;
@@ -1358,33 +1350,32 @@ static void member_color(int j, int dn, double s, int acc, float *c) {
 
 /* the ensemble's trails into the accumulation buffer, its rods and bobs
  * into the capsule list. fade: overall presence; single: one pendulum */
-static void draw_ensemble_trails(const View *v, float fade, int single) {
-    int dn = disp_n();
-    if (lastp_cap < dn) lastp = realloc(lastp, sizeof *lastp * 4 * (size_t)(lastp_cap = dn));
+/* the strips are built in parallel, each member into its own slot */
+#define SLOT (2 * (RECMAX * 8 + 2))
+static float *slots;
+static int *slot_n, slots_cap;
+static struct { const View *v; float fade, ka, ext, vref; int single, reset, dn; double h; } TJ;
+
+static void trail_job(int lo, int hi, void *arg) {
+    (void)arg;
+    const View *v = TJ.v;
     const Phys *p = &cur.p;
-    double h = cur.tscale / HZ;
-    if (nstrips < dn) {
-        strips_cap = dn;
-        sfirst = realloc(sfirst, sizeof *sfirst * (size_t)strips_cap);
-        scount = realloc(scount, sizeof *scount * (size_t)strips_cap);
-    }
-    svn = 0;
-    nstrips = 0;
-    int reset = trail_reset || !nrec;
-    if (morph_step >= 0 && last_step < morph_step && fan_step >= morph_step) reset = 1;
-    float ka = single ? 0.9f : fminf(1.0f, 34.0f / dn);
-    float hw = single ? 1.1f : 0.6f, ext = hw + 1.0f;
-    float vref = v->s * 2.0f;           /* px per time unit: a gentle long-exposure falloff above it */
-    for (int j = 0; j < dn && nrec; j++) {
-        int i = disp_src(j, dn);
+    for (int j = lo; j < hi; j++) {
+        float *out = slots + (size_t)j * SLOT * 7;
+        int on = 0;
+        slot_n[j] = 0;
+        int i = disp_src(j, TJ.dn);
         float col[4];
-        member_color(j, dn, morph_s(rec_step[nrec - 1]), 1, col);
-        if (single) { float w[3] = {1, 1, 1}; if (PALS[cur.pal].light) pal_acc(cur.pal, 0.0, w); else { w[0] = 1.0f; w[1] = 0.95f; w[2] = 0.85f; } memcpy(col, w, sizeof w); }
+        member_color(j, TJ.dn, morph_s(rec_step[nrec - 1]), 1, col);
+        if (TJ.single) {
+            if (PALS[cur.pal].light) pal_acc(cur.pal, 0.0, col);
+            else { col[0] = 1.0f; col[1] = 0.95f; col[2] = 0.85f; }
+        }
         /* the points: the last one drawn, then this frame's */
         float P[RECMAX + 1][4];
         long PS[RECMAX + 1];
         int np = 0;
-        if (!reset) { memcpy(P[0], lastp + 4 * j, sizeof P[0]); PS[0] = last_step; np = 1; }
+        if (!TJ.reset) { memcpy(P[0], lastp + 4 * j, sizeof P[0]); PS[0] = last_step; np = 1; }
         for (int r = 0; r < nrec; r++) {
             const float *q = rec + ((size_t)i * RECMAX + r) * 4;
             double s = morph_s(rec_step[r]), a1, a2, b[6];
@@ -1400,34 +1391,74 @@ static void draw_ensemble_trails(const View *v, float fade, int single) {
         memcpy(lastp + 4 * j, P[np - 1], sizeof P[0]);
         if (np < 2) continue;
         double ms = morph_s(rec_step[nrec - 1]);
-        float inten = ka * fade * (float)((1 - ms) * (1 - ms));
+        float inten = TJ.ka * TJ.fade * (float)((1 - ms) * (1 - ms));
         if (inten <= 0.0005f) continue;
-        sfirst[nstrips] = svn / 7;
         for (int k = 0; k + 1 < np; k++) {
-            double dt = (double)(PS[k + 1] - PS[k]) * h;
+            float dt = (float)((double)(PS[k + 1] - PS[k]) * TJ.h);
             float *A = P[k], *B = P[k + 1];
             float len = hypotf(B[0] - A[0], B[1] - A[1]);
             int sub = (int)ceilf(len / 5.0f);
             if (sub < 1) sub = 1;
             if (sub > 8) sub = 8;
             for (int u = k ? 1 : 0; u <= sub; u++) {
+                /* cubic Hermite through the steps, with the true velocities */
                 float t = (float)u / sub, t2 = t * t, t3 = t2 * t;
                 float h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
-                float x = h00 * A[0] + h10 * (float)dt * A[2] + h01 * B[0] + h11 * (float)dt * B[2];
-                float y = h00 * A[1] + h10 * (float)dt * A[3] + h01 * B[1] + h11 * (float)dt * B[3];
+                float x = h00 * A[0] + h10 * dt * A[2] + h01 * B[0] + h11 * dt * B[2];
+                float y = h00 * A[1] + h10 * dt * A[3] + h01 * B[1] + h11 * dt * B[3];
                 float vx = A[2] + (B[2] - A[2]) * t, vy = A[3] + (B[3] - A[3]) * t;
                 float vl = hypotf(vx, vy);
                 if (vl < 1e-3f) { vx = B[0] - A[0]; vy = B[1] - A[1]; vl = hypotf(vx, vy) + 1e-6f; }
-                float nx = -vy / vl * ext, ny = vx / vl * ext;
-                float bright = inten * sqrtf(fminf(1.0f, vref / (vl + 1e-3f)));
-                float c[4] = {col[0], col[1], col[2], bright};
-                sv_add(x + nx, y + ny, 1, c);
-                sv_add(x - nx, y - ny, -1, c);
+                float nx = -vy / vl * TJ.ext, ny = vx / vl * TJ.ext;
+                /* a long exposure: where the bob lingers it burns brighter */
+                float bright = inten * sqrtf(fminf(1.0f, TJ.vref / (vl + 1e-3f)));
+                float *o = out + on * 7;
+                o[0] = x + nx; o[1] = y + ny; o[2] = 1;
+                o[3] = col[0]; o[4] = col[1]; o[5] = col[2]; o[6] = bright;
+                o[7] = x - nx; o[8] = y - ny; o[9] = -1;
+                o[10] = col[0]; o[11] = col[1]; o[12] = col[2]; o[13] = bright;
+                on += 2;
             }
         }
-        scount[nstrips] = svn / 7 - sfirst[nstrips];
-        nstrips++;
+        slot_n[j] = on;
     }
+}
+
+static void draw_ensemble_trails(const View *v, float fade, int single) {
+    int dn = disp_n();
+    if (lastp_cap < dn) lastp = realloc(lastp, sizeof *lastp * 4 * (size_t)(lastp_cap = dn));
+    if (slots_cap < dn) {
+        slots_cap = dn;
+        slots = realloc(slots, sizeof *slots * (size_t)dn * SLOT * 7);
+        slot_n = realloc(slot_n, sizeof *slot_n * (size_t)dn);
+    }
+    svn = 0;
+    nstrips = 0;
+    int reset = trail_reset || !nrec;
+    if (morph_step >= 0 && last_step < morph_step && fan_step >= morph_step) reset = 1;
+    float hw = single ? 1.1f : 0.6f;
+    TJ.v = v; TJ.fade = fade; TJ.single = single; TJ.reset = reset; TJ.dn = dn;
+    TJ.ka = single ? 0.9f : fminf(1.0f, 34.0f / dn);
+    TJ.ext = hw + 1.0f;
+    TJ.vref = v->s * 2.0f;             /* px per time unit: a gentle long-exposure falloff above it */
+    TJ.h = cur.tscale / HZ;
+    if (nrec) par_for(dn, trail_job, NULL);
+    /* one strip for all: members joined by degenerate triangles */
+    for (int j = 0; j < dn && nrec; j++) {
+        int n = slot_n[j];
+        if (!n) continue;
+        if (svn + (n + 2) * 7 > svcap) sv = realloc(sv, (size_t)(svcap = (svn + (n + 2) * 7) * 2) * sizeof *sv);
+        const float *src = slots + (size_t)j * SLOT * 7;
+        if (svn) {
+            memcpy(sv + svn, sv + svn - 7, sizeof *sv * 7);
+            memcpy(sv + svn + 7, src, sizeof *sv * 7);
+            svn += 14;
+        }
+        memcpy(sv + svn, src, sizeof *sv * 7 * (size_t)n);
+        svn += n * 7;
+        nstrips = 1;
+    }
+    float ext = TJ.ext;
     if (nrec) {
         last_step = fan_step;
         trail_reset = 0;
@@ -1440,7 +1471,7 @@ static void draw_ensemble_trails(const View *v, float fade, int single) {
     glBindVertexArray(vao_strip);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_strip);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(svn * sizeof *sv), sv, GL_STREAM_DRAW);
-    glMultiDrawArrays(GL_TRIANGLE_STRIP, sfirst, scount, nstrips);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, svn / 7);
 }
 
 static void draw_ensemble_rods(const View *v, float fade, int single) {
@@ -1995,14 +2026,25 @@ static void render_phase(double wt, GLuint target, int clock) {
     draw_text();
 }
 
+static double prof_sim, prof_draw;     /* --bench: process CPU seconds in each */
+static double cputime(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
 static void render(double el, double wt, GLuint target, long keep_from) {
     ensure_size();
+    double c0 = cputime();
     sim_to(el, keep_from);
+    double c1 = cputime();
+    prof_sim += c1 - c0;
     int ty = cur_type();
     int clock = span_me < 0 || role == SC_FAN;
     if (ty == SC_FAN) render_fan(wt, target);
     else if (ty == SC_MAP) render_map(wt, target, clock);
     else render_phase(wt, target, clock);
+    prof_draw += cputime() - c1;
     last_role_drawn = ty;
 }
 
@@ -2374,6 +2416,8 @@ int main(int argc, char **argv) {
         GLuint q;
         glGenQueries(1, &q);
         struct timespec c0, c1;
+        double gbest = 1e9;
+        prof_sim = prof_draw = 0;
         clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c0);
         for (int i = 0; i < opt_bench; i++) {
             double f0 = now();
@@ -2386,15 +2430,16 @@ int main(int argc, char **argv) {
             double ms = (now() - f0) * 1000;
             gpu += ns * 1e-6;
             if (ns * 1e-6 > gworst) gworst = ns * 1e-6;
+            if (ns * 1e-6 < gbest) gbest = ns * 1e-6;
             sum += ms;
             if (ms > worst) worst = ms;
         }
         clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c1);
         double cpu = ((c1.tv_sec - c0.tv_sec) + (c1.tv_nsec - c0.tv_nsec) * 1e-9) * 1000;
-        printf("pendulums: %dx%d, %s, %d frames: GPU %.3f ms avg (worst %.3f), CPU work %.3f ms/frame (all threads); "
-               "wall %.3f ms avg (worst %.3f); warm-up %.0f ms\n",
-               W, H, cur_type() == SC_FAN ? "fan" : cur_type() == SC_MAP ? "map" : "phase", opt_bench, gpu / opt_bench, gworst,
-               cpu / opt_bench, sum / opt_bench, worst, tw * 1000);
+        printf("pendulums: %dx%d, %s, %d frames: GPU %.3f ms avg (best %.3f, worst %.3f), CPU work %.3f ms/frame "
+               "(all threads; sim %.3f, draw %.3f); wall %.3f ms avg (worst %.3f); warm-up %.0f ms\n",
+               W, H, cur_type() == SC_FAN ? "fan" : cur_type() == SC_MAP ? "map" : "phase", opt_bench, gpu / opt_bench, gbest,
+               gworst, cpu / opt_bench, prof_sim * 1000 / opt_bench, prof_draw * 1000 / opt_bench, sum / opt_bench, worst, tw * 1000);
         printf("pendulums: GL renderer: %s\n", (const char *)glGetString(GL_RENDERER));
         return 0;
     }
