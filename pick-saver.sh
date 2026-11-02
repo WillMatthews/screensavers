@@ -12,6 +12,11 @@ if ((${#avail[@]} == 0)); then
 fi
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}
 BAG=$STATE/lock-saver-bag
+# Serialize the whole read/pick/write transaction: overlapping skip or lock
+# requests must consume different entries, including when refilling the bag.
+mkdir -p "$STATE" || exit 1
+exec 9> "$BAG.lock" || exit 1
+flock -x 9 || exit 1
 read -r -a held 2>/dev/null < "$BAG" || held=()
 bag=()
 for s in "${held[@]}"; do [[ " ${avail[*]} " == *" $s "* ]] && bag+=("$s"); done
@@ -20,6 +25,6 @@ if ((${#bag[@]} == 0)); then
     mapfile -t bag < <(shuf -e "${avail[@]}")
     [[ ${bag[0]} == "$last" ]] && bag=("${bag[@]:1}" "${bag[0]}")
 fi
-echo "${bag[@]:1}" > "$BAG"
-echo "$(date -Is) ${bag[0]}" >> "$STATE/lock-saver.log"
+echo "${bag[@]:1}" > "$BAG" || exit 1
+echo "$(date -Is) ${bag[0]}" >> "$STATE/lock-saver.log" || exit 1
 echo "${bag[0]}"

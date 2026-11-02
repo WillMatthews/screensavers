@@ -28,10 +28,16 @@ fi
 case $pick in
   pipes)     cmd=("$dir/pipes/bin/pipes" --root --delay 5000) ;;
   maze)      cmd=("$dir/maze3d/bin/maze3d" --root) ;;
-  *)  # native layer-shell savers; one seed for every output, so a multi-monitor
-      # lock shows the same scene (same street, mountains, map) on each
+  *)  # Native layer-shell savers normally share a seed across outputs.
       cmd=("$(saver_bin "$dir" "$pick")" --layer)
-      [[ -n ${2:-} ]] && cmd+=(--seed "$2")
+      seed=${2:-}
+      if [[ ( $pick == soapfilm || $pick == aquarium ) && -n ${SWAYLOCK_PLUGIN_OUTPUT_NAME:-} ]]; then
+        # Full scene per monitor, with independent randomness. Keep the seed
+        # stable if the plugin restarts this output during the same lock.
+        read -r seed _ < <(printf '%s:%s' "${seed:-$SRANDOM}" "$SWAYLOCK_PLUGIN_OUTPUT_NAME" | cksum)
+        seed=$((seed | 1))
+      fi
+      [[ -n $seed ]] && cmd+=(--seed "$seed")
       # savers that span outputs (savers.sh SPANNING) also get the shared start
       # time, the "x,y,w,h;..." of the active outputs and our index in it
       if [[ " ${SPANNING[*]} " == *" $pick "* ]]; then

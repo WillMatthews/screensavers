@@ -1,8 +1,8 @@
 /*
  * soapfilm — the iridescence of soap films, as in macro photographs.
  *
- * Three scenes, an act each, in an order shuffled from the seed (or fixed
- * with --scene), crossfading through black:
+ * Two default scenes, an act each, alternating from a seed-chosen first
+ * scene (or fixed with --scene), crossfading through black:
  *
  *   film     a flat soap film in a brass wire frame filling the screen, lit
  *            by a big softbox behind the camera. It's drawn up out of the
@@ -22,7 +22,7 @@
  *            round it. Old ones burst: the hole opens from a point, its rim
  *            shedding a fine mist. New ones are blown in from the left or
  *            drift down from above.
- *   foam     a raft of foam seen from above with a tilted plane of focus:
+ *   foam     opt-in only (--scene foam): a raft seen from above with a tilted plane of focus:
  *            domed cells of film, each with the window in it, divided by
  *            glassy Plateau borders that widen at the junctions. It
  *            coarsens (von Neumann: cells with fewer than six sides shrink),
@@ -212,16 +212,10 @@ typedef struct {
 
 static int scene_of(int idx) {
     if (opt_scene >= 0) return opt_scene;
-    int deck = idx / NSCENE, pos = idx % NSCENE, order[NSCENE], prev_last = -1;
-    for (int d = deck - 1; d <= deck; d++) {
-        if (d < 0) continue;
-        rng = mix32(opt_seed * 2654435761U ^ (uint32_t)d * 40503U ^ 0x50a9U);
-        for (int i = 0; i < NSCENE; i++) order[i] = i;
-        for (int i = NSCENE - 1; i > 0; i--) { int j = irange(0, i); int t = order[i]; order[i] = order[j]; order[j] = t; }
-        if (d < deck) prev_last = order[NSCENE - 1];
-    }
-    if (order[0] == prev_last) { int t = order[0]; order[0] = order[1]; order[1] = t; }
-    return order[pos];
+    /* Keep the Voronoi foam out of normal playback. With two scenes,
+     * alternate after choosing the first from the seed to avoid repeats. */
+    const int scenes[] = {S_FILM, S_BUBBLES};
+    return scenes[((uint32_t)idx + (mix32(opt_seed ^ 0x50a9U) & 1U)) % 2];
 }
 
 static void act_gen(int idx, Act *a) {

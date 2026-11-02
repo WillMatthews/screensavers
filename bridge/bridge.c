@@ -56,9 +56,9 @@
  * The model is laid out once across the whole wall (a bridge from one end
  * of it to the other, the train crossing screen to screen); every instance
  * solves the same deterministic model and shows its own window onto it. A
- * portrait output, if any, carries the equations, plot and readouts above
- * and below the model; the front output (the one under the middle of the
- * layout, as in flightsim) carries the title block.
+ * portrait output carries equations and readouts, a third output carries
+ * the plot, and the front output (under the middle of the layout) carries
+ * the title block. Long monitor walls get longer structural spans.
  *
  * Same plumbing as gauges: Xlib + GLX for --window / --root, a native
  * wlr-layer-shell surface over EGL for --layer (swaylock-plugin), and
@@ -1461,6 +1461,10 @@ typedef struct {
     double smax_now, smin_now;
 } Br;
 
+static void bridge_fit(const Br *B);
+static double bridge_approach(const Br *B);
+static void bridge_widen(Br *B);
+
 static double br_bar_len(const Br *B, int i) {
     double dx = B->px[B->e[i].b] - B->px[B->e[i].a], dy = B->py[B->e[i].b] - B->py[B->e[i].a];
     return sqrt(dx * dx + dy * dy);
@@ -1588,6 +1592,7 @@ static void br_geometry(Br *B, int kind) {
     }
     B->span = B->x1 - B->x0;
     B->deck_y = 0;
+    bridge_widen(B);
 }
 
 /* (re)assemble K with the slack bars all but switched off */
@@ -1806,7 +1811,7 @@ static void br_build(Br *B, int kind, uint32_t seed) {
     B->betar = 2 * B->zeta / (w1 + w2);
     B->dt = BR_DT;
     /* trains: alternate directions, a pause between */
-    double L = B->span, t = 3.0;
+    double L = B->span, t = 3.0, approach = bridge_approach(B);
     B->ntrain = 0;
     for (int k = 0; k < MAXTRAIN && t < 88; k++) {
         Train *T = &B->tr[B->ntrain];
@@ -1818,7 +1823,7 @@ static void br_build(Br *B, int kind, uint32_t seed) {
         int dir = k % 2 == 0 ? 1 : -1;
         T->v = dir * v;
         T->t0 = t;
-        double approach = 0.75 * L;   /* starts this far beyond the bridge's end, nose first */
+        /* Start beyond the visible wall, even when height limits the fit. */
         T->s0 = dir > 0 ? B->x0 - approach : B->x1 + approach;
         /* the next one sets off as this one leaves the bridge, plus a breath */
         t += (approach + L + T->len) / v + 4 + 4 * hashf(seed, (uint32_t)kind, 90u + (uint32_t)k);
@@ -2627,6 +2632,36 @@ static void layout(void) {
         if (i != mid && a > best) { best = a; por = i; }
     }
     float footer = roundf(0.21f * (b1 - b0));
+    /* Three-monitor desk: the portrait carries the explanation and live
+     * numbers, the right screen gets a readable plot, and the clock stays
+     * on the middle screen. Keep the shared model band clear of panels. */
+    int plot_output = -1;
+    for (int i = 0; i < span_n; i++)
+        if (i != mid && i != por &&
+            (plot_output < 0 || span[i][0] > span[plot_output][0])) plot_output = i;
+    if (por >= 0 && plot_output >= 0) {
+        const float *Q = span[por], *R = span[plot_output];
+        float qx = Q[0] - x0, qy = Q[1] - y0, qw = Q[2], qh = Q[3];
+        float qu = fminf(qw, qh) / 1080.0f, qm = roundf(30 * qu), qg = roundf(14 * qu);
+        float above = b0 - qy, below = qy + qh - b1;
+        if (above > 0.18f * qh && below > 0.18f * qh) {
+            float th = fminf(0.3f * above, 150 * qu), aw = qw - 2 * qm;
+            box[BX_TITLE] = mkbox(qx + qm, qy + qm, aw, th, qu);
+            box[BX_EQN] = mkbox(qx + qm, qy + qm + th + qg, aw, above - 2 * qm - th - qg, qu);
+            float readw = (aw - qg) * 0.72f;
+            box[BX_READ] = mkbox(qx + qm, b1 + qm, readw, below - 2 * qm, qu);
+            box[BX_LEGEND] = mkbox(qx + qm + readw + qg, b1 + qm, aw - readw - qg, below - 2 * qm, qu);
+            float rx = R[0] - x0, ry = R[1] - y0, rw = R[2], rh = R[3];
+            float ru = fminf(rw, rh) / 1080.0f, rm = roundf(30 * ru);
+            float ph = roundf(0.24f * rh), py = ry + rh - rm - ph;
+            box[BX_PLOT] = mkbox(rx + rm, py, rw - 2 * rm, ph, ru);
+            float by = b1 - m - footer;
+            box[BX_BLOCK] = mkbox(fx + m, by, fw - 2 * m, footer, u);
+            stage[0] = m; stage[2] = canvas_w - 2 * m;
+            stage[1] = b0 + m; stage[3] = fminf(by, py) - g - stage[1];
+            return;
+        }
+    }
     if (por >= 0) {
         const float *Q = span[por];
         float qx = Q[0] - x0, qy = Q[1] - y0, qw = Q[2], qh = Q[3], qu = fminf(qw, qh) / 1080.0f, qm = roundf(30 * qu);
@@ -2678,6 +2713,38 @@ static void fit(double x0, double y0, double x1, double y1, float marg) {
     wk = fmin(sw / (x1 - x0), sh / (y1 - y0));
     wox = stage[0] + stage[2] * 0.5 - (x0 + x1) * 0.5 * wk;
     woy = stage[1] + stage[3] * 0.5 + (y0 + y1) * 0.5 * wk;
+}
+
+/* Taller bridge types need longer spans on a wide monitor wall. Change
+ * the actual geometry before solving, so dimensions and stresses stay true. */
+static void bridge_widen(Br *B) {
+    if (span_me < 0 || stage[2] <= 0 || stage[3] <= 0) return;
+    double x0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (int i = 0; i < B->nn; i++) {
+        x0 = fmin(x0, B->px[i]); x1 = fmax(x1, B->px[i]); y1 = fmax(y1, B->py[i]);
+    }
+    double aspect = (x1 - x0 + 0.14 * B->span) / (y1 - B->deck_y + 11);
+    double stretch = fmax(1, fmin(2.2, (stage[2] / stage[3]) / aspect));
+    for (int i = 0; i < B->nn; i++) B->px[i] *= stretch;
+    B->x0 *= stretch; B->x1 *= stretch;
+    B->span *= stretch; B->mon_x *= stretch;
+}
+
+static void bridge_fit(const Br *B) {
+    double x0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (int i = 0; i < B->nn; i++) {
+        x0 = fmin(x0, B->px[i]); x1 = fmax(x1, B->px[i]); y1 = fmax(y1, B->py[i]);
+    }
+    double pad = 0.07 * B->span;
+    fit(x0 - pad, span_me < 0 ? fmin(B->deck_y - 6.5, B->ground - 1.5) : B->deck_y - 6.5,
+        x1 + pad, y1 + 4.5, 0);
+}
+
+static double bridge_approach(const Br *B) {
+    if (stage[2] <= 0 || stage[3] <= 0) return 0.75 * B->span;
+    bridge_fit(B);
+    double left = -wox / wk, right = (canvas_w - wox) / wk;
+    return fmax(0.10 * B->span, fmax(B->x0 - left, right - B->x1) + 12 / wk);
 }
 
 /* ======================================================================
@@ -2908,11 +2975,6 @@ static void bar_point(const Br *B, int i, double xi, const double *u, double k, 
     *Y = ya + (yb - ya) * xi + k * (s * ax + c * v);
 }
 
-static float stage_fade(float X) {
-    float e = 50 * U;
-    return smooth01(stage[0] - e, stage[0] + e, X) * (1 - smooth01(stage[0] + stage[2] - e, stage[0] + stage[2] + e, X));
-}
-
 static void draw_train(const Br *B, const Train *T, double t) {
     if (t < T->t0) return;
     double head = T->s0 + T->v * (t - T->t0);
@@ -2922,8 +2984,10 @@ static void draw_train(const Br *B, const Train *T, double t) {
         double xa = head - dir * T->car0[c], xb = head - dir * T->car1[c];
         if (xa > xb) { double tmp = xa; xa = xb; xb = tmp; }
         double ya = B->deck_y + br_deck_v(B, ulive, xa) * B->scale, yb = B->deck_y + br_deck_v(B, ulive, xb) * B->scale;
-        float fa = stage_fade(WX(xa)), fb = stage_fade(WX(xb)), f = fminf(fa, fb);
-        if (f <= 0.01f) continue;
+        /* Clip at the physical viewport, never fade a whole carriage when
+         * its trailing end is still offscreen. This also keeps seams solid. */
+        if (WX(xb) < -10 * u || WX(xa) > canvas_w + 10 * u) continue;
+        float f = 1;
         int lo = T->loco[c];
         double hgt = lo ? 4.3 : 3.9, z0 = 1.05;
         /* the body, tilted with the deck */
@@ -2969,8 +3033,8 @@ static void draw_train(const Br *B, const Train *T, double t) {
     float ink[4], acc[4];
     for (int i = 0; i < T->naxle; i++) {
         double x = axle_x(T, i, t);
-        float f = stage_fade(WX(x));
-        if (f < 0.01f) continue;
+        if (WX(x) < -10 * u || WX(x) > canvas_w + 10 * u) continue;
+        float f = 1;
         double y = B->deck_y + br_deck_v(B, ulive, x) * B->scale;
         col_a(ink, P->ink, 0.95f * f);
         float r = (float)fmax(0.46 * wk, 2.0 * U);
@@ -2990,13 +3054,12 @@ static void draw_bridge(void) {
     br_live();
     double L = B->span;
     /* fit the superstructure (the valley may run off the bottom) */
-    double nx0 = 1e9, nx1 = -1e9, ny1 = -1e9;
+    double nx0 = 1e9, ny1 = -1e9;
     for (int i = 0; i < B->nn; i++) {
-        nx0 = fmin(nx0, B->px[i]); nx1 = fmax(nx1, B->px[i]);
+        nx0 = fmin(nx0, B->px[i]);
         ny1 = fmax(ny1, B->py[i]);
     }
-    double padx = 0.07 * L;
-    fit(nx0 - padx, span_me < 0 ? fmin(B->deck_y - 6.5, B->ground - 1.5) : B->deck_y - 6.5, nx1 + padx, ny1 + 4.5, 0);
+    bridge_fit(B);
     float u = U;
     float bot = span_me < 0 ? stage[1] + stage[3] : canvas_h;
     double reveal = smooth01(0.2f, 3.2f, (float)ts);
