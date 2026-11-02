@@ -44,6 +44,14 @@
  * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame
  * offscreen, --bench N to time N frames.
  *
+ * --scale F sets the scene's render scale (by default it keeps to about 1200p's worth
+ * of pixels); --weather 0-3 (clear, rain, snow, mist) overrides the seed's;
+ * --view N holds one kind of shot and --fire starts a round of firing at
+ * --at, for testing; so do the environment variables STEAM_LIST=SECONDS
+ * (print the director's shots), STEAM_LOAD=0..1 (a fixed CPU load),
+ * STEAM_FULLSIM (a --shot simulates from the start), STEAM_BLOW (the safety
+ * valves and whistle blowing) and STEAM_FIRE_AGE (where --fire starts).
+ *
  * Keys (window mode): q / Escape quit.
  */
 #define _DEFAULT_SOURCE

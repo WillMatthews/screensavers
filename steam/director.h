@@ -65,6 +65,8 @@ static void shot_target(double t, double *out) {
 static void shot_place(int n, int var, double v) {
     int kind = shot.kind;
     shot.side = (dfrand(n, 2) < 0.5f ? -1.0f : 1.0f) * (var & 1 ? -1 : 1);
+    /* cameras riding wide of the train keep off the telegraph poles' side */
+    if ((kind == SH_FRONT || kind == SH_SIDE) && var < 6) shot.side = (float)-pole_side;
     shot.dk = 1.0f + 0.35f * (var / 2) * (var % 4 < 2 ? 1 : -0.6f);
     shot.hk = 3.0f * (var / 2);
     switch (kind) {
@@ -251,7 +253,7 @@ static void director_camera(double t) {
     cam.fstop = 0;
     switch (shot.kind) {
     case SH_WHEELS: {
-        float z = (float)(4.5 - 6.5 * u);
+        float z = (float)(4.5 - 4.5 * u);
         fpt(&f0, s * (3.3f + 0.05f * wander(t, 0.7f, 1)), 1.05f + 0.04f * wander(t, 0.9f, 2), z, p);
         fpt(&f0, s * 0.9f, 1.2f, z - 3.5f, at);
         cam.hfov = 62; cam.fstop = 1.2f;
@@ -327,7 +329,7 @@ static void director_camera(double t) {
     case SH_TUNNEL: {
         /* chase behind the train until near the portal, then stop */
         double cz = fmin(train_tail_z() - 26, shot.fz0 - 38);
-        line_pt(cz, s * 3.2, 6.5 + shot.hk, p);
+        line_pt(cz, -pole_side * 3.2, 6.5 + shot.hk, p);
         for (int k = 0; k < 3; k++) at[k] = shot.look[k];
         cam.hfov = 48;
         break;
