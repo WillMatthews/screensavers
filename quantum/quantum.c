@@ -2618,7 +2618,7 @@ static void render_front(void) {
             kr = (Rect){W - m - s, m + 6 * u_, W - m, m + 6 * u_ + s};
             ar = (Rect){sim.x0 + 30 * u_, sim.y1 + 92 * u_, sim.x0 + (sim.x1 - sim.x0) * 0.58f, H - m - 10 * u_};
             readouts(ar.x1 + 90 * u_, ar.y0 + 6 * u_, fminf(300 * u_, W - m - CLOCK_W - ar.x1 - 120 * u_), 1.0f);
-        } else readouts(W - m - 300 * u_, sim.y1 + 80 * u_, 300 * u_, 1.0f);
+        } else readouts(W - m - 300 * u_, m + 30 * u_, 300 * u_, 1.0f);   /* where the momentum would be */
     } else if (W >= H * 1.1f) {
         /* a column on the right for the card and the numbers */
         float colw = fmaxf(W * 0.26f, 380 * u_);
@@ -2679,7 +2679,7 @@ static void render_momentum(void) {
     Rect area = {m * 1.5f, m * 2.2f, W - m, H - m * 1.6f};
     Rect r = fit(area, 1, 0.5f);
     k_panel(r, 1);
-    caption(r, "MOMENTUM SPACE", "|φ(k_{x}, k_{y})|^{2}");
+    if (A.id != A_TUNNEL) caption(r, "MOMENTUM SPACE", "|φ(k_{x}, k_{y})|^{2}");   /* (tunnelling's plot has its own) */
     float x = W > H ? fminf(r.x1 + m, W - 300 * u_) : m;
     if (W > H && x + 200 * u_ < W) {
         ro_x = x; ro_y = r.y0 + 20 * u_; ro_w = fminf(260 * u_, W - m - x); ro_s = u_;
