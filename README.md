@@ -1,4 +1,4 @@
-# wallpapers
+# screensavers
 
 Lock-screen savers for sway. Each one is a small, self-contained C program
 with OpenGL 3.3 shaders that draws straight onto the lock screen behind the
