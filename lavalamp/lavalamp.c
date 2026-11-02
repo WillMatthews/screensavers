@@ -1,7 +1,60 @@
 /*
  * lavalamp — a lava lamp glowing on a dark sideboard in a dim room.
  *
- * (description filled in below, see the end of this comment)
+ * A classic rocket lamp, brass, chrome or black enamel cone and cap round a
+ * tapered glass bottle, stands on a walnut sideboard against a plaster
+ * wall. Its bulb lights the wax from below; the lamp is the room's light,
+ * throwing a coloured glow up the wall and across the varnish, with a faint
+ * cool window somewhere behind you for the glints.
+ *
+ * The wax is simulated (see "the wax" below): a pool heated by the bulb,
+ * plumes that swell into buds on thick necks, necks that stretch, drain and
+ * pinch off, blobs that rise at their Stokes speed, cool by their surface,
+ * flatten under the cap, sink back as rounder drops and are swallowed by the
+ * pool; touching blobs merge; in a hot spell a long column climbs the lamp.
+ * Switched on (the --epoch, i.e. the lock), the wax is a cold lump: it
+ * softens over a minute or so in a cloudy liquid that clears as it warms,
+ * then the first tower rises.
+ *
+ * Rendering: each frame the blobs, necks and pool become one smoothly
+ * blended signed distance field in a 3D texture, and a second 3D texture
+ * holds how much wax lies between every point and the bulb. The scene shader
+ * finds the glass (a surface of revolution), refracts into the liquid,
+ * marches through it gathering the bulb's light scattered by the liquid (and
+ * shadowed by the wax), and shades the wax it meets: lit from below,
+ * scattering light inside so the underside glows and the crown falls dark,
+ * with a soft sheen. Rays that miss the wax refract out the back of the
+ * bottle to the wall. Glass and metal take Fresnel reflections of the room;
+ * the metal also sees the glowing glass. Then bloom, a filmic curve, a warm
+ * grade, vignette and grain. The room is drawn into a cache about once a
+ * second (it only changes as the lamps warm up); each frame redraws just the
+ * lamp's box. About 2.5 ms of GPU a frame at 1920x1080 on an Iris Xe.
+ *
+ * Palettes (--palette, else from the seed): classic (red wax in yellow),
+ * blue (in clear), purple (in pink), green (in blue), white (in cyan) and
+ * glitter (pink wax in violet, gold flakes carried round by the convection).
+ *
+ * A small caption in the corner: the time, and how long the screen has been
+ * locked (swaylock's start time, as gauges reads it).
+ *
+ * Spanning: run one instance per output with the same --seed and --epoch,
+ * --layout (every output's logical rect) and --output = this one's index.
+ * The sideboard and wall run on across all of them, each output with its own
+ * lamp (a taller one on a portrait screen) seen through its own camera in a
+ * parallel rig, so the shelf edge and the light on the wall are continuous
+ * from screen to screen; each lamp lights its neighbours' walls too. The
+ * output under the middle of the layout gets the --palette (or the seed's)
+ * and the caption; the others, left to right, complementary colours. Each
+ * lamp's wax is its own (the seed and its output), so instances need not
+ * talk; the light they throw on each other depends only on the epoch.
+ *
+ * Same plumbing as gauges: Xlib + GLX for --window / --root, a native
+ * wlr-layer-shell surface over EGL for --layer (swaylock-plugin), and
+ * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen
+ * (--at counts from switch-on; 0-120 s is the warm-up). --bench N times N
+ * frames offscreen. --cpu lets the CPU load turn the heater up (livelier
+ * wax under load; the wax then no longer repeats exactly). --stats prints
+ * the wax's state.
  *
  * Keys (window mode): q / Escape quit.
  */
@@ -69,11 +122,6 @@ static uint32_t hash32(uint32_t x) {
     return x;
 }
 
-static uint32_t rng;
-static float frand(void) {
-    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-    return (rng >> 8) * (1.0f / 16777216.0f);
-}
 
 static float clampf(float x, float a, float b) { return x < a ? a : x > b ? b : x; }
 static float smooth(float a, float b, float x) { x = clampf((x - a) / (b - a), 0, 1); return x * x * (3 - 2 * x); }
@@ -541,6 +589,7 @@ static void sim_stats(double t) {
     for (int i = 0; i < MAXB; i++)
         if (sim.b[i].alive) printf(" r%.2f@%.2f/T%.2f", radius(sim.b[i].V), sim.b[i].x[1], sim.b[i].T);
     printf("\n");
+    fflush(stdout);
 }
 
 /* ---- the scene: one sideboard along the wall, a lamp on it for each
@@ -588,7 +637,6 @@ static void setup_layout(void) {
     float fxc = fr[0] + fr[2] / 2;
     /* other outputs: the same rig if the sideboard crosses them sensibly,
      * with a lamp as tall as fits (a grande on a portrait screen) */
-    int rank = 0;
     for (int i = 0; i < span_n; i++) {
         const float *r = span[i];
         out_f[i] = F; out_y0[i] = Y0;
@@ -604,7 +652,6 @@ static void setup_layout(void) {
             out_y0[i] = r[1] + 0.46f * r[3] + f * (LAMP_H / 2 - YC) / DC;
             out_s[i] = 1;
         }
-        (void)rank;
     }
     /* palettes: the front's from --palette or the seed; the others, left
      * to right, complementary to it */
@@ -1940,7 +1987,6 @@ int main(int argc, char **argv) {
     if (span_me >= span_n) span_me = -1;
     if (opt_fps < 1) opt_fps = 1;
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
-    rng = opt_seed | 1;
     render_scale = opt_scale > 0 ? clampf(opt_scale, 0.25f, 1) : 0.7f;
     int offscreen = opt_shot || opt_bench > 0;
     fonts_init();
@@ -2046,7 +2092,8 @@ int main(int argc, char **argv) {
         double el = opt_epoch ? fmax(wt - opt_epoch, 0) : t - t0;
         if (opt_cpu && t - last_cpu >= 1) { read_cpu(); last_cpu = t; }
         sim_advance(el, 30);
-        float a = (float)((el - (sim.t0 + (sim.steps - 1) * DT)) / DT);
+        /* drawn a step behind, blending the last two steps, so it's smooth at any frame rate */
+        float a = (float)((el - (sim.t0 + sim.steps * DT)) / DT);
         render(el, clampf(a, 0, 1), wt, 0);
         if (opt_stats && el - last_stats >= 5) { sim_stats(el); last_stats = el; }
         if (opt_layer) eglSwapBuffers(wl.ed, wl.es);
