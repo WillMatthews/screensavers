@@ -90,7 +90,7 @@
 #define DEG (PI / 180.0f)
 
 static int W = 1280, H = 800;
-static int opt_root, opt_layer, opt_bench, opt_check, opt_poynting;
+static int opt_root, opt_layer, opt_bench, opt_check, opt_poynting, opt_resize_test;
 static float opt_fps = 60;
 static float opt_speed = 1;            /* wave periods per second, times the act's own */
 static float opt_act_secs = 48;
@@ -186,6 +186,7 @@ typedef struct { int face, px; Glyph g[NGLYPH]; } Style;
 #define MAXSTYLE 32
 static Style styles[MAXSTYLE];
 static int nstyles;
+static int style_gen;                   /* bumped whenever the set of styles changes */
 static FT_Library ft;
 enum { F_UI, F_UIB, F_MATH, F_FALL, NFACE };
 static FT_Face faces[NFACE];
@@ -219,7 +220,8 @@ static int style(int face, float px) {
     if (p < 6) p = 6;
     for (int i = 0; i < nstyles; i++)
         if (styles[i].face == face && styles[i].px == p) return i;
-    if (nstyles == MAXSTYLE) die("too many text styles");
+    if (nstyles == MAXSTYLE) nstyles = 0;      /* never expected (reset on resize), but never fatal */
+    style_gen++;
     styles[nstyles].face = face;
     styles[nstyles].px = p;
     styles[nstyles].g[0].adv = -1;     /* not rasterised yet */
@@ -611,7 +613,7 @@ static void act_frame(void) {
     };
     static const float NL[NACT] = {44, 30, 40, 32, 28, 30, 32, 32, 36, 28, 36, 40};
     static const float FV[NACT] = {0.9f, 1.0f, 0.9f, 1.0f, 1.3f, 1.0f, 1.0f, 1.0f, 0.8f, 1.0f, 0.9f, 1.0f};
-    static const float G[NACT] = {1, 1, 1, 0.7f, 1, 1, 1, 0.45f, 0.75f, 1, 0.9f, 0.3f};
+    static const float G[NACT] = {1, 1, 0.7f, 0.7f, 1, 1, 1, 0.45f, 0.75f, 1.3f, 0.9f, 0.3f};
     memcpy(roi, R[act], sizeof roi);
     act_gain = G[act];
     nl_pref = NL[act];
@@ -1823,7 +1825,7 @@ static double show_advance(double t, int maxsteps) {
 }
 
 /* ---- a frame ---- */
-static int atlas_n = -1;
+static int atlas_gen = -1;
 static float ppol[4], ptr[4];           /* the polar plot's and the trace's rects (fb px) */
 static int show_polar, show_trace;
 static float trace_span;
@@ -2144,9 +2146,9 @@ static void render(GLuint target, double ta, float dt) {
     prof_mark(PR_TEXT);
     /* text */
     build_text(ta);
-    if (nstyles != atlas_n) {
+    if (style_gen != atlas_gen) {
         build_atlas();
-        atlas_n = nstyles;
+        atlas_gen = style_gen;
         build_text(ta);
     }
     if (atlas_dirty) {
@@ -2174,6 +2176,9 @@ static void render(GLuint target, double ta, float dt) {
 
 /* ---- where we are on the wall ---- */
 static void place(void) {
+    /* the text sizes follow the output's size: start the styles afresh */
+    nstyles = 0;
+    style_gen++;
     if (span_me < 0) {
         lay[0] = lay[1] = 0; lay[2] = (float)W; lay[3] = (float)H;
         memcpy(front, lay, sizeof front); memcpy(inset, lay, sizeof inset); memcpy(view, lay, sizeof view);
@@ -2425,6 +2430,8 @@ static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t 
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
     if (w && h && ((int)w != W || (int)h != H)) {
+        /* a new size: place() runs before the next frame, which restarts the
+         * act (re-simulated to now) and the text styles */
         W = (int)w; H = (int)h;
         if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
         need_restart = 1;
@@ -2526,6 +2533,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-poynting")) opt_poynting = 1;
         else if (!strcmp(a, "-check")) opt_check = 1;
+        else if (!strcmp(a, "-resize-test") && i + 1 < argc) opt_resize_test = atoi(argv[++i]);
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-palette") && i + 1 < argc) opt_palette = argv[++i];
@@ -2657,7 +2665,22 @@ int main(int argc, char **argv) {
     }
 
     double t0 = now(), last = t0;
+    int resizes = 0;
+    double next_resize = t0 + 0.4;
     for (;;) {
+        /* --resize-test N (window mode): resize ourselves N times, then report */
+        if (opt_resize_test && dpy && now() > next_resize) {
+            if (resizes == opt_resize_test) {
+                glFinish();
+                printf("fdtd: %d resizes: now %dx%d, grid %dx%d, %d text styles, GL error 0x%x\n", resizes, W, H, NX, NY,
+                       nstyles, glGetError());
+                return 0;
+            }
+            uint32_t h = hash32((uint32_t)resizes * 77u + 5);
+            XResizeWindow(dpy, win, 320 + h % 1600, 240 + (h >> 12) % 1000);
+            resizes++;
+            next_resize = now() + 0.35;
+        }
         if (opt_layer && !wl_poll()) return 0;
         while (dpy && XPending(dpy)) {
             XEvent ev;
