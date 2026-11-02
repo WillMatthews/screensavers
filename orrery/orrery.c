@@ -1700,14 +1700,14 @@ static const char *FS_SCENE = GLSL(
         }
         if (bn == 0.0) return 1.0;
         float db = bsum / bn;
-        float pr = max(uSunR * (dr - db) / (dr * db) * uSTan, 1.5 / 2048.0);
+        float pr = max(uSunR * (dr - db) / (dr * db) * uSTan, 2.5 / 2048.0);
         float vis = 0.0;
-        for (int i = 0; i < 8; i++) {
-            float d = texture(uSunMap, q.xy + R * k[i] * pr).r;
+        for (int i = 0; i < 12; i++) {
+            float d = texture(uSunMap, q.xy + R * k[i] * pr * (0.55 + 0.45 * float(i) / 11.0)).r;
             float zb = uSNF.x * uSNF.y / (uSNF.y - d * (uSNF.y - uSNF.x));
             vis += zb < dr ? 0.0 : 1.0;
         }
-        return smoothstep(0.0, 1.0, vis / 8.0);
+        return smoothstep(0.0, 1.0, vis / 12.0);
     }
 
     float moonShadow(vec3 P, vec3 n) {
@@ -2343,7 +2343,13 @@ static void camera_at(double t, const Sky *s, Cam *c) {
         float el = (float)((p >= P_JUPITER ? 18 : 26) * RAD + r3 * 8 * RAD);
         orbit(c, tgt, az, el, dist * (1.06f - 0.1f * us));
         if (c->eye[2] < 30.0f) c->eye[2] = 30.0f;
-        c->fov = 30; c->ap = 0.35f;
+        c->fov = 30; c->ap = 0.12f;
+        {   /* focus on the planet's near face */
+            float d[3] = {s->pos[p][0] - c->eye[0], s->pos[p][1] - c->eye[1], s->pos[p][2] - c->eye[2]};
+            float l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            for (int i = 0; i < 3; i++) c->fp[i] = s->pos[p][i] - d[i] / l * PL_R[p] * 0.7f;
+            c->has_fp = 1;
+        }
         break;
     }
     case S_FLYBY: {
@@ -2358,7 +2364,7 @@ static void camera_at(double t, const Sky *s, Cam *c) {
         /* look ahead and in, towards the Sun */
         for (int i = 0; i < 3; i++) c->tgt[i] = s->pos[p][i] * 0.55f + tan_[i] * (x + run * 0.6f) * 0.5f;
         c->tgt[2] = Z_PLANE - 2;
-        c->fov = 34; c->ap = 0.5f;
+        c->fov = 34; c->ap = 0.2f;
         float dp[3] = {s->pos[p][0] - c->eye[0], s->pos[p][1] - c->eye[1], s->pos[p][2] - c->eye[2]};
         c->focus = sqrtf(dp[0] * dp[0] + dp[1] * dp[1] + dp[2] * dp[2]);
         memcpy(c->fp, s->pos[p], sizeof c->fp);
