@@ -841,6 +841,8 @@ static float UI = 1;                   /* px per "point" */
 static int st_tiny, st_lab, st_small, st_body, st_bodyb, st_eq, st_h, st_title, st_clock, st_num, st_numb, st_sub;
 static void styles_init(void) {
     float m = fminf((float)W, (float)H);
+    nstyles = 0;                       /* sizes follow the output: start the cache afresh */
+    atlas_dirty = 1;
     UI = clampf(m / 1080.0f, 0.55f, 3.0f);
     st_tiny = style(F_MONO, 11 * UI);
     st_lab = style(F_MONO, 12.5f * UI);
@@ -2223,7 +2225,7 @@ static void cr_init(uint32_t seed) {
     cr.nch = 0;
     cr.chdrift = 0;
     int full = (int)(CR_T / CR_DT);
-    for (int tr = 0; tr < 60 && cr.nch < NCH; tr++) {
+    for (int tr = 0; tr < 140 && cr.nch < NCH; tr++) {
         double x = 0.50 + 0.28 * hrand(seed, 100 + tr), y = (hrand(seed, 200 + tr) - 0.5) * 0.3;
         double v2 = cr_2omega(x, y) - cr.lyC;
         if (v2 <= 0) continue;
@@ -2643,7 +2645,7 @@ static void wk_map(Rect R, double u) {
 }
 
 static void wk_draw(Rect R, double u) {
-    int port = (R.y1 - R.y0) > (R.x1 - R.x0) * 0.7f;
+    int port = H > W;
     if (port) {
         float m = R.y0 + (R.y1 - R.y0) * 0.55f;
         wk_globe((Rect){R.x0, R.y0, R.x1, m}, u);
@@ -3979,8 +3981,18 @@ int main(int argc, char **argv) {
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
         target_fbo = fbo;
+        if (getenv("ORBITS_RESIZE_TEST")) {
+            /* the window resized again and again: caches keyed by size must not pile up */
+            int ow = W, oh = H;
+            for (int i = 0; i < 40; i++) {
+                W = 320 + (i * 157) % (ow - 320); H = 240 + (i * 97) % (oh - 240);
+                render(t_wall0 + opt_at + i * 3);
+                glFinish();
+            }
+            printf("orbits: 40 sizes rendered, %d text styles, atlas %d rows\n", nstyles, atlas_h);
+            return 0;
+        }
         if (opt_shot) {
-            render(t_wall0 + opt_at);
             glFinish();
             save_ppm(opt_shot);
             return 0;
