@@ -2303,7 +2303,7 @@ void main() {
     if (disc > 0.0 && a > 1e-5) tmax = min(tmax, (-b + sqrt(disc)) / a);
     if (rd.y > 0.0) tmax = min(tmax, (5.5 - uCam.y) / rd.y);
     tmax = min(tmax, 12.0);
-    const int N = 22;
+    const int N = 16;
     float dt = tmax / float(N);
     float j = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + float(uFrame % 16) * 0.618034);
     float cth = dot(rd, uKeyDir), g = 0.68;
@@ -2381,8 +2381,7 @@ void main() {
                  texture(uScene, vUV + uTexel * vec2(0, 1)).rgb + texture(uScene, vUV - uTexel * vec2(0, 1)).rgb;
         c = max(c + (c - b * 0.25) * uSharp, 0.0);
     }
-    vec3 v = texture(uVol, vUV).rgb * 0.4 + (texture(uVol, vUV + uVolTexel * vec2(1, 0.5)).rgb + texture(uVol, vUV - uVolTexel * vec2(1, 0.5)).rgb +
-             texture(uVol, vUV + uVolTexel * vec2(-0.5, 1)).rgb + texture(uVol, vUV - uVolTexel * vec2(-0.5, 1)).rgb) * 0.15;
+    vec3 v = (texture(uVol, vUV + uVolTexel * vec2(0.5, 0.25)).rgb + texture(uVol, vUV - uVolTexel * vec2(0.5, 0.25)).rgb) * 0.5;
     if (uDebug == 3) c = v * 4.0;
     else c += v;
     c += texture(uBloom, vUV).rgb * 0.06;
@@ -3306,7 +3305,7 @@ static void sky_light(double wt) {
     lt.sky_amb = vmul(sky, 0.05f);
     lt.gnd_amb = vadd(vmul(sky, 0.03f), v3(0.004f, 0.0025f, 0.0012f));
     /* sun on the floor lights the whole room a little, warm */
-    lt.bounce = vmul(vmul(lt.key_col, 0.018f), s > 0 ? 1.0f : 0.4f);
+    lt.bounce = vmul(vmul(lt.key_col, 0.012f), s > 0 ? 1.0f : 0.4f);
     lt.bounce.z *= 0.8f;
     float lum = 0.3f * lt.win_l.x + 0.55f * lt.win_l.y + 0.15f * lt.win_l.z;
     lt.exposure = 1.5f / (0.14f + lum);
@@ -4382,7 +4381,7 @@ int main(int argc, char **argv) {
     }
 
     double t0 = now();
-    render_scale = opt_scale > 0 ? opt_scale : 0.7f;
+    render_scale = opt_scale > 0 ? opt_scale : 0.6f;
     double avg = 1.0 / 60, last_change = 0;
     for (;;) {
         if (opt_layer && !wl_poll()) return 0;
@@ -4412,7 +4411,7 @@ int main(int argc, char **argv) {
             float s = render_scale;
             if (avg > 0.0055) s *= 0.92f;
             else if (avg < 0.0035) s *= 1.04f;
-            s = clampf(s, 0.5f, 1.0f);
+            s = clampf(s, 0.45f, 1.0f);
             if (fabsf(s - render_scale) > 0.02f) { render_scale = s; last_change = t; avg = 1.0 / 150; }
         }
         double spare = 1.0 / opt_fps - (now() - t);
