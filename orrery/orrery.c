@@ -906,7 +906,7 @@ static void build(void) {
     {
         cur_mat = M_TABLE;
         int n = 0;
-        const float hx = 105, hy = 62, rc = 6;
+        const float hx = 165, hy = 78, rc = 7;
         for (int q = 0; q < 4; q++) {
             float cx = q == 0 || q == 3 ? hx - rc : -hx + rc, cy = q < 2 ? hy - rc : -hy + rc;
             for (int k = 0; k <= 8; k++) {
@@ -1395,8 +1395,8 @@ static void text_styles(void) {
     st_inscr = style(2, 0.46f / K_DIAL);
     st_sun = style(0, 0.24f / K_DIAL);
     st_host = style(0, 1.22f / K_PLQ);
-    st_line = style(0, 0.50f / K_PLQ);
-    st_small = style(2, 0.44f / K_PLQ);
+    st_line = style(0, 0.56f / K_PLQ);
+    st_small = style(2, 0.52f / K_PLQ);
     st_date = style(0, 0.74f / K_DATE);
 }
 
@@ -1409,7 +1409,7 @@ static GLuint mk_mask(int w, int h) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 8.0f);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 4.0f);
     return t;
 }
 
@@ -1566,8 +1566,8 @@ static void draw_plaque(double wt) {
     tseg(0.25f, -0.32f, 2.6f, -0.32f, 0.018f, 1);
     tseg(-0.16f, -0.32f, 0, -0.32f + 0.12f, 0.03f, 1); tseg(0, -0.32f + 0.12f, 0.16f, -0.32f, 0.03f, 1);
     tseg(0.16f, -0.32f, 0, -0.32f - 0.12f, 0.03f, 1); tseg(0, -0.32f - 0.12f, -0.16f, -0.32f, 0.03f, 1);
-    tline(st_line, 0, -1.02f, 0, 0, l2, 0.05f, k, 1);
-    tline(st_small, 0, -1.68f, 0, 0, l3, 0.02f, k, 1);
+    tline(st_line, 0, -1.05f, 0, 0, l2, 0.04f, k, 1);
+    tline(st_small, 0, -1.75f, 0, 0, l3, 0.02f, k, 1);
     flush_text(tex_plaque, PLQ_TEX_W, PLQ_TEX_H);
 }
 
@@ -1611,6 +1611,7 @@ static const char *VS_SCENE = "#version 330 core\n" GLSL(
     layout(location = 2) in vec3 aT;
     layout(location = 3) in vec3 aM;          /* material, part x, part y */
     uniform mat4 uModel, uVP;
+    invariant gl_Position;
     out vec3 vW, vN, vO, vT;
     out vec2 vUV;
     flat out int vMat;
@@ -1665,25 +1666,15 @@ static const char *FS_SCENE = GLSL(
         return mix(mix(mix(hash3(i), hash3(i + vec3(1, 0, 0)), f.x), mix(hash3(i + vec3(0, 1, 0)), hash3(i + vec3(1, 1, 0)), f.x), f.y),
                    mix(mix(hash3(i + vec3(0, 0, 1)), hash3(i + vec3(1, 0, 1)), f.x), mix(hash3(i + vec3(0, 1, 1)), hash3(i + vec3(1, 1, 1)), f.x), f.y), f.z);
     }
-    float fbm(vec3 p) { return 0.5 * noise(p) + 0.25 * noise(p * 2.03) + 0.125 * noise(p * 4.01) + 0.0625 * noise(p * 8.05); }
+    float fbm(vec3 p) { return 0.5 * noise(p) + 0.28 * noise(p * 2.03) + 0.16 * noise(p * 4.01) + 0.06; }
 
+    uniform samplerCube uEnv;
+    /* the room's reflection, prefiltered: one mip per roughness */
+    vec3 env(vec3 r, float rough) { return textureLod(uEnv, r, clamp((rough - 0.04) * 4.0 / 0.96, 0.0, 4.0)).rgb; }
     vec3 winCentre() { return vec3((uWin.x + uWin.y) * 0.5, uWallY, (uWin.z + uWin.w) * 0.5); }
-
     vec3 lobe(vec3 r, vec3 d, vec3 c, float w, float rough) {
         float s = w * w + rough * rough * 1.6;
         return c * (w * w / s) * exp((dot(r, d) - 1.0) / s);
-    }
-    /* what a shiny surface near the orrery sees: the dim study, the moonlit
-     * window, the lamp-lit table below (the Sun itself is the area light) */
-    vec3 env(vec3 r, float rough) {
-        vec3 c = vec3(0.012, 0.009, 0.007) * (0.8 + 0.4 * r.z);
-        c += lobe(r, normalize(winCentre() - vec3(0.0, 0.0, 20.0)), vec3(0.42, 0.56, 0.85) * 0.9, 0.11, rough);
-        c += lobe(r, vec3(0.0, 0.0, -1.0), vec3(0.075, 0.042, 0.02), 0.55, rough);
-        c += lobe(r, normalize(vec3(0.75, -0.55, 0.35)), vec3(1.0, 0.62, 0.32) * 0.10, 0.35, rough);
-        c += lobe(r, normalize(vec3(-0.3, -0.9, 0.25)), vec3(0.9, 0.6, 0.35) * 0.05, 0.5, rough);
-        c += lobe(r, vec3(0.0, 0.0, 1.0), vec3(1.0, 0.72, 0.45) * 0.09, 0.7, rough);      /* the ceiling, lit by the lamp */
-        c += lobe(r, normalize(vec3(0.1, -1.0, 0.45)), vec3(1.0, 0.75, 0.5) * 0.07, 0.35, rough);   /* a pale wall behind the camera */
-        return c;
     }
 
     /* how much of the lamp a point sees: a shadow map looking straight down
@@ -1781,7 +1772,6 @@ static const char *FS_SCENE = GLSL(
             float wm = 0.06;
             col += (ggx(N, T, B, V, uMoonL, m.F0, min(ax + wm, 1.0), min(ay + wm, 1.0)) * (ax * ay / ((ax + wm) * (ay + wm))) +
                     m.alb * max(NoLm, 0.0) / PI) * uMoonCol * ms;
-            if (m.coat > 0.0) col += ggx(N, T, B, V, uMoonL, vec3(0.04), 0.08, 0.08) * uMoonCol * ms * m.coat;
         }
         /* the room: reflections bent along the grain, and a little fill */
         float r = sqrt(m.rT * m.rB);
@@ -1798,7 +1788,7 @@ static const char *FS_SCENE = GLSL(
             vec3 warm = vec3(1.0, 0.66, 0.34);
             col += (lobe(Rr, vec3(0.0, 0.0, -1.0), warm * 0.55, 0.75, r) * Fe + m.alb * warm * 0.25 * max(0.3 - N.z * 0.7, 0.0)) * inTrain;
         }
-        col += m.alb * env(N, 1.0) * ao * 2.2;
+        col += m.alb * mix(vec3(0.03, 0.019, 0.011), vec3(0.016, 0.014, 0.014), N.z * 0.5 + 0.5) * ao * 2.2;
         if (m.coat > 0.0) col += env(reflect(-V, N), m.coatR) * (0.04 + 0.96 * pow(1.0 - NoV, 5.0)) * ao * m.coat;
         /* the light bouncing off the bright table round the base */
         float rho = length(P.xy);
@@ -1866,13 +1856,14 @@ static const char *FS_SCENE = GLSL(
                         c += (sky * 2.2 + vec3(4.0, 4.2, 4.4) * moon) * glass;
                         alb = vec3(0.04, 0.03, 0.02) * (1.0 - glass);
                     }
-                } else if (P.x > 45.0 && P.x < 215.0 && h < 150.0) {
-                    float sh = floor((h + 76.0) / 34.0), hy = fract((h + 76.0) / 34.0) * 34.0;
+                } else if (P.x > -20.0 && P.x < 300.0 && h < 175.0) {
+                    float sh = floor((h + 76.0) / 36.0), hy = fract((h + 76.0) / 36.0) * 36.0;
+                    float bay = abs(fract((P.x + 20.0) / 80.0) - 0.5) * 80.0;
                     alb = vec3(0.05, 0.028, 0.015);
                     float bx = P.x + sh * 37.0;
-                    float bi = floor(bx / 3.2 + 0.4 * sin(bx * 0.11));
-                    float bh = 22.0 + 8.0 * hash(vec2(bi, sh));
-                    if (hy > 2.0 && hy < bh && hash(vec2(bi, sh + 9.0)) > 0.08) {
+                    float bi = floor(bx / 3.4);
+                    float bh = 22.0 + 9.0 * hash(vec2(bi, sh));
+                    if (bay < 37.5 && hy > 2.5 && hy < bh && hash(vec2(bi, sh + 9.0)) > 0.1) {
                         float hu = hash(vec2(bi, sh + 2.0));
                         vec3 bc = hu < 0.3 ? vec3(0.16, 0.035, 0.03) : hu < 0.55 ? vec3(0.04, 0.08, 0.05) : hu < 0.75 ? vec3(0.04, 0.05, 0.11) : vec3(0.17, 0.11, 0.06);
                         bc *= 0.6 + 0.6 * hash(vec2(bi, sh + 4.0));
@@ -1882,7 +1873,7 @@ static const char *FS_SCENE = GLSL(
                 }
             }
         }
-        c += alb * (lamp + vec3(0.05, 0.055, 0.07) * 0.35);
+        c += alb * (lamp + vec3(0.05, 0.055, 0.07) * 0.35 + vec3(0.09, 0.065, 0.045) * smoothstep(-80.0, 120.0, P.z));
         return c;
     }
 
@@ -1930,32 +1921,35 @@ static const char *FS_SCENE = GLSL(
             return;
         }
         bool top = N.z > 0.93;
-        if (mt == 0) {                          /* brass, turned and grained */
+        if (KIND == 2 && mt == 0) {                          /* brass, turned and grained */
             m.F0 = vec3(0.92, 0.66, 0.34);
             m.rT = 0.08; m.rB = 0.32;
             float ring = hash(vec2(floor(length(vUV) * 9.0), 3.0));
             m.F0 *= 0.92 + 0.1 * ring;
-        } else if (mt == 1) {                   /* the base plate: older brass, frosted */
+        } else if (KIND == 2 && mt == 1) {                   /* the base plate: older brass, frosted */
             m.F0 = vec3(0.55, 0.40, 0.22);
             m.rT = 0.3; m.rB = 0.42;
             m.F0 *= 0.88 + 0.16 * noise(vW * 0.8);
-        } else if (mt == 2) {                   /* polished steel */
+        } else if (KIND == 2 && mt == 2) {                   /* polished steel */
             m.F0 = vec3(0.62, 0.62, 0.64);
             m.rT = 0.05; m.rB = 0.16;
-        } else if (mt == 3) {                   /* blued steel */
+        } else if (KIND == 2 && mt == 3) {                   /* blued steel */
             m.F0 = vec3(0.06, 0.09, 0.26);
             m.rT = 0.1; m.rB = 0.14;
-        } else if (mt == 4) {                   /* gilt */
+        } else if (KIND == 2 && mt == 4) {                   /* gilt */
             m.F0 = vec3(1.0, 0.77, 0.40);
             m.rT = 0.06; m.rB = 0.12;
-        } else if (mt == 5) {                   /* the dial plate: silvered, engraved; brass under it */
+        } else if (KIND == 2 && mt == 5) {                   /* the dial plate: silvered, engraved; brass under it */
             if (top) {
                 vec2 uv = vW.xy / 29.0 + 0.5;
                 float ink = mask(uDial, uv);
-                float e = 0.6 / 4096.0;
-                float gx = mask(uDial, uv + vec2(e, 0.0)) - mask(uDial, uv - vec2(e, 0.0));
-                float gy = mask(uDial, uv + vec2(0.0, e)) - mask(uDial, uv - vec2(0.0, e));
-                N = normalize(N + vec3(-gx, -gy, 0.0) * 1.2);
+                /* the cut's walls: the ink's slope across the plate, in texels */
+                vec2 dx = dFdx(vW.xy), dy = dFdy(vW.xy);
+                vec2 gi = vec2(dFdx(ink), dFdy(ink));
+                mat2 J = mat2(dx, dy);
+                vec2 gw = abs(determinant(J)) > 1e-12 ? gi * inverse(J) : vec2(0.0);
+                gw *= 0.6 * 29.0 / 4096.0;
+                N = normalize(N + vec3(-gw, 0.0) * 1.2);
                 m.F0 = vec3(0.70, 0.68, 0.63) * (0.94 + 0.08 * noise(vW * 6.0));
                 m.rT = 0.24; m.rB = 0.34;
                 T = normalize(vec3(-vW.y, vW.x, 0.0) + 1e-4);
@@ -1976,7 +1970,7 @@ static const char *FS_SCENE = GLSL(
             } else {
                 m.F0 = vec3(0.85, 0.62, 0.32); m.rT = 0.12; m.rB = 0.3;
             }
-        } else if (mt == 6) {                   /* mahogany: wax over wood */
+        } else if (KIND == 2 && mt == 6) {                   /* mahogany: wax over wood */
             float fig;
             vec3 wp = vec3(atan(vW.y, vW.x) * 20.0, length(vW.xy), vW.z);
             if (abs(vW.y + 34.0) < 4.0 && abs(vW.x) < 9.5 && vW.z < 5.5) wp = vW * 1.6;
@@ -1985,14 +1979,14 @@ static const char *FS_SCENE = GLSL(
             m.rT = m.rB = 0.55;
             m.coat = 1.0;
             m.coatR = 0.09;
-        } else if (mt >= 10 && mt <= 16) {      /* the planets: enamel, clear-coated */
+        } else if ((KIND == 3 || mt == 16) && mt >= 10 && mt <= 16) {      /* the planets: enamel, clear-coated */
             vec3 q = normalize(mt == 16 ? vO - vec3(2.5, 0.0, 27.0) : vO);
             float lat = q.z;
-            if (mt == 10) {                     /* Mercury: grey, pocked */
+            if (KIND == 3 && mt == 10) {                     /* Mercury: grey, pocked */
                 m.alb = vec3(0.30, 0.28, 0.26) * (0.75 + 0.45 * fbm(q * 7.0));
-            } else if (mt == 11) {              /* Venus: pale cloud */
+            } else if (KIND == 3 && mt == 11) {              /* Venus: pale cloud */
                 m.alb = vec3(0.70, 0.60, 0.40) * (0.88 + 0.16 * fbm(vec3(q.x * 3.0, q.y * 3.0, lat * 9.0)));
-            } else if (mt == 12) {              /* the Earth: blue enamel, gilt lines */
+            } else if (KIND == 3 && mt == 12) {              /* the Earth: blue enamel, gilt lines */
                 m.alb = vec3(0.012, 0.045, 0.16);
                 m.alb *= 0.85 + 0.25 * fbm(q * 5.0);
                 float la = asin(clamp(lat, -1.0, 1.0)) * 57.2958, lo = atan(q.y, q.x) * 57.2958;
@@ -2005,11 +1999,11 @@ static const char *FS_SCENE = GLSL(
                 m.alb = mix(m.alb, vec3(0.0), g);
                 m.F0 = mix(vec3(0.04), vec3(1.0, 0.77, 0.4), g);
                 m.rT = m.rB = mix(0.4, 0.15, g);
-            } else if (mt == 13) {              /* Mars: terracotta, dark seas, a polar cap */
+            } else if (KIND == 3 && mt == 13) {              /* Mars: terracotta, dark seas, a polar cap */
                 float f = fbm(q * 4.0 + 2.0);
                 m.alb = mix(vec3(0.42, 0.13, 0.05), vec3(0.18, 0.07, 0.04), smoothstep(0.5, 0.65, f));
                 m.alb = mix(m.alb, vec3(0.75, 0.72, 0.68), smoothstep(0.88, 0.92, lat));
-            } else if (mt == 14) {              /* Jupiter: belts and zones, the red spot */
+            } else if (KIND == 3 && mt == 14) {              /* Jupiter: belts and zones, the red spot */
                 float t = lat + 0.03 * fbm(q * 8.0) - 0.02 * sin(atan(q.y, q.x) * 3.0 + lat * 20.0) * 0.5;
                 float b = sin(t * 26.0) * 0.5 + 0.5, b2 = sin(t * 61.0 + 1.0) * 0.5 + 0.5;
                 vec3 zone = vec3(0.72, 0.62, 0.46), belt = vec3(0.38, 0.22, 0.12);
@@ -2017,7 +2011,7 @@ static const char *FS_SCENE = GLSL(
                 m.alb = mix(m.alb, vec3(0.62, 0.55, 0.42), smoothstep(0.45, 0.7, abs(lat)));
                 vec2 sp = vec2(atan(q.y, q.x) - 1.2, (lat + 0.36) * 3.2);
                 m.alb = mix(m.alb, vec3(0.55, 0.20, 0.10), smoothstep(0.32, 0.24, length(sp * vec2(1.0, 1.7))));
-            } else if (mt == 15) {              /* Saturn: pale gold bands */
+            } else if (KIND == 3 && mt == 15) {              /* Saturn: pale gold bands */
                 float b = sin(lat * 30.0 + 0.6 * fbm(q * 6.0)) * 0.5 + 0.5;
                 m.alb = mix(vec3(0.62, 0.50, 0.30), vec3(0.74, 0.64, 0.44), b);
                 m.alb = mix(m.alb, vec3(0.50, 0.46, 0.38), smoothstep(0.75, 0.9, abs(lat)));
@@ -2025,30 +2019,32 @@ static const char *FS_SCENE = GLSL(
                 float f = fbm(q * 5.0 + 7.0);
                 m.alb = vec3(0.58, 0.57, 0.54) * (1.0 - 0.45 * smoothstep(0.45, 0.62, f) * smoothstep(0.0, -0.6, q.x));
             }
-            if (mt != 12) { m.F0 = vec3(0.04); m.rT = m.rB = 0.45; }
+            if (KIND != 3 || mt != 12) { m.F0 = vec3(0.04); m.rT = m.rB = 0.45; }
             m.coat = 1.0; m.coatR = 0.05;
             ao = 1.0;
-        } else if (mt == 17) {                  /* Saturn's rings: enamelled bands */
+        } else if (KIND == 3 && mt == 17) {                  /* Saturn's rings: enamelled bands */
             float r = length(vO.xy);
             float b = 0.5 + 0.5 * sin(r * 40.0) * sin(r * 13.0 + 1.0);
             m.alb = mix(vec3(0.46, 0.40, 0.30), vec3(0.70, 0.62, 0.48), b) * mix(0.6, 1.0, smoothstep(2.45, 2.9, r));
             m.F0 = vec3(0.04); m.rT = m.rB = 0.4; m.coat = 1.0; m.coatR = 0.06;
-        } else if (mt == 18) {                  /* the plaque: brushed brass, engraved */
+        } else if (KIND == 2 && mt == 18) {                  /* the plaque: brushed brass, engraved */
             vec2 uv = vUV / uPlqSize + 0.5;
             m.F0 = vec3(0.90, 0.66, 0.34);
             m.rT = 0.06; m.rB = 0.3;
             T = uPlqU;
             if (dot(Ng, cross(uPlqU, uPlqV)) > 0.9) {
                 float ink = mask(uPlaque, uv);
-                float e = 0.6 / 1536.0;
-                float gx = mask(uPlaque, uv + vec2(e, 0.0)) - mask(uPlaque, uv - vec2(e, 0.0));
-                float gy = mask(uPlaque, uv + vec2(0.0, e * 2.67)) - mask(uPlaque, uv - vec2(0.0, e * 2.67));
-                N = normalize(N - (uPlqU * gx + uPlqV * gy) * 1.2);
+                vec2 dx = dFdx(vUV), dy = dFdy(vUV);
+                vec2 gi = vec2(dFdx(ink), dFdy(ink));
+                mat2 J = mat2(dx, dy);
+                vec2 gw = abs(determinant(J)) > 1e-12 ? gi * inverse(J) : vec2(0.0);
+                gw *= 1.2 * 16.0 / 1536.0;
+                N = normalize(N - (uPlqU * gw.x + uPlqV * gw.y) * 1.2);
                 m.F0 = mix(m.F0, vec3(0.025), ink);
                 m.alb = mix(m.alb, vec3(0.008, 0.007, 0.006), ink);
                 m.rT = mix(m.rT, 0.55, ink); m.rB = mix(m.rB, 0.55, ink);
             }
-        } else if (mt == 21) {                  /* Jupiter's moons: little ivory balls */
+        } else if (KIND == 2 && mt == 21) {                  /* Jupiter's moons: little ivory balls */
             m.alb = vec3(0.62, 0.56, 0.45);
             m.coat = 1.0; m.coatR = 0.05;
             m.rT = m.rB = 0.5;
@@ -2058,6 +2054,46 @@ static const char *FS_SCENE = GLSL(
         vec3 col = light(m, P, N, Ng, T, V, ao);
         o = vec4(min(col, vec3(60.0)), 1.0);
         oDepth = dot(vW - uCam, uFwd);
+    });
+
+/* prefiltering the room's reflection into a cubemap: the analytic lobes,
+ * widened by each mip's roughness */
+static const char *FS_ENVGEN = "#version 330 core\n" GLSL(
+    uniform vec4 uWin;
+    uniform float uWallY, uRough;
+    uniform int uFace;
+    uniform float uSize;
+    out vec4 o;
+    vec3 winCentre() { return vec3((uWin.x + uWin.y) * 0.5, uWallY, (uWin.z + uWin.w) * 0.5); }
+
+    vec3 lobe(vec3 r, vec3 d, vec3 c, float w, float rough) {
+        float s = w * w + rough * rough * 1.6;
+        return c * (w * w / s) * exp((dot(r, d) - 1.0) / s);
+    }
+    /* what a shiny surface near the orrery sees: the dim study, the moonlit
+     * window, the lamp-lit table below (the Sun itself is the area light) */
+    vec3 envA(vec3 r, float rough) {
+        vec3 c = vec3(0.012, 0.009, 0.007) * (0.8 + 0.4 * r.z);
+        c += lobe(r, normalize(winCentre() - vec3(0.0, 0.0, 20.0)), vec3(0.42, 0.56, 0.85) * 0.9, 0.11, rough);
+        c += lobe(r, vec3(0.0, 0.0, -1.0), vec3(0.075, 0.042, 0.02), 0.55, rough);
+        c += lobe(r, normalize(vec3(0.75, -0.55, 0.35)), vec3(1.0, 0.62, 0.32) * 0.10, 0.35, rough);
+        c += lobe(r, normalize(vec3(-0.3, -0.9, 0.25)), vec3(0.9, 0.6, 0.35) * 0.05, 0.5, rough);
+        c += lobe(r, vec3(0.0, 0.0, 1.0), vec3(1.0, 0.72, 0.45) * 0.09, 0.7, rough);      /* the ceiling, lit by the lamp */
+        c += lobe(r, normalize(vec3(0.1, -1.0, 0.45)), vec3(1.0, 0.75, 0.5) * 0.07, 0.35, rough);   /* a pale wall behind the camera */
+        return c;
+    }
+
+
+    void main() {
+        vec2 q = gl_FragCoord.xy / uSize * 2.0 - 1.0;
+        vec3 d;
+        if (uFace == 0) d = vec3(1.0, -q.y, -q.x);
+        else if (uFace == 1) d = vec3(-1.0, -q.y, q.x);
+        else if (uFace == 2) d = vec3(q.x, 1.0, q.y);
+        else if (uFace == 3) d = vec3(q.x, -1.0, -q.y);
+        else if (uFace == 4) d = vec3(q.x, -q.y, 1.0);
+        else d = vec3(-q.x, -q.y, -1.0);
+        o = vec4(envA(normalize(d), uRough), 1.0);
     });
 
 static const char *VS_TRI = "#version 330 core\n" GLSL(
@@ -2094,8 +2130,8 @@ static const char *FS_DOF = "#version 330 core\n" GLSL(
         if (R < 0.4) { o = c; return; }
         vec3 acc = c.rgb;
         float ws = 1.0;
-        for (int i = 0; i < 24; i++) {
-            float fi = float(i) + 0.5, rr = sqrt(fi / 24.0) * R, a = fi * 2.39996;
+        for (int i = 0; i < 16; i++) {
+            float fi = float(i) + 0.5, rr = sqrt(fi / 16.0) * R, a = fi * 2.39996;
             vec4 s = texture(uPrep, uv + vec2(cos(a), sin(a)) * rr / uHalf);
             /* a sharper sample in front doesn't bleed back; one behind is
              * only gathered as far as its own blur reaches */
@@ -2132,8 +2168,7 @@ static const char *FS_FINAL = "#version 330 core\n" GLSL(
         vec3 blur = texture(uDof, uv).rgb;
         vec3 col = mix(sharp, blur, smoothstep(0.6, 2.0, abs(c)));
         /* bloom: wide and soft round the Sun, the window, the highlights */
-        vec3 bl = textureLod(uDof, uv, 1.5).rgb * 0.2 + textureLod(uDof, uv, 3.0).rgb * 0.3 +
-                  textureLod(uDof, uv, 4.5).rgb * 0.3 + textureLod(uDof, uv, 6.0).rgb * 0.2;
+        vec3 bl = textureLod(uDof, uv, 2.0).rgb * 0.35 + textureLod(uDof, uv, 4.0).rgb * 0.4 + textureLod(uDof, uv, 6.0).rgb * 0.25;
         col += max(bl - 0.25, 0.0) * 0.22;
         col *= uExposure;
         /* grade: warm highlights, cool deep shadows */
@@ -2249,7 +2284,10 @@ static void camera_at(double t, const Sky *s, Cam *c) {
         float x = sgn * (-7 + 14 * us) * 0.6f;
         c->eye[0] = PLQ_C[0] + x; c->eye[1] = PLQ_C[1] - 25 + 3 * us; c->eye[2] = PLQ_C[2] + 11 - 2 * us;
         c->tgt[0] = PLQ_C[0] + x * 0.25f; c->tgt[1] = PLQ_C[1] + 1.5f; c->tgt[2] = PLQ_C[2] + 1.0f;
-        c->fov = 30; c->ap = 0.9f;
+        c->fov = 30; c->ap = 0.55f;
+        memcpy(c->fp, PLQ_C, sizeof c->fp);
+        c->fp[2] -= 0.4f;
+        c->has_fp = 1;
         break;
     }
     case S_TRAIN: {
@@ -2321,6 +2359,7 @@ static void camera_at(double t, const Sky *s, Cam *c) {
         return;
     }
     }
+    if (c->has_fp) return;
     float d[3] = {c->tgt[0] - c->eye[0], c->tgt[1] - c->eye[1], c->tgt[2] - c->eye[2]};
     c->focus = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
 }
@@ -2358,7 +2397,7 @@ static void setup_view(void) {
 }
 
 /* ---- GL ---- */
-static GLuint prog_kind[3], prog_scene, prog_depth, prog_prep, prog_dof, prog_final;
+static GLuint prog_kind[4], prog_scene, prog_depth, prog_prep, prog_dof, prog_final;
 static GLuint vao_mesh, vbo_mesh, ibo_mesh, vao_empty;
 static int nverts, nidx;
 static GLuint fbo_shadow, tex_shadow;
@@ -2367,7 +2406,7 @@ static GLuint fbo_ms, rb_ms_col, tex_ms_z, rb_ms_dep, fbo_res, tex_res_col, fbo_
 static int rs_w, rs_h, msaa = 2;
 static float render_scale = 1.0f;
 static M4 light_vp, sun_vp;
-static GLuint fbo_sunmap, tex_sunmap;
+static GLuint fbo_sunmap, tex_sunmap, tex_env;
 #define SUN_MAP 2048
 static const float SUN_NEAR = 3.8f, SUN_FAR = 200.0f, SUN_TAN = 2.9f;
 static float moon_dir[3];
@@ -2465,7 +2504,7 @@ static void targets(int w, int h) {
 #define U(p, n) glGetUniformLocation(p, n)
 
 static void gl_init(double now_t) {
-    for (int k = 0; k < 3; k++) {
+    for (int k = 0; k < 4; k++) {
         char *src = malloc(strlen(FS_SCENE) + 64);
         sprintf(src, "#version 330 core\nconst int KIND = %d;\n%s", k, FS_SCENE);
         prog_kind[k] = mk_prog(VS_SCENE, src);
@@ -2530,6 +2569,40 @@ static void gl_init(double now_t) {
     glDrawBuffer(GL_NONE);
     glReadBuffer(GL_NONE);
 
+    /* the room's reflection, prefiltered */
+    {
+        GLuint pg = mk_prog(VS_TRI, FS_ENVGEN), fb;
+        glGenTextures(1, &tex_env);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, tex_env);
+        for (int l = 0; l < 5; l++)
+            for (int f = 0; f < 6; f++)
+                glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, l, GL_R11F_G11F_B10F, 64 >> l, 64 >> l, 0, GL_RGB, GL_FLOAT, NULL);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, 4);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+        glGenFramebuffers(1, &fb);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb);
+        glUseProgram(pg);
+        glUniform4f(U(pg, "uWin"), WIN[0], WIN[1], WIN[2], WIN[3]);
+        glUniform1f(U(pg, "uWallY"), WALL_Y);
+        glBindVertexArray(vao_empty);
+        glDisable(GL_CULL_FACE);
+        for (int l = 0; l < 5; l++)
+            for (int f = 0; f < 6; f++) {
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, tex_env, l);
+                glViewport(0, 0, 64 >> l, 64 >> l);
+                glUniform1i(U(pg, "uFace"), f);
+                glUniform1f(U(pg, "uSize"), (float)(64 >> l));
+                glUniform1f(U(pg, "uRough"), 0.04f + 0.96f * l / 4.0f);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+            }
+        glEnable(GL_CULL_FACE);
+        glDeleteFramebuffers(1, &fb);
+    }
+
     /* the lamp's shadow map: straight down from the Sun's centre */
     tex_sunmap = mk_tex(GL_DEPTH_COMPONENT24, SUN_MAP, SUN_MAP, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, GL_NEAREST);
     glGenFramebuffers(1, &fbo_sunmap);
@@ -2551,7 +2624,7 @@ static void gl_init(double now_t) {
         light_vp = m4_mul(m4_ortho(-62, 62, -50, 50, 150, 480), m4_look(e, c, up));
     }
 
-    for (int kk = 0; kk < 3; kk++) {
+    for (int kk = 0; kk < 4; kk++) {
     prog_scene = prog_kind[kk];
     glUseProgram(prog_scene);
     glUniform1i(U(prog_scene, "uShadow"), 0);
@@ -2559,6 +2632,7 @@ static void gl_init(double now_t) {
     glUniform1i(U(prog_scene, "uPlaque"), 2);
     glUniform1i(U(prog_scene, "uDate"), 3);
     glUniform1i(U(prog_scene, "uSunMap"), 4);
+    glUniform1i(U(prog_scene, "uEnv"), 5);
     glUniformMatrix4fv(U(prog_scene, "uSVP"), 1, GL_FALSE, sun_vp.m);
     glUniform2f(U(prog_scene, "uSNF"), SUN_NEAR, SUN_FAR);
     glUniform1f(U(prog_scene, "uSTan"), 0.5f / SUN_TAN);
@@ -2630,6 +2704,9 @@ static const int draw_order[] = {B_GLOBE0, B_GLOBE0 + 1, B_GLOBE0 + 2, B_GLOBE0 
                                  B_DRV0 + 5, B_P2, B_IDLER, B_STATIC, B_TABLE, B_ROOM};
 #define NDRAW ((int)(sizeof draw_order / sizeof *draw_order))
 
+/* which specialisation of the scene shader draws a body */
+static int kind_of(int b) { return b == B_ROOM ? 0 : b == B_TABLE ? 1 : b >= B_GLOBE0 && b < B_GLOBE0 + NPL ? 3 : 2; }
+
 /* the scene's render scale to start with: under a megapixel (4x MSAA),
  * upscaled with Catmull-Rom; live, it then follows the frame budget */
 static float default_scale(void) {
@@ -2680,9 +2757,17 @@ static void render(double t, double wt, GLuint target) {
     float b = (cam_cy - view_y - view_h) / cam_f, tp = (cam_cy - view_y) / cam_f;
     M4 vp = m4_mul(m4_frustum(l * NEAR, r * NEAR, b * NEAR, tp * NEAR, NEAR, FAR), view);
 
-    /* moonlight shadow map */
+    /* the shadow maps, moonlight and the lamp's: only redrawn when the
+     * model has moved (holding the present, the arms creep imperceptibly) */
     prof_mark(PR_SHADOW);
     glBindVertexArray(vao_mesh);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glUseProgram(prog_depth);
+    GLint dmodel = U(prog_depth, "uModel");
+    static double shadow_mt = -1e18;
+    if (fabs(mt - shadow_mt) > 1200) {
+    shadow_mt = mt;
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_shadow);
     glViewport(0, 0, SHADOW, SHADOW);
     glEnable(GL_DEPTH_TEST);
@@ -2691,9 +2776,7 @@ static void render(double t, double wt, GLuint target) {
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(1.5f, 3.0f);
     glDisable(GL_CULL_FACE);
-    glUseProgram(prog_depth);
     glUniformMatrix4fv(U(prog_depth, "uVP"), 1, GL_FALSE, light_vp.m);
-    GLint dmodel = U(prog_depth, "uModel");
     for (int j = 0; j < NDRAW; j++)
         if (body[draw_order[j]].cast) draw_body(draw_order[j], dmodel);
     /* the lamp's shadow map: everything under the Sun but the Sun itself */
@@ -2706,6 +2789,7 @@ static void render(double t, double wt, GLuint target) {
         if (body[draw_order[j]].cast && draw_order[j] != B_SUN) draw_body(draw_order[j], dmodel);
     glDisable(GL_POLYGON_OFFSET_FILL);
     glEnable(GL_CULL_FACE);
+    }
 
     /* the scene */
     prof_mark(PR_SCENE);
@@ -2715,7 +2799,7 @@ static void render(double t, double wt, GLuint target) {
     glClearBufferfv(GL_COLOR, 0, clear_col);
     glClearBufferfv(GL_COLOR, 1, clear_z);
     glClear(GL_DEPTH_BUFFER_BIT);
-    for (int kk = 0; kk < 3; kk++) {
+    for (int kk = 0; kk < 4; kk++) {
     prog_scene = prog_kind[kk];
     glUseProgram(prog_scene);
     glUniformMatrix4fv(U(prog_scene, "uVP"), 1, GL_FALSE, vp.m);
@@ -2731,14 +2815,33 @@ static void render(double t, double wt, GLuint target) {
     glBindTexture(GL_TEXTURE_2D, tex_date);
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, tex_sunmap);
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tex_env);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex_shadow);
     glBindVertexArray(vao_mesh);
+    /* a depth-only pass first, so the shading runs once per visible sample
+     * (the train under the dial plate would otherwise be shaded and then
+     * covered); the room is drawn last without it, behind everything */
+    glUseProgram(prog_depth);
+    glUniformMatrix4fv(U(prog_depth, "uVP"), 1, GL_FALSE, vp.m);
+    glColorMaski(0, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    for (int j = 0; j < NDRAW; j++)
+        if (draw_order[j] != B_ROOM) draw_body(draw_order[j], dmodel);
+    glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_FALSE);
     for (int j = 0; j < NDRAW; j++) {
-        int b = draw_order[j], k = b == B_ROOM ? 0 : b == B_TABLE ? 1 : 2;
-        if (j == 0 || k != (draw_order[j - 1] == B_ROOM ? 0 : draw_order[j - 1] == B_TABLE ? 1 : 2)) glUseProgram(prog_kind[k]);
+        int b = draw_order[j], k = kind_of(b);
+        if (b == B_ROOM) glDepthMask(GL_TRUE);
+        if (j == 0 || k != kind_of(draw_order[j - 1])) glUseProgram(prog_kind[k]);
         draw_body(b, U(prog_kind[k], "uModel"));
     }
+
+    glDepthFunc(GL_LESS);
+    glDepthMask(GL_TRUE);
 
     /* resolve */
     prof_mark(PR_RESOLVE);
