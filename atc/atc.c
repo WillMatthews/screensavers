@@ -1917,7 +1917,7 @@ static void block_lines(const Ac *a, char L[3][40]) {
         snprintf(L[2], 40, "%dKT %s", (int)lroundf(a->gs), a->goodyear ? "GOODYEAR" : "AIRSHIP");
         return;
     }
-    int fl = (int)lroundf(a->alt / 100);
+    int fl = (int)lroundf(fmaxf(a->alt, 0) / 100);
     const char *arr = a->vr > 400 ? S_UP : a->vr < -400 ? S_DN : " ";
     if (a->compact) {
         snprintf(L[0], 40, "%s", a->cs);
@@ -2315,7 +2315,7 @@ static void draw_ring_labels(const View *v, float step, float step_a) {
         float x = hx + sinf(lb) * r * v->ppn, y = hy - cosf(lb) * r * v->ppn;
         if (x < v->x0 + 10 || x > v->x1 - 30 || y < v->y0 + 10 || y > v->y1 - 10) continue;
         char b[16];
-        snprintf(b, sizeof b, r == floorf(r) ? "%.0f" : "%.1f", r);
+        snprintf(b, sizeof b, "%g", r);
         rect(x - text_width(st_tiny, b, 0) * 0.5f - 3, y - cap_h(st_tiny) * 0.5f - 3, x + text_width(st_tiny, b, 0) * 0.5f + 3, y + cap_h(st_tiny) * 0.5f + 3, 2, C4(0.035f, 0.05f, 0.065f, 0.9f), M_FLAT);
         text(st_tiny, x, y + cap_h(st_tiny) * 0.5f, 0, b, ca(COL_RING, 0.85f * a));
     }
@@ -2414,7 +2414,7 @@ static void draw_track_info(float x, float y, const Ac *a, float alpha) {
     if (a->ship) snprintf(L[n++], 48, "%s  %s", a->goodyear ? "GOODYEAR AIRSHIP" : "AIRSHIP", a->reg[0] ? a->reg : "");
     else snprintf(L[n++], 48, "%-5s %s", a->type[0] ? a->type : "----", a->reg);
     if (a->ship) snprintf(L[n++], 48, "ALT  %5d FT", (int)lroundf(a->alt));
-    else snprintf(L[n++], 48, "ALT  FL%03d %s", (int)lroundf(a->alt / 100), a->vr > 300 ? S_UP : a->vr < -300 ? S_DN : "");
+    else snprintf(L[n++], 48, "ALT  FL%03d %s", (int)lroundf(fmaxf(a->alt, 0) / 100), a->vr > 300 ? S_UP : a->vr < -300 ? S_DN : "");
     snprintf(L[n++], 48, "GS   %3d KT  TRK %03d", (int)lroundf(a->gs), (int)lroundf(a->trk) % 360);
     snprintf(L[n++], 48, "V/S %+5d FPM", (int)(lroundf(a->vr / 50) * 50));
     snprintf(L[n++], 48, "SSR  %s", a->sqk[0] ? a->sqk : "----");
@@ -2483,6 +2483,7 @@ static const char *wake(const Ac *a) {
 }
 
 static void fmt_level(char *b, size_t n, float alt) {
+    alt = fmaxf(alt, 0);
     if (alt < 6000) snprintf(b, n, "A%03d", (int)lroundf(alt / 100));
     else snprintf(b, n, "%d", (int)lroundf(alt / 100));
 }
@@ -2873,7 +2874,7 @@ static void draw_lists(float x0, float y0, float x1, float y1, int ai, double wt
         for (int i = 0; i < MAXAC; i++) {
             Ac *a = &ac[i];
             if (!a->used || a->gone || a->kind != kind || a->fade <= 0) continue;
-            if (pass == 0 && ai >= 0 && a->apt != ai) continue;
+            if (ai >= 0 && a->apt != ai) continue;
             if (a->ground && kind == KD_ARR) continue;
             idx[n++] = i;
         }
@@ -2907,7 +2908,7 @@ static void draw_lists(float x0, float y0, float x1, float y1, int ai, double wt
                 snprintf(b, sizeof b, "%03d", (int)lroundf(a->trk) % 360);
                 text(st_lbl, x0 + pad + cw * cxs[4], ry, -1, b, COL_TXT);
             }
-            snprintf(b, sizeof b, "%03d%s", (int)lroundf(a->alt / 100), a->vr > 400 ? S_UP : a->vr < -400 ? S_DN : " ");
+            snprintf(b, sizeof b, "%03d%s", (int)lroundf(fmaxf(a->alt, 0) / 100), a->vr > 400 ? S_UP : a->vr < -400 ? S_DN : " ");
             text(st_lbl, x0 + pad + cw * cxs[5], ry, 1, b, vert ? COL_AMB : COL_TXT);
             alpha_mul = 1;
             y += rh;
