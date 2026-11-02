@@ -3,8 +3,9 @@
  *
  * Simulated targets (a car on a winding road, aircraft flying legs and
  * coordinated turns, a ship making way) are watched by noisy sensors: GPS
- * fixes, range-bearing radars (scans, no rotating beam drawn), missed detections and
- * clutter, and a passive sensor that hears only bearings. Trackers written
+ * fixes, range-bearing radars (scans; no beam is drawn, nothing sweeps),
+ * missed detections and clutter, a passive sensor that hears only bearings,
+ * odometry, range beacons, a laser tracker, a robot's landmark sightings. Trackers written
  * here from scratch estimate where the targets are, and every part of the
  * estimate is drawn: truth paths (faint), raw detections with their
  * uncertainty wedges, each track with its 1-sigma / 2-sigma covariance
@@ -24,6 +25,18 @@
  *                                         GNN (Hungarian) assignment, gates,
  *                                         M-of-N confirmation, deletion, and
  *                                         crossing targets that may swap
+ *   6  smoothing (Rauch-Tung-Striebel)    forward filter vs the whole past
+ *                                         smoothed backwards, and the fixed-lag
+ *                                         estimate, through GPS outages
+ *   7  sensor fusion, information form    GPS, odometry (bias estimated), two
+ *                                         range beacons; bits per sensor; a
+ *                                         correlated second track merged by
+ *                                         covariance intersection
+ *   8  square root vs naive, float32      a 10^9 shrink of P: the textbook
+ *                                         update loses definiteness, Joseph and
+ *                                         the array square-root form hold
+ *   9  EKF-SLAM                           robot and landmark map in one state,
+ *                                         correlations building, loop closure
  * The scene at any moment is a pure function of --seed and the time since
  * --epoch, so instances never need to talk.
  *
@@ -42,7 +55,10 @@
  * Same plumbing as gauges: Xlib + GLX for --window / --root, a native
  * wlr-layer-shell surface over EGL for --layer (swaylock-plugin),
  * --shot FILE.ppm [--at SECONDS] [--size WxH] renders one frame offscreen,
- * --bench N times N frames, --check runs the filter consistency tests.
+ * --bench N times N frames, --check runs the filter consistency tests (and,
+ * for the later acts, RTS = batch least squares, information filter = KF,
+ * square root = Joseph, CI's guarantee, SLAM's NEES); --resize-test N
+ * renders N frames at random sizes (glyph styles are reset on every resize).
  *
  * Keys (window mode): q / Escape quit.
  */
@@ -2803,9 +2819,18 @@ static void poly(const float *P, int n, int closed, float w, const float *c, flo
     poly_k(P, n, closed, w, c, a, al, K_LINE);
 }
 /* dashes along a polyline: on px drawn, off px skipped */
+static void poly(const float *P, int n, int closed, float w, const float *c, float a, const float *al);
 static void poly_dash(const float *P, int n, int closed, float w, const float *c, float a, float on, float off) {
-    float pos = 0, per = on + off;
+    float pos = 0, per = on + off, tot = 0;
     int ns = closed ? n : n - 1;
+    for (int i = 0; i < ns; i++) {
+        int j = (i + 1) % n;
+        tot += hypotf(P[2 * j] - P[2 * i], P[2 * j + 1] - P[2 * i + 1]);
+    }
+    if (!(tot < 8.0f * (W + H))) {     /* far bigger than the screen (or not a number): no dashes */
+        if (tot == tot) poly(P, n, closed, w, c, a * 0.6f, NULL);
+        return;
+    }
     for (int i = 0; i < ns; i++) {
         int j = (i + 1) % n;
         float x0 = P[2 * i], y0 = P[2 * i + 1], dx = P[2 * j] - x0, dy = P[2 * j + 1] - y0, l = sqrtf(dx * dx + dy * dy);
@@ -3248,17 +3273,19 @@ static void chart_dynamic(const Rect *r, const Chart *c, double rt) {
         int n = 0;
         if (s->style == ST_DOTS) {
             double sum = 0;
+            int dst = s->n > 360 ? (s->n + 359) / 360 : 1;     /* dense series: fewer dots, same average */
             for (int k = 0; k < s->n; k++) {
                 float x = chart_x(&in, s->t[k]), y = chart_y(c, &in, s->v[k]);
-                disk(x, y, 1.5f * U, col, 0.55f);
+                if (k % dst == 0) disk(x, y, 1.5f * U, col, 0.55f);
                 sum += s->v[k];
                 if (k >= c->avgn && c->avgn > 0) sum -= s->v[k - c->avgn];
                 int m = c->avgn > 0 && k + 1 > c->avgn ? c->avgn : k + 1;
-                if (c->avgn > 0) { P[2 * n] = x; P[2 * n + 1] = chart_y(c, &in, (float)(sum / m)); n++; }
+                if (c->avgn > 0 && (k % dst == 0 || k == s->n - 1)) { P[2 * n] = x; P[2 * n + 1] = chart_y(c, &in, (float)(sum / m)); n++; }
             }
             if (n > 1) poly(P, n, 0, 1.8f * U, col, 0.95f, NULL);
             continue;
         }
+        float lastx = -1e9f;
         for (int k = 0; k < s->n; k++) {
             if (s->v[k] != s->v[k]) {   /* NaN: a gap */
                 if (n > 1) poly(P, n, 0, 1.6f * U, col, 0.95f, NULL);
@@ -3266,6 +3293,9 @@ static void chart_dynamic(const Rect *r, const Chart *c, double rt) {
                 continue;
             }
             float x = chart_x(&in, s->t[k]), y = chart_y(c, &in, s->v[k]);
+            /* dense lines: about one point per 1.5 px */
+            if (s->style == ST_LINE && n && x - lastx < 1.5f && k + 1 < s->n && s->v[k + 1] == s->v[k + 1]) continue;
+            lastx = x;
             if (s->style == ST_STEP && n) { P[2 * n] = x; P[2 * n + 1] = P[2 * n - 1]; n++; }
             P[2 * n] = x; P[2 * n + 1] = y; n++;
         }
@@ -4646,7 +4676,7 @@ static void fu_table(const Rect *r, double s) {
 /* -------- numerics -------- */
 static void nu_camera(double s) {
     /* the window follows 7 sigma of the reference in log space, but at a
-     * limited pace: out at 3 decades a second, in at 1.4, then a light
+     * limited pace: out at 6 decades a second, in at 1.4, then a light
      * average to round off the corners; a function of the history only */
     double c = NAN, last[6];
     int i0 = NU.hn - 1, nl = 0;
@@ -4654,7 +4684,7 @@ static void nu_camera(double s) {
     for (int i = i0; i < NU.hn && NU.ht[i] <= s; i++) {
         double tgt = clampd(NU.hs[i] + log10(7.0), log10(0.012), log10(260.0));
         if (c != c) c = tgt;
-        else c += clampd(tgt - c, -1.4 * NU_DT, 3.0 * NU_DT);
+        else c += clampd(tgt - c, -1.4 * NU_DT, 6.0 * NU_DT);
         last[nl++ % 6] = c;
     }
     double w = 300;
