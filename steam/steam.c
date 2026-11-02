@@ -1,40 +1,48 @@
 /*
- * steam — the machine's vital signs on the footplate of a steam engine: the
- * backhead of a locomotive boiler, seen head-on in the warm light of a cab
- * lamp and the fire.
+ * steam — a night express: a big steam engine, its tender and a rake of
+ * lit carriages running through moonlit country, filmed.
  *
- * The round end of the boiler, riveted iron in a green, lined cladding ring,
- * stands out of a painted cab front over worn floorboards. On it:
+ * The machine's vitals are part of the scene rather than read off gauges:
  *
- *   BOILER PRESSURE   CPU load, from /proc/stat deltas
- *   STEAM CHEST       the CPU package temperature, with a red line
- *   RESERVOIR         memory in use, in GB (with no battery: the fan speed,
- *                     or else the load average, as DRAUGHT)
- *   two water gauge glasses, Klinger-striped, whose level is the battery
- *   charge (with no battery: free memory); the water bobs, and a green
- *   jewel by the right-hand glass is lit while on mains
- *   the firehole: butterfly doors left just ajar, the fire glowing through
- *   the gap and the air holes and spilling onto the floor, brighter and
- *   livelier the harder the CPU works
- *   a builder's plate, raised brass on red, "<HOST> WORKS", with UPTIME and
- *   AWAY (how long the screen has been locked) on rolling drums
+ *   the CPU load      is how hard she's worked: the speed, the exhaust beat,
+ *                     the valve gear's cut-off, the smoke
+ *   the CPU heat      is the fire: the glow under the engine and from the cab,
+ *                     the plume's lit underside, the sparks
+ *   memory in use     is the train's length (carriages are added or taken off
+ *                     out of shot)
+ *   the host's name   is the engine's name, on the brass plates over her
+ *                     driving wheels and the headboard; and the stations'
+ *   the time          is the station clocks', and a small caption with the
+ *                     time away from the machine (the screen locked)
  *
- * Round it, on the cab front: a railway clock in a mahogany surround, a
- * Watt governor on the steam pipe whose flyballs spin faster and fly
- * higher with the load, a safety valve that now and then lifts with a gust
- * of steam (more often near the red line), a paraffin lamp, copper and
- * iron pipework with flanges, lagging and handwheels, wisps of steam
- * leaking from tired joints, and condensation dripping from the pipes.
+ * The world: the line wanders and climbs through farmland and hills; every
+ * few kilometres come a station with its lamps, a level crossing with a car
+ * waiting, a viaduct over a misty valley, a tunnel; signals clear ahead of
+ * the train and go back to danger behind it; telegraph wires dip between
+ * their poles. The moon has its real phase for the date and roughly its real
+ * bearing (lifted to be seen); the seed picks the weather.
  *
- * Everything is drawn with signed distance functions. The parts that never
- * move are drawn once into a texture; each frame adds the needles, drums,
- * water, fire, flyballs, flame, drips and steam over it, the fire and steam
- * only inside their own bounds, so a frame costs little.
+ * The camera: long, slow takes with dips to black between them, chosen by
+ * what's coming up: alongside the driving wheels with the rods whirling, low
+ * at the lineside as she bears down and roars past, a crane shot as she
+ * crosses the viaduct, out of the cab along the boiler, on a platform as she
+ * runs through, from behind as she dives into a tunnel, high and wide.
  *
- * Same plumbing as gauges: Xlib + GLX for --window / --root, a native
- * wlr-layer-shell surface over EGL for --layer (swaylock-plugin), and
- * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen.
- * --bench N times N frames offscreen at --size.
+ * Drawn with procedural meshes (built at start), terrain tiles streamed
+ * round the camera, moon shadows, smoke and steam as lit particles, bloom
+ * and a filmic grade.
+ *
+ * Spanning: run one instance per monitor with the same --seed and --epoch,
+ * --layout (every output's logical rect) and --output = this one's index.
+ * Every instance runs the same simulation off the shared epoch (reading
+ * the sensors on the same wall-clock seconds) and films it through one
+ * virtual camera centred on the middle monitor; each draws just its own
+ * slice of that camera's view, so the wall is one picture.
+ *
+ * Same plumbing as the other savers: Xlib + GLX for --window / --root, a
+ * native wlr-layer-shell surface over EGL for --layer (swaylock-plugin),
+ * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame
+ * offscreen, --bench N to time N frames.
  *
  * Keys (window mode): q / Escape quit.
  */
@@ -66,48 +74,39 @@
 #include <unistd.h>
 #include "proto-layer-shell.h"
 
-#define PI 3.14159265f
-#define DEG (PI / 180.0f)
-
-static int W = 1280, H = 800;
+static int W = 1280, H = 720;
 static int opt_root, opt_layer, opt_bench;
 static float opt_fps = 60;
 static const char *opt_font = "C059", *opt_sans = "Gillius ADF";
 static uint32_t opt_seed;
 static const char *opt_shot;
-static double opt_at = 25;             /* --shot: the frame this many seconds in */
+static double opt_at = 40;             /* --shot: the frame this many seconds in */
 static int off_w = 1920, off_h = 1080;
-static double opt_epoch;               /* CLOCK_REALTIME seconds the engine was lit at (spanning) */
+static double opt_epoch;               /* CLOCK_REALTIME seconds the run started at (spanning) */
+static float opt_scale;                /* the scene's render scale; 0: by the output's size */
+static int opt_view = -1;              /* --view N: hold one kind of shot (for testing) */
+static int opt_weather = -1;           /* --weather N: 0 clear, 1 rain, 2 snow, 3 mist */
+static int opt_caption = 1;
 
-/* ---- spanning: one instance per output, each with a role ---- */
+/* ---- spanning: one instance per output, one camera ---- */
 #define MAX_OUT 8
 static float span[MAX_OUT][4];         /* x, y, w, h of each output (logical) */
 static int span_n, span_me = -1;
-enum { R_FRONT, R_FIREMAN, R_DRIVER };
-static int role = R_FRONT;
 
 static void die(const char *what) { fprintf(stderr, "steam: %s\n", what); exit(1); }
-
 static double now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
-
 static double wall(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
-
-static uint32_t rng;
-static float frand(void) {
-    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-    return (rng >> 8) * (1.0f / 16777216.0f);
-}
-
 static float clampf(float x, float a, float b) { return x < a ? a : x > b ? b : x; }
-
+static float mixf(float a, float b, float t) { return a + (b - a) * t; }
+static float sstepf(float a, float b, float x) { float t = clampf((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); }
 static void slurp_line(const char *path, char *buf, size_t n) {
     buf[0] = 0;
     FILE *f = fopen(path, "r");
@@ -115,7 +114,6 @@ static void slurp_line(const char *path, char *buf, size_t n) {
     if (fgets(buf, (int)n, f)) buf[strcspn(buf, "\n")] = 0;
     fclose(f);
 }
-
 static long read_long(const char *path, long dflt) {
     char b[64];
     slurp_line(path, b, sizeof b);
@@ -124,2647 +122,939 @@ static long read_long(const char *path, long dflt) {
     return e == b ? dflt : v;
 }
 
-/* ---- sensors ---- */
-static char host[64];
-static time_t locked_at;
-static char temp_path[300], batt_dir[256], fan_path[300];
-enum { AUX_BATT, AUX_FAN, AUX_LOADAVG };
-static int aux_kind;
-static int ncpu = 1;
+#include "gfx.h"
+#include "sensors.h"
+#include "world.h"
+#include "shaders.h"
+#include "loco.h"
 
-/* when the screen was locked: swaylock's start time if it's running (so a
- * restart of the saver, e.g. a skip, doesn't reset it), else 0 */
-static time_t lock_start(void) {
-    time_t best = 0, btime = 0;
-    char line[256];
-    FILE *f = fopen("/proc/stat", "r");
-    if (f) {
-        while (fgets(line, sizeof line, f))
-            if (sscanf(line, "btime %ld", &btime) == 1) break;
-        fclose(f);
-    }
-    long hz = sysconf(_SC_CLK_TCK);
-    DIR *d = btime && hz > 0 ? opendir("/proc") : NULL;
-    for (struct dirent *e; d && (e = readdir(d));) {
-        if (!isdigit((unsigned char)e->d_name[0])) continue;
-        char path[300], comm[64];
-        snprintf(path, sizeof path, "/proc/%s/comm", e->d_name);
-        slurp_line(path, comm, sizeof comm);
-        if (strncmp(comm, "swaylock", 8)) continue;
-        snprintf(path, sizeof path, "/proc/%s/stat", e->d_name);
-        char st[1024];
-        slurp_line(path, st, sizeof st);
-        char *p = strrchr(st, ')');
-        unsigned long long start = 0;
-        /* fields after the command: state is #3, starttime #22 */
-        if (p && sscanf(p + 2, "%*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %llu", &start) == 1) {
-            time_t t = btime + (time_t)(start / (unsigned long long)hz);
-            if (!best || t < best) best = t;
-        }
-    }
-    if (d) closedir(d);
-    return best;
-}
+static void smoke_step(double dt);
+static void smoke_draw(void);
+static void smoke_init(void);
+static void smoke_targets(int sw, int sh);
+static void smoke_targets_free(void);
+static void add_light(const double *wp, float rad, float r, float g, float b);
+static void set_common(GLuint p);
 
-/* the CPU package temperature: the best-looking sensor on offer */
-static void find_temp(void) {
-    int best = 0;
-    glob_t g;
-    if (glob("/sys/class/hwmon/hwmon*/temp*_input", 0, NULL, &g) == 0) {
-        for (size_t i = 0; i < g.gl_pathc; i++) {
-            const char *in = g.gl_pathv[i];
-            char dir[256], name[64], lpath[300], label[64];
-            snprintf(dir, sizeof dir, "%.*s", (int)(strrchr(in, '/') - in), in);
-            snprintf(lpath, sizeof lpath, "%s/name", dir);
-            slurp_line(lpath, name, sizeof name);
-            snprintf(lpath, sizeof lpath, "%.*s_label", (int)(strlen(in) - 6), in);
-            slurp_line(lpath, label, sizeof label);
-            int s = 0;
-            if (!strcmp(name, "coretemp") && !strncmp(label, "Package", 7)) s = 100;
-            else if (!strcmp(name, "k10temp") && !strcmp(label, "Tdie")) s = 96;
-            else if (!strcmp(name, "k10temp") && !strcmp(label, "Tctl")) s = 95;
-            else if (!strcmp(name, "zenpower") && !strcmp(label, "Tdie")) s = 94;
-            else if (!strcmp(name, "cpu_thermal") || !strcmp(name, "cpu-thermal")) s = 80;
-            else if (strstr(label, "CPU") || strstr(label, "Package")) s = 60;
-            else if (!strcmp(name, "coretemp") || !strcmp(name, "k10temp")) s = 50;
-            else if (!strcmp(name, "acpitz")) s = 20;
-            if (s > best) { best = s; snprintf(temp_path, sizeof temp_path, "%s", in); }
-        }
-        globfree(&g);
-    }
-    if (glob("/sys/class/thermal/thermal_zone*/type", 0, NULL, &g) == 0) {
-        for (size_t i = 0; i < g.gl_pathc; i++) {
-            char type[64];
-            slurp_line(g.gl_pathv[i], type, sizeof type);
-            for (char *c = type; *c; c++) *c = (char)tolower((unsigned char)*c);
-            int s = 0;
-            if (!strcmp(type, "x86_pkg_temp")) s = 90;
-            else if (!strcmp(type, "tcpu")) s = 75;
-            else if (strstr(type, "cpu")) s = 70;
-            else if (strstr(type, "soc")) s = 40;
-            else if (!strcmp(type, "acpitz")) s = 15;
-            if (s > best) {
-                best = s;
-                const char *p = g.gl_pathv[i];
-                snprintf(temp_path, sizeof temp_path, "%.*s/temp", (int)(strrchr(p, '/') - p), p);
-            }
-        }
-        globfree(&g);
-    }
-}
-
-static void find_aux(void) {
-    glob_t g;
-    if (glob("/sys/class/power_supply/BAT*/capacity", 0, NULL, &g) == 0 && g.gl_pathc) {
-        const char *p = g.gl_pathv[0];
-        snprintf(batt_dir, sizeof batt_dir, "%.*s", (int)(strrchr(p, '/') - p), p);
-        aux_kind = AUX_BATT;
-        globfree(&g);
-        return;
-    }
-    if (glob("/sys/class/hwmon/hwmon*/fan*_input", 0, NULL, &g) == 0 && g.gl_pathc) {
-        snprintf(fan_path, sizeof fan_path, "%s", g.gl_pathv[0]);
-        aux_kind = AUX_FAN;
-        globfree(&g);
-        return;
-    }
-    aux_kind = AUX_LOADAVG;
-}
-
-static int on_mains(void) {
-    glob_t g;
-    int on = 0;
-    if (glob("/sys/class/power_supply/*/type", 0, NULL, &g) == 0) {
-        for (size_t i = 0; i < g.gl_pathc; i++) {
-            char t[32], path[300];
-            slurp_line(g.gl_pathv[i], t, sizeof t);
-            if (strcmp(t, "Mains")) continue;
-            snprintf(path, sizeof path, "%.*s/online", (int)(strrchr(g.gl_pathv[i], '/') - g.gl_pathv[i]), g.gl_pathv[i]);
-            if (read_long(path, 0) == 1) on = 1;
-        }
-        globfree(&g);
-    }
-    return on;
-}
-
-/* latest readings */
+/* ---- the train ---- */
+#define MAXCOACH 9
 static struct {
-    float temp;                        /* degrees C */
-    float load;                        /* 0..1 */
-    float mem_gb, mem_total_gb;
-    float aux;                         /* battery % / fan rpm / load average */
-    int charging, mains;
-    double uptime, uptime_at;          /* /proc/uptime, and now() when read */
-    unsigned long long cpu_busy, cpu_total;
-} sens;
+    double z;                  /* world z of the engine's origin */
+    double v, vt;              /* speed and where it's heading, m/s */
+    double wa[4];              /* wheel angles: drivers, bogie, trailing, tender/carriage */
+    double beats;              /* exhausts so far (4 per turn of the drivers) */
+    float fire;                /* the fire's brightness, 0..1 */
+    float cutoff;              /* the valve gear's setting, 0.15 .. 0.75 */
+    int ncoach, ncoach_want;
+    float lit;                 /* fraction of the compartments lit */
+    float load_s, temp_s;
+} tr;
 
-static void read_cpu(unsigned long long *busy, unsigned long long *total) {
-    char line[256];
-    slurp_line("/proc/stat", line, sizeof line);
-    unsigned long long v[8] = {0};
-    sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu %llu", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
-    *total = 0;
-    for (int i = 0; i < 8; i++) *total += v[i];
-    *busy = *total - v[3] - v[4];
+/* where everything is: a vehicle on the line, centred at zc, its bogie
+ * pivots a ahead and b behind */
+typedef struct { double o[3]; V3 X, Y, Z; } Frame;
+static Frame vframe(double zc, double a, double b) {
+    Frame f;
+    double zf = zc + a, zr = zc - b;
+    double pf[3] = {track_x(zf), track_y(zf), zf}, pr[3] = {track_x(zr), track_y(zr), zr};
+    V3 Z = vnorm(v3((float)(pf[0] - pr[0]), (float)(pf[1] - pr[1]), (float)(pf[2] - pr[2])));
+    f.o[0] = (pf[0] * b + pr[0] * a) / (a + b);
+    f.o[1] = (pf[1] * b + pr[1] * a) / (a + b);
+    f.o[2] = zc;
+    /* canted into the curves */
+    float roll = clampf((float)(track_ddx(zc) * 90), -0.1f, 0.1f);
+    V3 X = vnorm(vcross(v3(0, 1, 0), Z));
+    V3 Y = vcross(Z, X);
+    V3 X2 = vadd(vmul(X, cosf(roll)), vmul(Y, sinf(roll)));
+    f.X = X2; f.Y = vcross(Z, X2); f.Z = Z;
+    return f;
+}
+/* the train's vehicles: 0 the engine, 1 the tender, 2.. the carriages */
+#define TENDER_DZ 10.05
+static double veh_z(int i) {
+    if (i == 0) return tr.z;
+    if (i == 1) return tr.z - TENDER_DZ;
+    return tr.z - TENDER_DZ - 3.9 - 0.45 - COACH_L / 2 - (i - 2) * (COACH_L + 0.9);
+}
+static Frame veh_frame(int i) {
+    double z = veh_z(i);
+    if (i == 0) return vframe(z, 5.6, 2.2);
+    if (i == 1) return vframe(z, 2.1, 2.1);
+    return vframe(z, COACH_L / 2 - 3, COACH_L / 2 - 3);
+}
+static double train_tail_z(void) { return veh_z(1 + tr.ncoach) - COACH_L / 2; }
+
+/* ---- the camera ---- */
+static struct {
+    double p[3];
+    V3 R, U, F;                /* right, up, forward */
+    float hfov;                /* across a 16:9 frame, degrees */
+    float focus, fstop;        /* depth of field: focus distance (m), blur scale */
+} cam;
+static void cam_look(const double *p, const double *at, float roll) {
+    for (int k = 0; k < 3; k++) cam.p[k] = p[k];
+    V3 F = vnorm(v3((float)(at[0] - p[0]), (float)(at[1] - p[1]), (float)(at[2] - p[2])));
+    V3 R = vnorm(vcross(F, v3(0, 1, 0)));
+    V3 U = vcross(R, F);
+    cam.R = vnorm(vadd(vmul(R, cosf(roll)), vmul(U, sinf(roll))));
+    cam.U = vcross(cam.R, F);
+    cam.F = F;
+    cam.focus = (float)sqrt((at[0] - p[0]) * (at[0] - p[0]) + (at[1] - p[1]) * (at[1] - p[1]) + (at[2] - p[2]) * (at[2] - p[2]));
+}
+/* a point in a vehicle's frame, in the world */
+static void fpt(const Frame *f, float x, float y, float z, double *out) {
+    out[0] = f->o[0] + f->X.x * x + f->Y.x * y + f->Z.x * z;
+    out[1] = f->o[1] + f->X.y * x + f->Y.y * y + f->Z.y * z;
+    out[2] = f->o[2] + f->X.z * x + f->Y.z * y + f->Z.z * z;
 }
 
-static void read_sensors(void) {
-    if (temp_path[0]) sens.temp = read_long(temp_path, 0) / 1000.0f;
+/* ---- the sky ---- */
+static struct {
+    V3 moon, moon_up;          /* toward the moon; toward the sun across its face */
+    float phase;               /* the moon's elongation from the sun, radians: 0 new, pi full */
+    float lit;                 /* its illuminated fraction */
+    int weather;               /* 0 clear, 1 rain, 2 snow, 3 mist */
+    float cloud, towns[3];
+} sky;
 
-    unsigned long long b, t;
-    read_cpu(&b, &t);
-    if (sens.cpu_total && t > sens.cpu_total)
-        sens.load = (float)(b - sens.cpu_busy) / (float)(t - sens.cpu_total);
-    sens.cpu_busy = b; sens.cpu_total = t;
+static double t_now;
+static double sim_t;
+static float flick;            /* the fire's flicker, this frame */
+#include "lineside.h"
+#include "director.h"
+#include "platform.h"
 
-    FILE *f = fopen("/proc/meminfo", "r");
-    if (f) {
-        char line[128];
-        long total = 0, avail = 0;
-        while (fgets(line, sizeof line, f)) {
-            sscanf(line, "MemTotal: %ld", &total);
-            sscanf(line, "MemAvailable: %ld", &avail);
-        }
-        fclose(f);
-        sens.mem_total_gb = total / 1048576.0f;
-        sens.mem_gb = (total - avail) / 1048576.0f;
-    }
-
-    char buf[64], path[300];
-    if (aux_kind == AUX_BATT) {
-        snprintf(path, sizeof path, "%s/capacity", batt_dir);
-        sens.aux = (float)read_long(path, 0);
-        snprintf(path, sizeof path, "%s/status", batt_dir);
-        slurp_line(path, buf, sizeof buf);
-        sens.charging = !strcmp(buf, "Charging");
-        sens.mains = on_mains() || sens.charging;
-    } else if (aux_kind == AUX_FAN) {
-        sens.aux = (float)read_long(fan_path, 0);
-    } else {
-        slurp_line("/proc/loadavg", buf, sizeof buf);
-        sens.aux = strtof(buf, NULL);
-    }
-
-    slurp_line("/proc/uptime", buf, sizeof buf);
-    sens.uptime = strtod(buf, NULL);
-    sens.uptime_at = now();
-}
-
-
-/* ---- the instruments ---- */
-enum { G_TEMP, G_LOAD, G_MEM, G_CLOCK, NG };
-enum { K_DIAL, K_CLOCK };
-
-typedef struct {
-    int kind;
-    float cx, cy, r;                   /* px: centre, face radius */
-    float a0, a1;                      /* the sweep: radians clockwise from 12 o'clock */
-    float vmin, vmax;
-    int nmaj, nmin, numevery;          /* major intervals, minor per major, a numeral every n majors */
-    float red0, red1, amb0, amb1;      /* painted zones, as fractions of the scale (< 0: none) */
-    char label[24], unit[24];
-    float omega, zeta;                 /* needle spring */
-    float x, v, target;                /* needle state, fraction of the scale */
-    float ph[3];                       /* tremble phases */
-} Gauge;
-static Gauge G[NG];
-
-/* a "nice" full-scale and major step for 0..v */
-static void nice_scale(float v, float *top, int *nmaj) {
-    static const float steps[] = {0.5f, 1, 2, 2.5f, 4, 5, 10, 20, 25, 50, 100};
-    for (size_t i = 0; i < sizeof steps / sizeof *steps; i++) {
-        int n = (int)ceilf(v / steps[i] - 1e-3f);
-        if (n <= 8) { *top = n * steps[i]; *nmaj = n < 4 ? 4 : n; if (n < 4) *top = 4 * steps[i]; return; }
-    }
-    *top = v; *nmaj = 5;
-}
-
-static void gauges_init(void) {
-    Gauge *g;
-    for (int i = 0; i < NG; i++) {
-        G[i].a0 = -135 * DEG; G[i].a1 = 135 * DEG;
-        G[i].red0 = G[i].red1 = G[i].amb0 = G[i].amb1 = -1;
-        G[i].numevery = 1; G[i].nmin = 5;
-        G[i].omega = 2 * PI * 0.8f; G[i].zeta = 0.42f;
-        G[i].x = -0.03f;                   /* resting on the stop pin */
-        for (int k = 0; k < 3; k++) G[i].ph[k] = frand() * 2 * PI;
-    }
-    g = &G[G_TEMP];
-    g->vmin = 20; g->vmax = 100; g->nmaj = 8; g->nmin = 5; g->numevery = 2;
-    g->red0 = (85 - 20) / 80.0f; g->red1 = 1;
-    g->omega = 2 * PI * 0.45f; g->zeta = 0.5f;
-    snprintf(g->label, sizeof g->label, "STEAM CHEST");
-    snprintf(g->unit, sizeof g->unit, "CPU \x7f" "C");
-
-    g = &G[G_LOAD];
-    g->vmin = 0; g->vmax = 100; g->nmaj = 10; g->nmin = 2; g->numevery = 2;
-    g->red0 = 0.9f; g->red1 = 1;
-    g->omega = 2 * PI * 0.9f; g->zeta = 0.34f;
-    snprintf(g->label, sizeof g->label, "BOILER PRESSURE");
-    snprintf(g->unit, sizeof g->unit, "CPU LOAD %%");
-
-    g = &G[G_MEM];
-    g->vmin = 0; g->omega = 2 * PI * 0.6f; g->zeta = 0.45f;
-    if (aux_kind == AUX_BATT) {
-        nice_scale(sens.mem_total_gb, &g->vmax, &g->nmaj);
-        g->nmin = 4; g->numevery = g->nmaj > 6 ? 2 : 1;
-        g->amb0 = sens.mem_total_gb * 0.9f / g->vmax; g->amb1 = sens.mem_total_gb / g->vmax;
-        snprintf(g->label, sizeof g->label, "RESERVOIR");
-        snprintf(g->unit, sizeof g->unit, "MEMORY GB");
-    } else if (aux_kind == AUX_FAN) {
-        nice_scale(fmaxf(6000, sens.aux * 1.3f) / 1000, &g->vmax, &g->nmaj);
-        g->nmin = 5;
-        snprintf(g->label, sizeof g->label, "BLOWER");
-        snprintf(g->unit, sizeof g->unit, "FAN RPM x1000");
-    } else {
-        nice_scale((float)ncpu, &g->vmax, &g->nmaj);
-        g->nmin = 5;
-        g->red0 = ncpu / g->vmax; g->red1 = 1;
-        snprintf(g->label, sizeof g->label, "DRAUGHT");
-        snprintf(g->unit, sizeof g->unit, "LOAD AVERAGE");
-    }
-
-    g = &G[G_CLOCK];
-    g->kind = K_CLOCK;
-    g->a0 = 0; g->a1 = 2 * PI; g->nmaj = 12; g->nmin = 5;
-    g->omega = 2 * PI * 7.0f; g->zeta = 0.3f;    /* the seconds hand: a quick tick with a bounce */
-}
-
-/* the water in the gauge glasses: the battery, or else free memory */
-static struct { float x, v, target; } wat = {0.0f, 0, 0};
-
-/* the needles' targets from the latest readings */
-static void set_targets(void) {
-    Gauge *g = &G[G_TEMP];
-    g->target = (sens.temp - g->vmin) / (g->vmax - g->vmin);
-    G[G_LOAD].target = sens.load;
-    g = &G[G_MEM];
-    if (aux_kind == AUX_BATT) {
-        g->target = sens.mem_gb / g->vmax;
-        wat.target = sens.aux / 100.0f;
-    } else {
-        if (aux_kind == AUX_FAN) g->target = sens.aux / 1000.0f / g->vmax;
-        else g->target = sens.aux / g->vmax;
-        wat.target = sens.mem_total_gb > 0 ? 1 - sens.mem_gb / sens.mem_total_gb : 0.5f;
-    }
-    for (int i = 0; i < G_CLOCK; i++) G[i].target = clampf(G[i].target, -0.03f, 1.03f);
-    wat.target = clampf(wat.target, 0, 1);
-}
-
-/* ---- the engine's moving parts ---- */
-static float sec_angle, sec_vel;       /* the clock's seconds hand, degrees */
-static float load_s;                   /* the load, smoothed */
-static float gov_w = 0.3f, gov_th = 0.65f, gov_thv, gov_ph;   /* governor: rev/s, ball swing (rad), phase */
-static float fire_s = 0.5f;            /* how hard the fire is drawing */
-#define NPUFF 3
-static struct { float t0, dur, amp, seed; } puff[NPUFF];   /* safety-valve lifts */
-static int puff_n;
-static float sv_next;                  /* the valve stays seated until at least then */
-static uint32_t erng;                  /* the events' own random stream */
-static float efrand(void) {
-    erng ^= erng << 13; erng ^= erng >> 17; erng ^= erng << 5;
-    return (erng >> 8) * (1.0f / 16777216.0f);
-}
-
-/* one step: needle springs (the stop pins bounce them), the water, the
- * governor, the fire, and now and then a lift of the safety valve.
- * t: wall-clock time (for the clock); st: seconds since start */
-static void physics(double t, double st, float dt, int powered) {
-    for (int i = 0; i < G_CLOCK; i++) {
-        Gauge *g = &G[i];
-        float tgt = powered ? g->target : -0.03f;
-        float a = g->omega * g->omega * (tgt - g->x) - 2 * g->zeta * g->omega * g->v;
-        g->v += a * dt;
-        g->x += g->v * dt;
-        if (g->x < -0.035f) { g->x = -0.035f; g->v = -0.3f * g->v; }
-        if (g->x > 1.035f) { g->x = 1.035f; g->v = -0.3f * g->v; }
-    }
-    /* the seconds hand jumps to each new second and rings a little */
-    struct tm tm;
-    time_t ts = (time_t)t;
-    localtime_r(&ts, &tm);
-    float tgt = tm.tm_sec * 6.0f;
-    float d = fmodf(tgt - sec_angle + 540.0f, 360.0f) - 180.0f;
-    Gauge *c = &G[G_CLOCK];
-    float a = c->omega * c->omega * d - 2 * c->zeta * c->omega * sec_vel;
-    sec_vel += a * dt;
-    sec_angle = fmodf(sec_angle + sec_vel * dt + 360.0f, 360.0f);
-
-    /* the water: a slow, lightly damped slosh toward the level */
-    {
-        float w = 2 * PI * 0.32f, z = 0.18f;
-        float wa = w * w * ((powered ? wat.target : 0.0f) - wat.x) - 2 * z * w * wat.v;
-        wat.v += wa * dt;
-        wat.x += wat.v * dt;
-    }
-
-    load_s += (sens.load - load_s) * dt / 2.5f;
-    float ls = clampf(load_s, 0, 1);
-    /* the governor: speed follows the load, the balls swing out with it on a pendulum */
-    gov_w += (0.28f + 1.25f * ls - gov_w) * dt / 3.0f;
-    float th_t = 0.62f + 0.45f * clampf((gov_w - 0.28f) / 1.25f, 0, 1);
-    float gw = 2 * PI * 0.55f;
-    gov_thv += (gw * gw * (th_t - gov_th) - 2 * 0.22f * gw * gov_thv) * dt;
-    gov_th += gov_thv * dt;
-    gov_ph = fmodf(gov_ph + 2 * PI * gov_w * dt, 2 * PI * 64);
-    fire_s += (0.5f + 0.5f * ls - fire_s) * dt / 2.0f;
-
-    /* the safety valve: lifts at random, far more readily near the red line */
-    float pr = G[G_LOAD].x;
-    if (st >= sv_next) {
-        float rate = 1.0f / 40 + 0.6f * clampf((pr - 0.75f) / 0.2f, 0, 1);
-        if (efrand() < rate * dt) {
-            int k = puff_n++ % NPUFF;
-            puff[k].t0 = (float)st;
-            puff[k].dur = 1.4f + 2.4f * efrand();
-            puff[k].amp = 0.75f + 0.25f * efrand();
-            puff[k].seed = efrand() * 50;
-            sv_next = (float)st + puff[k].dur + (pr > 0.8f ? 2.0f : 7.0f) + 8 * efrand();
-        }
-    }
-}
-
-/* the needle's angle as drawn, with a faint tremble */
-static float needle_angle(const Gauge *g, double t) {
-    float j = 0.0012f * (sinf((float)t * 7.1f + g->ph[0]) * 0.5f + sinf((float)t * 11.3f + g->ph[1]) * 0.3f +
-                         sinf((float)t * 17.9f + g->ph[2]) * 0.2f);
-    float x = clampf(g->x + j, -0.035f, 1.035f);
-    return g->a0 + (g->a1 - g->a0) * x;
-}
-
-/* ---- glyph atlas: printable ASCII (+ the degree sign as 0x7f) in each
- * text style used, rasterised at its exact pixel size ---- */
-typedef struct { short x, y, w, h, left, top, adv; } Glyph;
-typedef struct { int face, px; Glyph g[96]; } Style;
-#define MAXSTYLE 32
-static Style styles[MAXSTYLE];
-static int nstyles;
+/* ---- lettering: the signs' and plates' texture, and the caption ---- */
 static FT_Library ft;
-enum { F_SERIF, F_SERIF_B, F_SANS, F_SANS_B };
-static FT_Face faces[4];
-#define AW 2048
-static unsigned char *atlas;
-static int atlas_h;
-
-static void fonts_init(void) {
-    if (!FcInit()) die("fontconfig init failed");
-    if (FT_Init_FreeType(&ft)) die("freetype init failed");
-    for (int i = 0; i < 4; i++) {
-        char pat_s[256];
-        snprintf(pat_s, sizeof pat_s, "%s:weight=%s:fontformat=CFF,TrueType", i < 2 ? opt_font : opt_sans,
-                 i & 1 ? "bold" : "regular");
-        FcPattern *pat = FcNameParse((const FcChar8 *)pat_s);
-        FcConfigSubstitute(NULL, pat, FcMatchPattern);
-        FcDefaultSubstitute(pat);
-        FcResult res;
-        FcPattern *m = FcFontMatch(NULL, pat, &res);
-        FcChar8 *file = NULL;
-        if (!m || FcPatternGetString(m, FC_FILE, 0, &file) != FcResultMatch) die("no font matched");
-        if (FT_New_Face(ft, (const char *)file, 0, &faces[i])) die("can't load the font");
-        FcPatternDestroy(m);
-        FcPatternDestroy(pat);
-    }
+static FT_Face face_serif, face_sans, face_sans_b;
+static FT_Face load_face(const char *fam, const char *style) {
+    char pat_s[256];
+    snprintf(pat_s, sizeof pat_s, "%s:%s:fontformat=CFF,TrueType", fam, style);
+    FcPattern *pat = FcNameParse((const FcChar8 *)pat_s);
+    FcConfigSubstitute(NULL, pat, FcMatchPattern);
+    FcDefaultSubstitute(pat);
+    FcResult res;
+    FcPattern *m = FcFontMatch(NULL, pat, &res);
+    FcChar8 *file = NULL;
+    if (!m || FcPatternGetString(m, FC_FILE, 0, &file) != FcResultMatch) die("no font matched");
+    FT_Face f;
+    if (FT_New_Face(ft, (const char *)file, 0, &f)) die("can't load the font");
+    FcPatternDestroy(m);
+    FcPatternDestroy(pat);
+    return f;
 }
-
-static int style(int face, float px) {
-    int p = (int)lroundf(px);
-    if (p < 6) p = 6;
-    for (int i = 0; i < nstyles; i++)
-        if (styles[i].face == face && styles[i].px == p) return i;
-    if (nstyles == MAXSTYLE) die("too many text styles");
-    styles[nstyles].face = face;
-    styles[nstyles].px = p;
-    return nstyles++;
-}
-
-static void build_atlas(void) {
-    free(atlas);
-    int cap = 4096;
-    atlas = calloc((size_t)AW * cap, 1);
-    int x = 1, y = 1, shelf = 0;
-    for (int s = 0; s < nstyles; s++) {
-        FT_Face f = faces[styles[s].face];
-        FT_Set_Pixel_Sizes(f, 0, (FT_UInt)styles[s].px);
-        for (int c = 0; c < 96; c++) {
-            Glyph *gl = &styles[s].g[c];
-            memset(gl, 0, sizeof *gl);
-            FT_ULong code = c == 95 ? 0xB0 : (FT_ULong)(32 + c);
-            if (FT_Load_Char(f, code, FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT)) continue;
-            FT_GlyphSlot g = f->glyph;
-            int w = (int)g->bitmap.width, h = (int)g->bitmap.rows;
-            if (x + w + 2 > AW) { x = 1; y += shelf + 2; shelf = 0; }
-            if (y + h + 2 > cap) die("glyph atlas full");
-            for (int yy = 0; yy < h; yy++)
-                memcpy(atlas + (size_t)(y + yy) * AW + x, g->bitmap.buffer + yy * g->bitmap.pitch, (size_t)w);
-            *gl = (Glyph){(short)x, (short)y, (short)w, (short)h, (short)g->bitmap_left, (short)g->bitmap_top,
-                          (short)(g->advance.x >> 6)};
-            x += w + 2;
-            if (h > shelf) shelf = h;
-        }
-    }
-    atlas_h = y + shelf + 2;
-}
-
-static const Glyph *glyph(int s, unsigned char c) {
-    int i = c == 0x7f ? 95 : c >= 32 && c < 127 ? c - 32 : 0;
-    return &styles[s].g[i];
-}
-
-static float text_width(int s, const char *str, float track) {
+static float text_w(FT_Face f, int px, const char *s, float track) {
+    FT_Set_Pixel_Sizes(f, 0, (FT_UInt)px);
     float w = 0;
-    for (const char *p = str; *p; p++) w += glyph(s, (unsigned char)*p)->adv + (p[1] ? track : 0);
+    for (const char *p = s; *p; p++)
+        if (!FT_Load_Char(f, (unsigned char)*p, FT_LOAD_DEFAULT)) w += (f->glyph->advance.x >> 6) + (p[1] ? track * px : 0);
     return w;
 }
-
-/* the width of str in a face at px, before the atlas is built; track in ems */
-static float measure(int face, float px, const char *str, float track) {
-    FT_Set_Pixel_Sizes(faces[face], 0, (FT_UInt)lroundf(px));
-    float w = 0;
-    for (const char *p = str; *p; p++)
-        if (!FT_Load_Char(faces[face], (unsigned char)*p, FT_LOAD_DEFAULT))
-            w += (faces[face]->glyph->advance.x >> 6) + (p[1] ? track * lroundf(px) : 0);
-    return w;
-}
-
-/* cap height: how far 'H' stands above the baseline */
-static float cap_h(int s) { return glyph(s, 'H')->top; }
-
-/* text quads: x, y, u, v, r, g, b, a per vertex */
-static float *tv;
-static int tvn, tvcap;
-
-static void quad_v(float x, float y, float u, float v, const float *c) {
-    if (tvn + 8 > tvcap) tv = realloc(tv, (size_t)(tvcap = tvcap ? tvcap * 2 : 8192) * sizeof *tv);
-    float *o = tv + tvn;
-    o[0] = x; o[1] = y; o[2] = u; o[3] = v; o[4] = c[0]; o[5] = c[1]; o[6] = c[2]; o[7] = c[3];
-    tvn += 8;
-}
-
-/* set str with its baseline at y; align -1 left, 0 centred, 1 right of x;
- * coloured ct at the cap height shading to cb at the baseline */
-static void text2(int s, float x, float y, int align, const char *str, const float *ct, const float *cb, float track) {
-    float w = text_width(s, str, track);
-    float pen = x - (align == 0 ? w * 0.5f : align > 0 ? w : 0);
-    pen = roundf(pen);
-    y = roundf(y);
-    float ch = cap_h(s);
-    for (const char *p = str; *p; p++) {
-        const Glyph *g = glyph(s, (unsigned char)*p);
-        if (g->w) {
-            float x0 = pen + g->left, y0 = y - g->top, x1 = x0 + g->w, y1 = y0 + g->h;
-            float u0 = g->x, v0 = g->y, u1 = g->x + g->w, v1 = g->y + g->h;
-            float c0[4], c1[4];
-            for (int k = 0; k < 4; k++) {
-                float f0 = clampf((y0 - (y - ch)) / fmaxf(ch, 1), -0.3f, 1.3f), f1 = clampf((y1 - (y - ch)) / fmaxf(ch, 1), -0.3f, 1.3f);
-                c0[k] = ct[k] + (cb[k] - ct[k]) * f0;
-                c1[k] = ct[k] + (cb[k] - ct[k]) * f1;
+/* draw s from x (left) at baseline y into an 8-bit buffer bw x bh */
+static void text_draw(unsigned char *buf, int bw, int bh, FT_Face f, int px, const char *s, float x, float base, float track) {
+    FT_Set_Pixel_Sizes(f, 0, (FT_UInt)px);
+    for (const char *p = s; *p; p++) {
+        if (FT_Load_Char(f, (unsigned char)*p, FT_LOAD_RENDER)) continue;
+        FT_GlyphSlot g = f->glyph;
+        int x0 = (int)lroundf(x) + g->bitmap_left, y0 = (int)lroundf(base) - g->bitmap_top;
+        for (unsigned j = 0; j < g->bitmap.rows; j++)
+            for (unsigned i = 0; i < g->bitmap.width; i++) {
+                int X = x0 + (int)i, Y = y0 + (int)j;
+                if (X < 0 || Y < 0 || X >= bw || Y >= bh) continue;
+                unsigned v = g->bitmap.buffer[j * g->bitmap.pitch + i];
+                unsigned char *d = buf + Y * bw + X;
+                if (v > *d) *d = (unsigned char)v;
             }
-            quad_v(x0, y0, u0, v0, c0); quad_v(x1, y0, u1, v0, c0); quad_v(x1, y1, u1, v1, c1);
-            quad_v(x0, y0, u0, v0, c0); quad_v(x1, y1, u1, v1, c1); quad_v(x0, y1, u0, v1, c1);
-        }
-        pen += g->adv + track;
+        x += (g->advance.x >> 6) + track * px;
     }
 }
-static void text(int s, float x, float y, int align, const char *str, const float *col, float track) {
-    text2(s, x, y, align, str, col, col, track);
+/* the sign texture: rows of lettering, each centred across the full width */
+#define SA_W 1024
+#define SA_RH 128
+#define SA_ROWS 8
+static unsigned char sign_px[SA_W * SA_RH * SA_ROWS];
+static GLuint tex_sign;
+static void sign_row(int row, FT_Face f, const char *s, float track, float fill) {
+    unsigned char *b = sign_px + row * SA_W * SA_RH;
+    memset(b, 0, SA_W * SA_RH);
+    int px = (int)(SA_RH * 0.62f);
+    while (px > 8 && text_w(f, px, s, track) > SA_W * fill) px--;
+    FT_Set_Pixel_Sizes(f, 0, (FT_UInt)px);
+    FT_Load_Char(f, 'H', FT_LOAD_DEFAULT);
+    float cap = (float)(f->glyph->metrics.horiBearingY >> 6);
+    text_draw(b, SA_W, SA_RH, f, px, s, SA_W / 2.0f - text_w(f, px, s, track) / 2, SA_RH / 2.0f + cap / 2, track);
 }
-
-/* centred on (x, y) by cap height */
-static void text_c(int s, float x, float y, const char *str, const float *col, float track) {
-    text(s, x, y + cap_h(s) * 0.5f, 0, str, col, track);
-}
-
-/* engraved into brass: a light lip under a dark fill */
-static void text_engraved(int s, float x, float y, int align, const char *str, float track) {
-    static const float hi[4] = {1.0f, 0.88f, 0.6f, 0.30f}, lo[4] = {0.07f, 0.05f, 0.03f, 0.88f};
-    float o = fmaxf(1, roundf(styles[s].px / 28.0f));
-    text(s, x, y + o, align, str, hi, track);
-    text(s, x, y, align, str, lo, track);
-}
-
-/* cast in relief: brass letters standing out of a painted ground, with a
- * shadow below right and the lit bevel above left */
-static void text_raised(int s, float x, float y, int align, const char *str, float track) {
-    static const float sh[4] = {0.03f, 0.01f, 0.005f, 0.75f}, hl[4] = {1.0f, 0.9f, 0.62f, 0.85f};
-    static const float ft[4] = {0.86f, 0.68f, 0.36f, 1.0f}, fb[4] = {0.50f, 0.34f, 0.14f, 1.0f};
-    float o = fmaxf(1, roundf(styles[s].px / 18.0f));
-    text(s, x + o, y + o * 1.3f, align, str, sh, track);
-    text(s, x - o * 0.5f, y - o * 0.6f, align, str, hl, track);
-    text2(s, x, y, align, str, ft, fb, track);
-}
-
-/* stencilled in cream paint, a bit worn */
-static void text_paint(int s, float x, float y, int align, const char *str, float track) {
-    static const float c[4] = {0.78f, 0.72f, 0.58f, 0.72f};
-    text(s, x, y, align, str, c, track);
-}
-
-/* ---- the scene ---- */
-#define MAXP 24
-#define MAXF 16
-#define MAXW 6
-#define NLEAK 3
-#define NDRIP 2
-enum { M_COPPER, M_IRON, M_BRASS };
-
-/* everything in px (y down) */
-static struct {
-    float s;                         /* px per design unit */
-    float bh[4];                     /* the backhead: centre x, y, radius, floor y */
-    float hor[4];                    /* the floor's horizon y, vanishing x, plank width per unit depth */
-    float lag[4];                    /* the lagged steam main: y, radius */
-    float pa[MAXP][4], pb[MAXP][4];  /* pipes: ends; radius, material */
-    int np;
-    float fl[MAXF][4];               /* flanges: x y angle pipe-radius */
-    int nf;
-    float wh[MAXW][4];               /* handwheels: x y radius */
-    int nw;
-    float wg[2][4];                  /* water gauge glasses: x, top, bottom, tube radius */
-    float fd[4];                     /* the firehole: centre, half width, half height */
-    float gov[4];                    /* governor: spindle x, pivot y, arm length, gear y */
-    float govb[4];                   /* valve body y, valve radius, gear radius, side of the steam inlet */
-    float sv[4];                     /* safety valve: x, seat y, size */
-    float lamp[4];                   /* the lamp: flame x, y, size, side its bracket goes to */
-    float ml[4];                     /* the mains jewel: x y r (r 0: none) */
-    float leak[NLEAK][4];            /* leaking joints: x y size direction */
-    float drip[NDRIP][4];            /* drip points: x y period phase */
-    float tag[2][4];                 /* brass tags under the glasses */
-    float pq[4], rule[4];            /* the builder's plate, its rule */
-} SC;
-
-#define NDRUM 17
-static float drum_rect[NDRUM][4];
-static float win_rect[2][4];
-static int drum_spec[NDRUM];           /* which digit of the time each drum shows, see digit_of() */
-static int drum_style;                 /* text style of the drum digits */
-
-enum { D_S1, D_S10, D_M1, D_M10, D_H1, D_H10, D_D1, D_D10, D_D100 };
-
-static int digit_of(long n, int spec) {
-    switch (spec) {
-    case D_S1: return (int)(n % 10);
-    case D_S10: return (int)(n / 10 % 6);
-    case D_M1: return (int)(n / 60 % 10);
-    case D_M10: return (int)(n / 600 % 6);
-    case D_H1: return (int)(n / 3600 % 24 % 10);
-    case D_H10: return (int)(n / 3600 % 24 / 10);
-    case D_D1: return (int)(n / 86400 % 10);
-    case D_D10: return (int)(n / 864000 % 10);
-    default: return (int)(n / 8640000 % 10);
-    }
-}
-static int radix_of(int spec) { return spec == D_S10 || spec == D_M10 ? 6 : spec == D_H10 ? 3 : 10; }
-
-typedef struct { float x, y, r; } Disc;
-
-/* the design, in units: landscape fits a 16 x 9 box, portrait 9 x 16 */
-static float BOXW, BOXH, OX, OY;
-#define PX(v) (OX + (v) * SC.s)
-#define PY(v) (OY + (v) * SC.s)
-
-static void pipe_(float x0, float y0, float x1, float y1, float r, int mat) {
-    if (SC.np == MAXP) return;
-    float *a = SC.pa[SC.np], *b = SC.pb[SC.np];
-    a[0] = PX(x0); a[1] = PY(y0); a[2] = PX(x1); a[3] = PY(y1);
-    b[0] = r * SC.s; b[1] = (float)mat; b[2] = b[3] = 0;
-    SC.np++;
-}
-static void flange(float x, float y, int vertical, float r) {
-    if (SC.nf == MAXF) return;
-    float *f = SC.fl[SC.nf++];
-    f[0] = PX(x); f[1] = PY(y); f[2] = vertical ? PI / 2 : 0; f[3] = r * SC.s;
-}
-static void wheel(float x, float y, float r) {
-    if (SC.nw == MAXW) return;
-    float *w = SC.wh[SC.nw++];
-    w[0] = PX(x); w[1] = PY(y); w[2] = r * SC.s; w[3] = 0;
-}
-
-static void layout(void) {
-    int tall = W < H;
-    BOXW = tall ? 9 : 16; BOXH = tall ? 9 * 16.0f / 9 : 9;
-    SC.s = fminf(W / BOXW, H / BOXH);
-    OX = (W - BOXW * SC.s) / 2; OY = (H - BOXH * SC.s) / 2;
-    float s = SC.s;
-    SC.np = SC.nf = SC.nw = 0;
-
-    Disc d[NG];
-    float pqx, pqy, pqh = 1.5f;
-    float bhx, bhy, bhR, flo, hor, lagy;
-    float wgx[2], wgy0, wgy1;
-    float fdx, fdy;
-    float gx, gpy, gL, ggy, gvy;
-    float svx, svy, lpx, lpy, lside;
-    if (!tall) {
-        bhx = 8; bhy = 5.05f; bhR = 4.05f; flo = 8.5f; hor = 3.2f; lagy = 0.62f;
-        d[G_LOAD] = (Disc){8.0f, 2.42f, 1.0f};
-        d[G_TEMP] = (Disc){5.72f, 3.12f, 0.74f};
-        d[G_MEM] = (Disc){10.28f, 3.12f, 0.74f};
-        d[G_CLOCK] = (Disc){1.95f, 2.55f, 1.06f};
-        pqx = 8; pqy = 4.62f;
-        wgx[0] = 5.4f; wgx[1] = 10.6f; wgy0 = 4.5f; wgy1 = 6.7f;
-        fdx = 8; fdy = 6.98f;
-        gx = 14.45f; gpy = 1.6f; gL = 0.95f; ggy = 3.55f; gvy = 4.3f;
-        svx = 12.4f; svy = 3.05f;
-        lpx = 1.45f; lpy = 5.05f; lside = -1;
-
-        /* left: a copper feed down the cab front into the boiler, an iron pipe with a valve */
-        pipe_(3.55f, 0.6f, 3.55f, 7.3f, 0.09f, M_COPPER);
-        pipe_(3.55f, 6.25f, 4.6f, 6.25f, 0.085f, M_COPPER);
-        pipe_(-0.5f, 7.3f, 3.55f, 7.3f, 0.11f, M_IRON);
-        flange(3.55f, 1.35f, 1, 0.09f); flange(3.55f, 4.7f, 1, 0.09f);
-        flange(4.05f, 6.25f, 0, 0.085f); flange(0.75f, 7.3f, 0, 0.11f);
-        wheel(2.3f, 7.3f, 0.36f);
-        /* the steam fountain behind the pressure gauge, with its valves */
-        pipe_(6.5f, 1.72f, 9.5f, 1.72f, 0.075f, M_COPPER);
-        pipe_(8.0f, 1.72f, 8.0f, 0.7f, 0.09f, M_COPPER);
-        wheel(6.5f, 1.72f, 0.24f); wheel(9.5f, 1.72f, 0.24f);
-        /* right: steam main down to the governor's valve, and away to the floor */
-        pipe_(13.2f, 0.6f, 13.2f, gvy, 0.1f, M_COPPER);
-        pipe_(13.2f, gvy, gx, gvy, 0.1f, M_COPPER);
-        pipe_(gx, gvy, 15.45f, gvy, 0.1f, M_COPPER);
-        pipe_(15.45f, gvy, 15.45f, 9.6f, 0.11f, M_IRON);
-        pipe_(13.2f, svy, svx, svy, 0.08f, M_COPPER);
-        flange(13.2f, 1.35f, 1, 0.1f); flange(13.75f, gvy, 0, 0.1f);
-        flange(15.45f, 5.6f, 1, 0.11f); flange(12.78f, svy, 0, 0.08f);
-        wheel(15.45f, 7.0f, 0.36f);
-        /* drains from the gauge glasses */
-        pipe_(wgx[0], wgy1, wgx[0], 9.6f, 0.04f, M_COPPER);
-        pipe_(wgx[1], wgy1, wgx[1], 9.6f, 0.04f, M_COPPER);
-
-        SC.leak[0][0] = PX(4.05f); SC.leak[0][1] = PY(6.12f); SC.leak[0][2] = 0.55f * s; SC.leak[0][3] = 0.2f;
-        SC.leak[1][0] = PX(gx); SC.leak[1][1] = PY(gvy - 0.42f); SC.leak[1][2] = 0.5f * s; SC.leak[1][3] = -0.15f;
-        SC.leak[2][0] = PX(15.45f); SC.leak[2][1] = PY(5.5f); SC.leak[2][2] = 0.45f * s; SC.leak[2][3] = -0.3f;
-        SC.drip[0][0] = PX(1.35f); SC.drip[0][1] = PY(7.3f + 0.11f); SC.drip[0][2] = 6.3f; SC.drip[0][3] = 0.4f;
-        SC.drip[1][0] = PX(13.2f); SC.drip[1][1] = PY(gvy + 0.1f); SC.drip[1][2] = 8.9f; SC.drip[1][3] = 3.1f;
-    } else {
-        bhx = 4.5f; bhy = 8.4f; bhR = 4.1f; flo = 15.1f; hor = 8.0f; lagy = 0.7f;
-        d[G_LOAD] = (Disc){4.5f, 5.78f, 0.95f};
-        d[G_TEMP] = (Disc){2.35f, 7.3f, 0.72f};
-        d[G_MEM] = (Disc){6.65f, 7.3f, 0.72f};
-        d[G_CLOCK] = (Disc){2.3f, 2.65f, 1.12f};
-        pqx = 4.5f; pqy = 8.98f;
-        wgx[0] = 1.3f; wgx[1] = 7.7f; wgy0 = 9.95f; wgy1 = 12.15f;
-        fdx = 4.5f; fdy = 11.3f;
-        gx = 6.95f; gpy = 1.65f; gL = 0.88f; ggy = 3.45f; gvy = 4.15f;
-        svx = 4.75f; svy = 3.1f;
-        lpx = 8.2f; lpy = 4.95f; lside = 1;
-
-        pipe_(5.6f, 0.7f, 5.6f, gvy, 0.1f, M_COPPER);
-        pipe_(5.6f, gvy, gx, gvy, 0.1f, M_COPPER);
-        pipe_(gx, gvy, 9.6f, gvy, 0.1f, M_COPPER);
-        pipe_(5.6f, svy, svx, svy, 0.08f, M_COPPER);
-        flange(5.6f, 1.45f, 1, 0.1f); flange(8.2f, gvy, 0, 0.1f); flange(5.2f, svy, 0, 0.08f);
-        /* the fountain */
-        pipe_(2.75f, 5.25f, 6.25f, 5.25f, 0.075f, M_COPPER);
-        pipe_(4.5f, 5.25f, 4.5f, 4.4f, 0.09f, M_COPPER);
-        wheel(2.75f, 5.25f, 0.24f); wheel(6.25f, 5.25f, 0.24f);
-        /* low down: the injector feed across the backhead */
-        pipe_(wgx[0], wgy1, wgx[0], 13.5f, 0.04f, M_COPPER);
-        pipe_(wgx[1], wgy1, wgx[1], 13.5f, 0.04f, M_COPPER);
-        pipe_(-0.5f, 13.5f, 9.5f, 13.5f, 0.1f, M_COPPER);
-        pipe_(0.7f, 13.5f, 0.7f, 16.5f, 0.1f, M_IRON);
-        pipe_(8.3f, 13.5f, 8.3f, 16.5f, 0.1f, M_IRON);
-        flange(3.05f, 13.5f, 0, 0.1f); flange(5.95f, 13.5f, 0, 0.1f);
-        flange(0.7f, 14.3f, 1, 0.1f); flange(8.3f, 14.3f, 1, 0.1f);
-        wheel(2.2f, 13.5f, 0.4f); wheel(6.8f, 13.5f, 0.4f);
-
-        SC.leak[0][0] = PX(3.05f); SC.leak[0][1] = PY(13.38f); SC.leak[0][2] = 0.55f * s; SC.leak[0][3] = 0.2f;
-        SC.leak[1][0] = PX(gx); SC.leak[1][1] = PY(gvy - 0.4f); SC.leak[1][2] = 0.5f * s; SC.leak[1][3] = -0.15f;
-        SC.leak[2][0] = PX(8.3f); SC.leak[2][1] = PY(14.2f); SC.leak[2][2] = 0.45f * s; SC.leak[2][3] = -0.3f;
-        SC.drip[0][0] = PX(4.55f); SC.drip[0][1] = PY(13.6f); SC.drip[0][2] = 6.3f; SC.drip[0][3] = 0.4f;
-        SC.drip[1][0] = PX(7.45f); SC.drip[1][1] = PY(13.6f); SC.drip[1][2] = 8.9f; SC.drip[1][3] = 3.1f;
-    }
-    SC.bh[0] = PX(bhx); SC.bh[1] = PY(bhy); SC.bh[2] = bhR * s; SC.bh[3] = PY(flo);
-    SC.hor[0] = PY(hor); SC.hor[1] = PX(bhx); SC.hor[2] = 0.62f * s / (PY(flo) - PY(hor));
-    SC.lag[0] = PY(lagy); SC.lag[1] = 0.24f * s;
-    float tr = 0.1f;
-    for (int i = 0; i < 2; i++) {
-        SC.wg[i][0] = PX(wgx[i]); SC.wg[i][1] = PY(wgy0); SC.wg[i][2] = PY(wgy1); SC.wg[i][3] = tr * s;
-        float ty = wgy1 + 0.62f;
-        SC.tag[i][0] = PX(wgx[i] - 0.5f); SC.tag[i][1] = PY(ty); SC.tag[i][2] = PX(wgx[i] + 0.5f); SC.tag[i][3] = PY(ty + 0.24f);
-        for (int k = 0; k < 4; k++) SC.tag[i][k] = roundf(SC.tag[i][k]);
-    }
-    SC.fd[0] = PX(fdx); SC.fd[1] = PY(fdy); SC.fd[2] = 1.18f * s; SC.fd[3] = 0.8f * s;
-    SC.gov[0] = PX(gx); SC.gov[1] = PY(gpy); SC.gov[2] = gL * s; SC.gov[3] = PY(ggy);
-    SC.govb[0] = PY(gvy); SC.govb[1] = 0.25f * s; SC.govb[2] = 0.27f * s; SC.govb[3] = -1;
-    SC.sv[0] = PX(svx); SC.sv[1] = PY(svy - 0.08f); SC.sv[2] = 0.6f * s; SC.sv[3] = 0;
-    SC.lamp[0] = PX(lpx); SC.lamp[1] = PY(lpy); SC.lamp[2] = 0.62f * s; SC.lamp[3] = lside;
-    if (aux_kind == AUX_BATT) {
-        float mx = tall ? wgx[1] + 0.55f : wgx[1] + 0.62f;
-        SC.ml[0] = PX(mx); SC.ml[1] = PY(wgy0 + 0.35f); SC.ml[2] = 0.075f * s;
-    } else SC.ml[2] = 0;
-
-    for (int i = 0; i < NG; i++) {
-        G[i].cx = PX(d[i].x); G[i].cy = PY(d[i].y); G[i].r = d[i].r * s;
-    }
-
-    /* the builder's plate, in plate-height tenths (k): name, rule, two windows of drums */
-    float k = pqh / 10;
-    float dw = 1.3f * k, dgap = 0.07f * k, ggap = 0.5f * k, wpad = 0.16f * k;
-    float upw = 9 * dw + 5 * dgap + 3 * ggap + 2 * wpad;
-    float pqw = 2.0f * k + 5.4f * k + 0.6f * k + upw + 2.0f * k;
-    float kp = k * s;
-    float pcx = PX(pqx), pcy = PY(pqy);
-    float *plq = SC.pq;
-    plq[0] = roundf(pcx - pqw * s / 2); plq[1] = roundf(pcy - pqh * s / 2);
-    plq[2] = roundf(pcx + pqw * s / 2); plq[3] = roundf(pcy + pqh * s / 2);
-
-    nstyles = 0;
-    char hn[80];
+static char host_uc[64];
+static void signs_build(void) {
     int n = 0;
-    for (const char *p = host; *p && n < 60; p++) hn[n++] = (char)toupper((unsigned char)*p);
-    hn[n] = 0;
-    strcat(hn, " WORKS");
-    float name_px = 2.1f * kp;
-    while (name_px > 8 && measure(F_SANS_B, name_px, hn, 0.12f) > (plq[2] - plq[0]) - 5.0f * kp) name_px *= 0.94f;
-    int st_name = style(F_SANS_B, name_px), st_lab = style(F_SANS_B, 1.05f * kp), st_cap = style(F_SANS, 0.8f * kp);
-    float rx1 = plq[2] - 2.0f * kp;
-    float wy[2] = {plq[1] + 4.6f * kp, plq[1] + 7.35f * kp}, wh = 2.05f * kp;
-    int nd = 0;
-    for (int w = 0; w < 2; w++) {
-        int nine = w == 0;
-        int per[4] = {nine ? 3 : 2, 2, 2, 2};
-        int specs[4][3] = {{D_D100, D_D10, D_D1}, {D_H10, D_H1}, {D_M10, D_M1}, {D_S10, D_S1}};
-        if (!nine) { specs[0][0] = D_D10; specs[0][1] = D_D1; }
-        float right = rx1 - wpad * s;
-        for (int gi = 3; gi >= 0; gi--) {
-            for (int j = per[gi] - 1; j >= 0; j--) {
-                float x1 = right, x0 = right - dw * s;
-                drum_rect[nd][0] = roundf(x0); drum_rect[nd][2] = roundf(x1);
-                drum_rect[nd][1] = roundf(wy[w] + wpad * s); drum_rect[nd][3] = roundf(wy[w] + wh - wpad * s);
-                drum_spec[nd] = specs[gi][j];
-                nd++;
-                right = x0 - dgap * s;
-            }
-            right += dgap * s;
-            if (gi) right -= ggap * s;
-        }
-        win_rect[w][0] = roundf(right - wpad * s); win_rect[w][1] = roundf(wy[w]);
-        win_rect[w][2] = roundf(rx1); win_rect[w][3] = roundf(wy[w] + wh);
-    }
-    drum_style = style(F_SERIF, (drum_rect[0][3] - drum_rect[0][1]) * 0.7f);
-
-    int st_num[NG], st_glab[NG], st_unit[NG];
-    for (int i = 0; i < NG; i++) {
-        float r = G[i].r;
-        st_num[i] = style(i == G_CLOCK ? F_SERIF : F_SERIF_B, (i == G_CLOCK ? 0.14f : 0.15f) * r);
-        st_glab[i] = style(F_SANS_B, (i == G_LOAD ? 0.075f : 0.085f) * r);
-        st_unit[i] = style(F_SANS, (i == G_CLOCK ? 0.065f : 0.075f) * r);
-    }
-    int st_tag = style(F_SANS_B, 0.14f * s), st_mains = style(F_SANS_B, 0.11f * s);
-    build_atlas();
-
-    /* the print: numerals and labels on the faces */
-    tvn = 0;
-    static const float ink[4] = {0.09f, 0.075f, 0.065f, 0.94f}, red[4] = {0.6f, 0.13f, 0.09f, 0.95f};
-    for (int i = 0; i < NG; i++) {
-        Gauge *g = &G[i];
-        float r = g->r;
-        if (g->kind == K_CLOCK) {
-            static const char *rom[12] = {"I", "II", "III", "IIII", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"};
-            for (int h = 1; h <= 12; h++) {
-                float a = h * 30 * DEG;
-                text_c(st_num[i], g->cx + sinf(a) * 0.7f * r, g->cy - cosf(a) * 0.7f * r, rom[h - 1], ink, 0);
-            }
-            text_c(st_unit[i], g->cx, g->cy + 0.34f * r, "RAILWAY TIME", ink, 0.15f * styles[st_unit[i]].px);
-            continue;
-        }
-        float nr = 0.655f;
-        for (int k2 = 0; k2 <= g->nmaj; k2 += g->numevery) {
-            char b[16];
-            float v = g->vmin + (g->vmax - g->vmin) * k2 / g->nmaj;
-            snprintf(b, sizeof b, "%g", v);
-            float a = g->a0 + (g->a1 - g->a0) * k2 / g->nmaj;
-            float f = (float)k2 / g->nmaj;
-            int over = g->red0 >= 0 && f >= g->red0 - 1e-3f && f <= g->red1 + 1e-3f && i != G_MEM;
-            text_c(st_num[i], g->cx + sinf(a) * nr * r, g->cy - cosf(a) * nr * r, b, over ? red : ink, 0);
-        }
-        float lt = 0.1f * styles[st_glab[i]].px;
-        text_c(st_glab[i], g->cx, g->cy - 0.24f * r, g->label, ink, lt);
-        text_c(st_unit[i], g->cx, g->cy + 0.36f * r, g->unit, ink, 0.12f * styles[st_unit[i]].px);
-    }
-
-    /* the plate: raised name, rule, captions */
-    text_raised(st_name, (plq[0] + plq[2]) / 2, plq[1] + 1.75f * kp + cap_h(st_name) / 2, 0, hn, 0.12f * styles[st_name].px);
-    SC.rule[0] = plq[0] + 2.0f * kp; SC.rule[2] = plq[2] - 2.0f * kp; SC.rule[1] = plq[1] + 3.25f * kp;
-    SC.rule[3] = fmaxf(0.8f, 0.09f * kp);
-    for (int w = 0; w < 2; w++)
-        text_raised(st_lab, plq[0] + 2.0f * kp, (win_rect[w][1] + win_rect[w][3]) / 2 + cap_h(st_lab) / 2, -1,
-                    w ? "AWAY" : "UPTIME", 0.1f * styles[st_lab].px);
-    static const char *caps[4] = {"SEC", "MIN", "HRS", "DAYS"};
-    static const int cg[4][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 8}};
-    for (int c = 0; c < 4; c++) {
-        float x = (drum_rect[cg[c][0]][2] + drum_rect[cg[c][1]][0]) / 2;
-        text_raised(st_cap, x, plq[1] + 4.3f * kp, 0, caps[c], 0.14f * styles[st_cap].px);
-    }
-
-    /* tags under the gauge glasses, and the mains jewel's stencil */
-    for (int i = 0; i < 2; i++) {
-        const char *t = i == 0 ? "WATER" : aux_kind == AUX_BATT ? "BATTERY" : "FREE MEM";
-        float tx = (SC.tag[i][0] + SC.tag[i][2]) / 2, ty = (SC.tag[i][1] + SC.tag[i][3]) / 2;
-        text_engraved(st_tag, tx, ty + cap_h(st_tag) / 2, 0, t, 0.12f * styles[st_tag].px);
-    }
-    if (SC.ml[2] > 0)
-        text_paint(st_mains, SC.ml[0], SC.ml[1] + 0.26f * s + cap_h(st_mains), 0, "MAINS", 0.15f * styles[st_mains].px);
-}
-
-/* ---- GL ---- */
-#define GLSL(...) #__VA_ARGS__
-static const char *VS = "#version 330 core\n" GLSL(
-    void main() {
-        vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
-        gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
-    });
-
-/* shared: noise, shapes, the light, metal and paint, the firehole's openings.
- *
- * The light: a dim roof light (the key, from above left), the paraffin lamp
- * (a warm point) and the fire (a hot point just out of the firehole, and its
- * glow off the floor). The static scene is drawn twice: uPass 0 with the
- * roof and the lamp, uPass 1 with the fire alone at unit strength, so each
- * frame can add the fire back in at whatever it is doing; uPass 2 lights
- * the moving parts with everything at once. Brass and copper reflect a
- * made-up cab: a whitewashed roof catching the lamp, dark sides, the
- * spectacle glasses, the floor; and, in the fire's pass, the glowing floor
- * and the firehole. */
-#define COMMON GLSL( \
-    uniform vec4 uLampL, uFireL; \
-    uniform float uPass; \
-    uniform vec3 uFireC; \
-    vec2 gp; \
-    vec2 SO; \
-    const vec3 L = vec3(-0.4636, -0.6182, 0.6347); \
-    const vec3 LK = vec3(-0.40, -0.74, 0.54); \
-    float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); } \
-    float vnoise(vec2 p) { \
-        vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); \
-        return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y); \
-    } \
-    float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * vnoise(p); p = p * 2.03 + vec2(1.7, 9.2); a *= 0.5; } return s; } \
-    float fbm3(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 3; i++) { s += a * vnoise(p); p = p * 2.03 + vec2(1.7, 9.2); a *= 0.5; } return s / 0.875; } \
-    float aa(float d) { return clamp(0.5 - d, 0.0, 1.0); } \
-    float sdBox(vec2 p, vec2 b, float r) { vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; } \
-    float sdRect(vec2 p, vec4 R, float r) { return sdBox(p - (R.xy + R.zw) * 0.5, (R.zw - R.xy) * 0.5, r); } \
-    float sdSeg(vec2 p, vec2 a, vec2 b) { vec2 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0); return length(pa - ba * h); } \
-    vec2 SOF(float k) { return SO * k; } \
-    float fall(vec4 P, vec3 d) { return 1.0 / (1.0 + dot(d, d) / (P.w * P.w)); } \
-    vec3 env(vec3 R, bool cab, bool fire) { \
-        vec3 c = vec3(0.0); \
-        if (cab) { \
-            float up = smoothstep(0.05, -0.85, R.y); \
-            c = vec3(0.04, 0.038, 0.036) + vec3(0.34, 0.32, 0.29) * up * smoothstep(-0.3, 0.5, R.z); \
-            c += vec3(0.16, 0.2, 0.28) * smoothstep(0.45, 0.75, abs(R.x)) * smoothstep(0.35, 0.0, abs(R.y + 0.25)); \
-            c += vec3(0.09, 0.065, 0.04) * smoothstep(0.2, 0.9, R.y); \
-            vec3 dl = uLampL.xyz - vec3(gp, 0.0); \
-            c += vec3(1.0, 0.75, 0.45) * 2.5 * pow(max(dot(R, normalize(dl)), 0.0), 20.0) * fall(uLampL, dl); \
-        } \
-        if (fire) { \
-            vec3 fc = uPass > 1.5 ? uFireC : vec3(1.0); \
-            vec3 df = uFireL.xyz - vec3(gp, 0.0); \
-            float fw = fall(vec4(uFireL.xyz, uFireL.w * 1.6), df); \
-            c += fc * (0.45 * smoothstep(-0.1, 0.9, R.y) * smoothstep(-0.3, 0.4, R.z) + 1.4 * pow(max(dot(R, normalize(df)), 0.0), 12.0)) * fw; \
-        } \
-        return c; \
-    } \
-    void lite(inout vec3 dif, inout vec3 spc, vec3 n, vec3 Ld, vec3 C, float shin, vec3 T, float an) { \
-        float nl = max(dot(n, Ld), 0.0); \
-        vec3 H = normalize(Ld + vec3(0.0, 0.0, 1.0)); \
-        float s = pow(max(dot(n, H), 0.0), shin) * (shin + 2.0) / 9.0; \
-        if (an > 0.0) { float th = dot(T, H); s = mix(s, pow(sqrt(max(1.0 - th * th, 0.0)), shin * 0.7) * 1.6, an); } \
-        dif += C * nl; \
-        spc += C * s * smoothstep(0.0, 0.2, nl); \
-    } \
-    vec3 shade(vec3 alb, vec3 n, float met, float shin, float gloss, vec3 T, float an) { \
-        vec3 P = vec3(gp, 0.0); \
-        vec3 dif = vec3(0.0), spc = vec3(0.0), amb = vec3(0.0); \
-        bool cab = uPass < 0.5 || uPass > 1.5, fire = uPass > 0.5; \
-        if (cab) { \
-            amb += vec3(0.15, 0.155, 0.17) * (0.75 - 0.25 * n.y); \
-            lite(dif, spc, n, normalize(LK), vec3(0.58, 0.58, 0.62), shin, T, an); \
-            vec3 dl = uLampL.xyz - P; \
-            lite(dif, spc, n, normalize(dl), vec3(1.0, 0.68, 0.38) * 1.3 * fall(uLampL, dl), shin, T, an); \
-        } \
-        if (fire) { \
-            vec3 fc = uPass > 1.5 ? uFireC : vec3(1.0); \
-            vec3 df = uFireL.xyz - P; \
-            lite(dif, spc, n, normalize(df), fc * fall(uFireL, df), shin, T, an); \
-            amb += fc * 0.25 * fall(vec4(uFireL.xyz, uFireL.w * 1.8), df) * (0.55 + 0.45 * n.y); \
-        } \
-        vec3 R = reflect(vec3(0.0, 0.0, -1.0), n); \
-        vec3 E = env(R, cab, fire); \
-        if (met > 0.5) { \
-            vec3 sc = mix(alb * 1.5, vec3(1.0, 0.95, 0.85), 0.25); \
-            return alb * (amb * 0.35 + dif * 0.3 + E * 1.4) + sc * spc * 0.35 * gloss; \
-        } \
-        float fr = 0.04 + 0.5 * pow(1.0 - max(n.z, 0.0), 4.0); \
-        return alb * (amb + dif) + (spc * 0.25 + E * fr * 2.0) * gloss; \
-    } \
-    vec3 metal(vec3 n, vec3 base) { return shade(base, n, 1.0, 48.0, 1.0, vec3(0.0), 0.0); } \
-    vec3 metalA(vec3 n, vec3 base, vec3 T, float an) { return shade(base, n, 1.0, 48.0, 1.0, T, an); } \
-    vec3 paint(vec3 alb, vec3 n, float gloss) { return shade(alb, n, 0.0, 20.0 + 70.0 * gloss, gloss, vec3(0.0), 0.0); } \
-    vec3 dome(vec2 sp, vec3 base) { \
-        float z = sqrt(max(1.0 - dot(sp, sp), 0.0)); \
-        return metal(normalize(vec3(sp * 0.9, z + 0.2)), base); \
-    } \
-    float fhSlots(vec2 q, vec2 hs, float u) { \
-        vec2 r = vec2(abs(q.x), q.y) - vec2(hs.x * 0.52, hs.y * 0.18); \
-        vec2 g = vec2(0.25 * u, 0.2 * u); \
-        vec2 k = clamp(floor(r / g + 0.5), vec2(-1.0, 0.0), vec2(1.0, 1.0)); \
-        return sdBox(r - k * g, vec2(0.075 * u, 0.024 * u), 0.022 * u); \
-    } \
-)
-
-static const char *FS_STATIC = "#version 330 core\n" GLSL(
-    uniform vec2 uRes;
-    uniform float uSeed, uS;
-    uniform vec4 uBH, uHor, uLag;
-    uniform vec4 uPA[24], uPB[24];
-    uniform int uNP;
-    uniform vec4 uFl[16];
-    uniform int uNF;
-    uniform vec4 uWh[6];
-    uniform int uNW;
-    uniform vec4 uG[4], uA[4], uZ[4];
-    uniform vec4 uWG[2], uTag[2];
-    uniform vec4 uFD;
-    uniform vec4 uPq, uRule, uWin[2];
-    uniform vec4 uGov, uGovB, uSV, uLamp, uML;
-    uniform vec3 uRed, uAmber, uBrass, uCopper, uGreen;
-    out vec4 o;
-)
-COMMON
-GLSL(
-    vec3 rivetP(vec2 p, vec2 c, float r, vec3 col, vec3 alb, float gloss) {
-        col *= mix(1.0, 0.5, smoothstep(r * 1.7, r * 0.5, length(p - c - SOF(0.61) * r)));
-        float d = length(p - c);
-        if (d < r + 1.0) {
-            vec2 sp = (p - c) / r;
-            vec3 n = normalize(vec3(sp * 0.9, sqrt(max(1.0 - dot(sp, sp), 0.0)) + 0.15));
-            col = mix(col, paint(alb, n, gloss), aa(d - r));
-        }
-        return col;
-    }
-    vec2 rowPt(vec2 p, vec2 a, vec2 dir, float sp) { return a + dir * (floor(dot(p - a, dir) / sp + 0.5) * sp); }
-
-    /* the cab front: green paint, worn to red primer and bare iron, rust runs, seams */
-    vec3 wall(vec2 p) {
-        float u = uS;
-        vec2 q = p / u;
-        vec3 c = uGreen * (0.72 + 0.55 * fbm(q * 0.8 + uSeed));
-        c *= 0.94 + 0.08 * vnoise(vec2(q.x * 3.0, q.y * 45.0));
-        float w = fbm(q * 2.1 + 17.0 + uSeed);
-        c = mix(c, vec3(0.25, 0.085, 0.045), 0.75 * smoothstep(0.72, 0.75, w) * smoothstep(0.3, 0.6, vnoise(q * 9.0)));
-        c = mix(c, vec3(0.07, 0.06, 0.055), smoothstep(0.77, 0.79, w));
-        float run = vnoise(vec2(q.x * 11.0, q.y * 0.7 + uSeed));
-        c = mix(c, vec3(0.2, 0.075, 0.035), 0.35 * smoothstep(0.72, 0.95, run) * smoothstep(0.45, 0.75, fbm(q * 1.3 + 5.0)));
-        /* grime gathers low down and up toward the roof */
-        c *= 1.0 - 0.3 * smoothstep(0.5, 1.0, p.y / uBH.w) - 0.35 * smoothstep(0.35, 0.0, p.y / uRes.y);
-        vec3 col = paint(c, vec3(0.0, 0.0, 1.0), 0.06);
-        /* plate seams either side of the boiler and across at the waist, riveted */
-        float sx = uBH.z * 1.085 + 0.55 * u;
-        float ax = abs(p.x - uBH.x);
-        float ys = uBH.y + 0.3 * uBH.z;
-        float dv = ax - sx;
-        col *= 1.0 - 0.55 * aa(abs(dv + 0.5) - 0.7) + 0.25 * aa(abs(dv - 1.5) - 0.6);
-        if (ax > sx) col *= 1.0 - 0.55 * aa(abs(p.y - ys) - 0.7) + 0.25 * aa(abs(p.y - ys + 1.5) - 0.6);
-        float rr = 0.05 * u, sp = 0.32 * u;
-        vec2 rc = vec2(uBH.x + sign(p.x - uBH.x) * (sx + 0.13 * u), 0.0);
-        rc.y = floor(p.y / sp + 0.5) * sp;
-        col = rivetP(p, rc, rr, col, c, 0.15);
-        if (ax > sx + 0.2 * u) col = rivetP(p, vec2(floor(p.x / sp + 0.5) * sp, ys + 0.13 * u), rr, col, c, 0.15);
-        return col;
-    }
-
-    float dBoiler(vec2 p) { return p.y < uBH.y ? length(p - uBH.xy) - uBH.z : abs(p.x - uBH.x) - uBH.z; }
-
-    vec3 ironAlb(vec2 p) {
-        vec2 q = p / uS;
-        vec3 c = mix(vec3(0.045, 0.043, 0.042), vec3(0.1, 0.092, 0.086), fbm(q * 1.4 + uSeed + 3.0));
-        c *= 0.9 + 0.14 * vnoise(q * vec2(6.0, 50.0));
-        c = mix(c, vec3(0.19, 0.08, 0.04), 0.55 * smoothstep(0.64, 0.8, fbm(q * 3.1 + 41.0)));
-        return c;
-    }
-
-    /* the boiler's end: green lined cladding round a riveted iron backhead */
-    vec3 boiler(vec2 p, vec3 col) {
-        float R = uBH.z, u = uS;
-        float cw = 0.085 * R;
-        float d = dBoiler(p);
-        col *= mix(1.0, 0.4, smoothstep(0.3 * u, -0.05 * u, dBoiler(p - SOF(0.122) * u) - cw));
-        if (d > cw + 1.0) return col;
-        vec2 dir = p.y < uBH.y ? normalize(p - uBH.xy) : vec2(sign(p.x - uBH.x), 0.0);
-        vec3 c;
-        if (d > 0.0) {
-            float t = d / cw;
-            vec3 g = uGreen * (0.9 + 0.3 * fbm(p / u * 2.0 + 9.0));
-            g = mix(g, vec3(0.06, 0.05, 0.045), 0.6 * smoothstep(0.7, 0.8, fbm(p / u * 4.0 + 3.0)));
-            /* lining: a black band with an orange line down its middle */
-            float dl = abs(t - 0.56);
-            g = mix(g, vec3(0.02), aa((dl - 0.075) * cw));
-            g = mix(g, vec3(0.8, 0.4, 0.1), 0.9 * aa((dl - 0.022) * cw));
-            float bul = smoothstep(0.75, 1.0, t);
-            vec3 n = normalize(vec3(dir * bul * 1.4, 1.0));
-            c = paint(g, n, 0.35);
-            /* half-round brass beading on the inner edge */
-            float v = (t - 0.09) / 0.09;
-            if (abs(v) < 1.0) {
-                vec3 bn = normalize(vec3(dir * v, sqrt(1.0 - v * v)));
-                vec3 b = metal(bn, uBrass * (0.85 + 0.2 * vnoise(p * 0.05)));
-                c = mix(c, b, aa((abs(v) - 1.0) * 0.09 * cw));
-            }
-            c *= 1.0 - 0.6 * aa(abs(d - cw) - 1.0);
-        } else {
-            vec3 alb = ironAlb(p);
-            /* heat: tempered brown round the firehole, soot rising from it */
-            vec2 fq = (p - uFD.xy) / u;
-            float heat = exp(-length(fq * vec2(0.55, 0.75)) * 1.4);
-            alb = mix(alb, vec3(0.13, 0.075, 0.07), 0.6 * heat);
-            float soot = smoothstep(1.8, 0.0, abs(fq.x) - 0.6) * smoothstep(-1.5, -0.6, fq.y) * smoothstep(-3.5, -0.8, fq.y);
-            alb *= 1.0 - 0.55 * soot * (0.6 + 0.4 * fbm(fq * 3.0));
-            /* a satin sheen, broad, toward the top left */
-            vec3 n = normalize(vec3(-(p - uBH.xy) / R * 0.12, 1.0));
-            c = paint(alb, n, 0.18);
-            /* the lap seam across the middle, double-riveted */
-            float ys = uBH.y;
-            c *= 1.0 + 0.6 * aa(abs(p.y - ys + 1.0) - 0.6) - 0.5 * aa(abs(p.y - ys - 1.0) - 1.0);
-            float sp = 0.3 * u, rr = 0.052 * u;
-            if (abs(p.y - ys) < 0.3 * u) {
-                float row = p.y < ys ? -1.0 : 1.0;
-                float off = row > 0.0 ? 0.5 * sp : 0.0;
-                vec2 rc = vec2(floor((p.x - uBH.x - off) / sp + 0.5) * sp + uBH.x + off, ys + row * 0.1 * u);
-                c = rivetP(p, rc, rr, c, alb * 1.2, 0.3);
-            }
-            /* the firebox stays below it: rows of little caulked heads */
-            if (p.y > ys + 0.3 * u && d < -0.25 * u) {
-                float sg = 0.42 * u;
-                float ry = floor((p.y - ys - 0.45 * u) / sg + 0.5);
-                float off = mod(ry, 2.0) * 0.5 * sg;
-                vec2 sc = vec2(floor((p.x - uBH.x - off) / sg + 0.5) * sg + uBH.x + off, ys + 0.45 * u + ry * sg);
-                if (sc.y < uBH.w - 0.2 * u) c = rivetP(p, sc, 0.045 * u, c, alb * 1.3, 0.25);
-            }
-            /* the ring of rivets round the edge */
-            float Rr = R - 0.15 * u;
-            vec2 rc;
-            if (p.y < uBH.y) {
-                vec2 v = p - uBH.xy;
-                float a = atan(v.x, -v.y), st = 0.3 * u / Rr;
-                float ka = floor(a / st + 0.5) * st;
-                rc = uBH.xy + Rr * vec2(sin(ka), -cos(ka));
-            } else {
-                rc = vec2(uBH.x + sign(p.x - uBH.x) * Rr, uBH.y + floor((p.y - uBH.y) / sp + 0.5) * sp);
-            }
-            c = rivetP(p, rc, 0.058 * u, c, alb * 1.2, 0.3);
-            c *= 1.0 - 0.5 * smoothstep(-0.12 * u, 0.0, d);
-        }
-        return mix(col, c, aa(d - cw));
-    }
-
-    /* the floorboards, running away toward the backhead */
-    vec3 floorB(vec2 p, vec3 col) {
-        if (p.y < uBH.w - 1.0) return col;
-        float dy = p.y - uHor.x;
-        float pw = dy * uHor.z;
-        float wx = (p.x - uHor.y) / pw;
-        float pi = floor(wx), fx = fract(wx);
-        float z = 60.0 / dy * uS;
-        float h = hash(vec2(pi, 3.7) + uSeed);
-        float seg = floor(z / 3.0 + h * 7.0);
-        float h2 = hash(vec2(pi, seg));
-        vec3 c = mix(vec3(0.16, 0.105, 0.065), vec3(0.27, 0.18, 0.11), h2);
-        c *= 0.8 + 0.35 * vnoise(vec2(wx * 6.0 + pi * 13.0, z * 2.2));
-        c *= 0.85 + 0.2 * vnoise(vec2(wx * 30.0, z * 0.6));
-        /* worn grey along the middle where the crew stand, coal dust everywhere */
-        c = mix(c, vec3(0.2, 0.19, 0.17), 0.3 * smoothstep(3.5, 0.5, abs(p.x - uFD.x) / uS));
-        c *= 1.0 - 0.5 * smoothstep(0.75, 0.95, fbm(vec2(wx, z * 0.4) * 1.5 + 7.0));
-        c *= 1.0 - 0.6 * step(0.985, hash(floor(p / 2.0)));
-        /* the gaps between boards and at their ends */
-        c *= 1.0 - 0.75 * aa((min(fx, 1.0 - fx) * pw) - 0.6);
-        c *= 1.0 - 0.6 * smoothstep(0.02, 0.0, abs(fract(z / 3.0 + h * 7.0) - 0.5) - 0.48);
-        /* darker under the boiler, lighter toward us */
-        c *= 0.75 + 0.6 * smoothstep(uBH.w, uBH.w + 1.0 * uS, p.y);
-        c *= 1.0 - 0.6 * smoothstep(0.12 * uS, 0.0, p.y - uBH.w);
-        return mix(col, paint(c, normalize(vec3(0.0, -0.6, 0.8)), 0.08), aa(uBH.w - p.y));
-    }
-
-    /* the steam main across the top, lagged in canvas and strapped */
-    vec3 lag(vec2 p, vec3 col) {
-        float y = uLag.x, r = uLag.y;
-        col *= mix(1.0, 0.4, smoothstep(1.6, 0.9, (p.y - y - 0.3 * r) / r) * step(y, p.y));
-        float v = (p.y - y) / r;
-        if (abs(v) > 1.0 + 1.0 / r) return col;
-        float vc = clamp(v, -1.0, 1.0);
-        vec3 n = normalize(vec3(0.0, vc, sqrt(max(1.0 - vc * vc, 0.0))));
-        vec2 q = p / uS;
-        float weave = sin(p.x * 1.6) * sin(p.y * 1.6 + p.x * 0.3);
-        vec3 alb = vec3(0.6, 0.57, 0.5) * (0.78 + 0.32 * fbm(q * vec2(1.5, 5.0) + 31.0)) * (0.95 + 0.05 * weave);
-        alb = mix(alb, vec3(0.22, 0.18, 0.14), 0.55 * smoothstep(0.5, 0.82, fbm(q * 1.3 + 77.0)));
-        alb *= mix(1.0, 0.55, smoothstep(0.0, -1.0, v));
-        vec3 c = paint(alb, n, 0.02);
-        float bx = mod(q.x + 0.4, 1.7) - 0.85;
-        float db = (abs(bx) - 0.045) * uS;
-        if (db < 1.0) {
-            vec3 bn = normalize(vec3(0.0, vc * 1.03, sqrt(max(1.0 - vc * vc, 0.02))));
-            c = mix(c * (1.0 - 0.5 * aa(db - 2.0)), metal(bn, vec3(0.36, 0.34, 0.32)), aa(db));
-        }
-        return mix(col, c, aa((abs(v) - 1.0) * r));
-    }
-
-    vec3 pipeBase(float mat, vec2 p) {
-        vec2 q = p / uS;
-        if (mat < 0.5) {
-            vec3 b = uCopper;
-            b = mix(b, b * vec3(0.5, 0.42, 0.38), 0.65 * smoothstep(0.4, 0.75, fbm(q * 3.0 + 5.0)));
-            b = mix(b, vec3(0.2, 0.4, 0.32), 0.5 * smoothstep(0.72, 0.86, fbm(q * 5.0 + 50.0)));
-            return b;
-        }
-        if (mat < 1.5) return vec3(0.06, 0.057, 0.054) * (0.8 + 0.4 * fbm(q * 3.0));
-        return uBrass;
-    }
-    vec3 pipeShade(float mat, vec3 n, vec2 p) {
-        vec3 b = pipeBase(mat, p);
-        return mat > 0.5 && mat < 1.5 ? paint(b, n, 0.35) : metal(n, b);
-    }
-
-    vec3 pipes(vec2 p, vec3 col) {
-        float sh = 1.0;
-        for (int i = 0; i < 24; i++) {
-            if (i >= uNP) break;
-            float r = uPB[i].x;
-            float d = sdSeg(p - SOF(0.652) * r * 1.3, uPA[i].xy, uPA[i].zw) - r;
-            sh = min(sh, mix(1.0, 0.45, smoothstep(r * 0.9, -r * 0.4, d)));
-        }
-        col *= sh;
-        for (int i = 0; i < 24; i++) {
-            if (i >= uNP) break;
-            vec2 a = uPA[i].xy, b = uPA[i].zw, ba = b - a;
-            float h = clamp(dot(p - a, ba) / dot(ba, ba), 0.0, 1.0);
-            vec2 v = p - a - ba * h;
-            float r = uPB[i].x, d = length(v) - r;
-            if (d > 1.0) continue;
-            vec2 uu = v / r;
-            vec3 n = normalize(vec3(uu, sqrt(max(1.0 - dot(uu, uu), 0.0)) * 1.1));
-            col = mix(col, pipeShade(uPB[i].y, n, p), aa(d));
-        }
-        return col;
-    }
-
-    /* bolted flanges: a fat short cylinder across the pipe, nuts either side */
-    vec3 flanges(vec2 p, vec3 col) {
-        for (int i = 0; i < 16; i++) {
-            if (i >= uNF) break;
-            vec4 F = uFl[i];
-            vec2 dir = vec2(cos(F.z), sin(F.z)), pe = vec2(-dir.y, dir.x);
-            float r = F.w;
-            vec2 q = p - F.xy;
-            float al = dot(q, dir), ac = dot(q, pe);
-            if (abs(al) > 1.6 * r || abs(ac) > 2.6 * r) continue;
-            float R2 = 1.8 * r, hw = 0.2 * r;
-            vec2 qs = q - SOF(0.541) * r;
-            float ds = sdBox(vec2(dot(qs, dir), dot(qs, pe)), vec2(hw + 0.3 * r, R2), 0.1 * r);
-            col *= mix(1.0, 0.5, smoothstep(0.5 * r, -0.2 * r, ds));
-            /* the nuts, behind and in front of the flange */
-            for (int s = 0; s < 2; s++) {
-                float sa = s == 0 ? -1.0 : 1.0;
-                float dn = sdBox(vec2(abs(al) - hw - 0.13 * r, ac - sa * 1.35 * r), vec2(0.14 * r, 0.24 * r), 0.04 * r);
-                if (dn < 1.0) {
-                    float vv = clamp((ac - sa * 1.35 * r) / (0.24 * r), -1.0, 1.0);
-                    vec3 n = normalize(vec3(pe * vv * 0.8, 1.0));
-                    n = abs(vv) < 0.45 ? vec3(0.0, 0.0, 1.0) : n;
-                    col = mix(col, metal(n, vec3(0.3, 0.29, 0.28)), aa(dn));
-                }
-            }
-            float d = sdBox(vec2(al, ac), vec2(hw, R2), 0.06 * r);
-            if (d < 1.0) {
-                float v = clamp(ac / R2, -1.0, 1.0);
-                vec3 n = normalize(vec3(pe * v, sqrt(1.0 - v * v)));
-                vec3 base = vec3(0.5, 0.36, 0.2) * (0.8 + 0.3 * vnoise(p * 0.2));
-                vec3 c = metal(n, base) * (1.0 - 0.35 * smoothstep(hw - 1.5, hw, abs(al)));
-                col = mix(col, c, aa(d));
-            }
-        }
-        return col;
-    }
-
-    /* valve handwheels, red paint worn to the iron where hands grip */
-    vec3 wheels(vec2 p, vec3 col) {
-        for (int i = 0; i < 6; i++) {
-            if (i >= uNW) break;
-            vec4 Wh = uWh[i];
-            float R = Wh.z;
-            vec2 q = p - Wh.xy;
-            float d = length(q);
-            if (d > 1.3 * R) continue;
-            /* the valve bonnet behind */
-            float db = d - 0.42 * R;
-            col *= mix(1.0, 0.5, smoothstep(0.15 * R, -0.05 * R, length(q - SOF(0.144) * R) - 0.42 * R));
-            if (db < 1.0) col = mix(col, dome(q / (0.42 * R) * 0.75, uBrass * 0.85), aa(db));
-            float ph = hash(Wh.xy) * 6.28;
-            float sp = 6.28318 / 5.0;
-            /* the wheel and its shadow */
-            for (int pass = 0; pass < 2; pass++) {
-                vec2 qq = pass == 0 ? q - SOF(0.18) * R : q;
-                float dd = length(qq);
-                float a = atan(qq.y, qq.x) - ph;
-                float ka = floor(a / sp + 0.5) * sp + ph;
-                vec2 sd = vec2(cos(ka), sin(ka)), spp = vec2(-sd.y, sd.x);
-                float al = dot(qq, sd), ac = dot(qq, spp);
-                float dr = abs(dd - 0.84 * R) - 0.12 * R;
-                float dsp = max(abs(ac) - 0.055 * R * (1.25 - 0.5 * al / R), abs(al - 0.5 * R) - 0.36 * R);
-                float dbs = dd - 0.17 * R;
-                float dw = min(dr, min(dsp, dbs));
-                if (pass == 0) { col *= mix(1.0, 0.5, smoothstep(0.06 * R, -0.03 * R, dw)); continue; }
-                if (dw > 1.0) continue;
-                vec3 n;
-                if (dr <= min(dsp, dbs)) {
-                    float v = clamp((dd - 0.84 * R) / (0.12 * R), -1.0, 1.0);
-                    n = normalize(vec3(qq / max(dd, 1e-3) * v, sqrt(1.0 - v * v)));
-                } else if (dsp <= dbs) {
-                    float v = clamp(ac / (0.06 * R), -1.0, 1.0);
-                    n = normalize(vec3(spp * v * 0.8, 1.0));
-                } else {
-                    vec2 sp2 = qq / (0.17 * R);
-                    n = normalize(vec3(sp2 * 0.8, sqrt(max(1.0 - dot(sp2, sp2), 0.0)) + 0.2));
-                }
-                vec3 alb = uRed * vec3(0.72, 0.6, 0.6) * (0.85 + 0.3 * vnoise(qq * 0.3 + 5.0));
-                float wear = smoothstep(0.5, 0.8, vnoise(vec2(atan(qq.y, qq.x) * 2.5, 3.0) + Wh.xy)) * step(dr, min(dsp, dbs));
-                vec3 c = mix(paint(alb, n, 0.3), metal(n, vec3(0.42, 0.4, 0.38)), wear * 0.85);
-                if (dbs < min(dr, dsp)) c = metal(n, vec3(0.38, 0.36, 0.34));
-                col = mix(col, c, aa(dw));
-            }
-        }
-        return col;
-    }
-)
-GLSL(
-    /* the bezel's cross-section, by radius / face radius: a lip sloping
-     * into the face, a rounded rim, a flat flange, a rounded outer edge */
-    float bezH(float t) {
-        if (t < 1.035) return 0.5 * (t - 1.0) / 0.035;
-        if (t < 1.13) { float u = (t - 1.035) / 0.095; return mix(0.5, 0.32, u) + 0.55 * sin(u * 3.14159); }
-        if (t < 1.195) return 0.32 - 0.6 * (t - 1.13);
-        float u = clamp((t - 1.195) / 0.025, 0.0, 1.0);
-        return 0.281 * cos(u * 1.5708);
-    }
-
-    vec3 screw(vec2 sp, float ang, vec3 under, float dpx) {
-        vec3 c = dome(sp * 0.85, uBrass * 0.95);
-        vec2 rs = vec2(cos(ang) * sp.x + sin(ang) * sp.y, -sin(ang) * sp.x + cos(ang) * sp.y);
-        float slot = smoothstep(0.17, 0.11, abs(rs.y)) * step(abs(rs.x), 0.9);
-        c = mix(c, c * 0.15, slot);
-        c += vec3(0.25, 0.18, 0.08) * smoothstep(0.17, 0.12, abs(rs.y - 0.08)) * step(0.0, rs.y) * slot;
-        c *= 1.0 - 0.4 * smoothstep(0.75, 1.0, length(sp));
-        return mix(under, c, aa(dpx));
-    }
-
-    vec3 face(int i, vec2 q, float d, float r) {
-        float t = d / r;
-        vec2 u = q / r;
-        bool clock = uG[i].w > 0.5;
-        /* white enamel, a little crazed and yellowed at the edges */
-        vec3 c = (clock ? vec3(0.93, 0.91, 0.86) : vec3(0.92, 0.89, 0.82)) * (1.03 - 0.1 * t * t);
-        float n = fbm(u * 2.5 + float(i) * 7.13 + uSeed);
-        c *= 0.95 + 0.07 * n;
-        c = mix(c, vec3(0.8, 0.69, 0.5), 0.3 * smoothstep(0.55, 0.8, fbm(u * 1.7 + 19.0 + float(i))) * smoothstep(0.4, 1.0, t));
-        c = mix(c, vec3(0.6, 0.5, 0.36), 0.2 * smoothstep(0.74, 0.8, fbm(u * 6.0 + 3.0 + float(i) * 2.0)));
-        float craze = abs(vnoise(u * 9.0 + float(i)) - 0.5);
-        c *= 1.0 - 0.08 * smoothstep(0.02, 0.0, craze) * smoothstep(0.5, 0.95, t);
-        c *= 0.985 + 0.03 * hash(floor(q));
-
-        vec3 ink = vec3(0.09, 0.075, 0.065);
-        float th = atan(q.x, -q.y);
-        float lw = max(0.0045 * r, 0.9);
-        if (!clock) {
-            vec4 A = uA[i];
-            float span = A.y - A.x;
-            float n2 = A.z * A.w;
-            float ro = 0.88 * r;
-            vec4 Z = uZ[i];
-            float band = max(0.86 * r - d, d - 0.94 * r);
-            for (int z = 0; z < 2; z++) {
-                vec2 zz = z == 0 ? Z.xy : Z.zw;
-                if (zz.x < 0.0) continue;
-                float za = A.x + span * zz.x, zb = A.x + span * zz.y;
-                float dz = max(band, max(za - th, th - zb) * d);
-                c = mix(c, z == 0 ? uRed : uAmber, 0.92 * aa(dz));
-            }
-            float da = max(abs(d - ro) - lw * 0.7, max(A.x - th, th - A.y) * d - lw);
-            float cov = aa(da);
-            float k = clamp(floor((th - A.x) / span * n2 + 0.5), 0.0, n2);
-            float tk = A.x + span * k / n2;
-            vec2 dir = vec2(sin(tk), -cos(tk));
-            vec2 perp = vec2(-dir.y, dir.x);
-            float along = dot(q, dir), across = dot(q, perp);
-            float km = mod(k, A.w);
-            bool major = km < 0.5;
-            bool mid = !major && mod(A.w, 2.0) < 0.5 && abs(km - A.w * 0.5) < 0.5;
-            float len = (major ? 0.13 : mid ? 0.095 : 0.065) * r;
-            float wid = major ? max(0.011 * r, 1.4) : max(0.005 * r, 0.85);
-            float dt = max(abs(across) - wid, abs(along - (ro - len * 0.5)) - len * 0.5);
-            cov = max(cov, aa(dt));
-            c = mix(c, ink, cov * 0.93);
-            vec2 pc = 0.8 * r * vec2(sin(A.x - 0.07), -cos(A.x - 0.07));
-            float pr = 0.022 * r;
-            c *= mix(1.0, 0.6, smoothstep(pr * 1.5, pr * 0.5, length(q - pc - SOF(0.721) * pr)));
-            float dpin = length(q - pc);
-            if (dpin < pr + 1.0) c = mix(c, dome((q - pc) / pr, uBrass), aa(dpin - pr));
-        } else {
-            /* a railway minute track and bold hour bars */
-            float dr = min(abs(d - 0.925 * r), abs(d - 0.855 * r)) - lw * 0.6;
-            float cov = aa(max(dr, d - 0.94 * r));
-            float k = floor(th / 0.10472 + 0.5);
-            float tk = k * 0.10472;
-            vec2 dir = vec2(sin(tk), -cos(tk));
-            vec2 perp = vec2(-dir.y, dir.x);
-            float along = dot(q, dir), across = dot(q, perp);
-            bool hour = mod(k + 60.0, 5.0) < 0.5;
-            float d1 = max(abs(across) - max(0.0045 * r, 0.85), abs(along - 0.89 * r) - 0.035 * r);
-            float d2 = max(abs(across) - 0.014 * r, abs(along - 0.89 * r) - 0.035 * r);
-            cov = max(cov, aa(hour ? d2 : d1));
-            c = mix(c, ink, cov * 0.93);
-        }
-        vec2 lo = normalize(L.xy);
-        float sh = smoothstep(0.93 * r, 1.04 * r, length(q - SO * 0.07 * r));
-        c *= 1.0 - 0.45 * sh;
-        c *= 1.0 - 0.25 * smoothstep(0.9, 1.0, t);
-        return paint(c, normalize(vec3(u * 0.06, 1.0)), 0.3);
-    }
-
-    vec3 bezel(int i, vec2 q, float d, float r) {
-        float t = d / r;
-        float e = 0.0015;
-        float slope = (bezH(t + e) - bezH(t - e)) / (2.0 * e) * 0.06;
-        vec2 dir = q / max(d, 1e-3);
-        vec3 n = normalize(vec3(dir * -slope, 1.0));
-        float br = 1.0 + 0.09 * (vnoise(vec2(d * 0.6, float(i) * 13.0)) - 0.5) + 0.06 * (vnoise(vec2(d * 2.7, 5.0 + float(i))) - 0.5);
-        vec3 base = mix(uBrass, uBrass * vec3(0.68, 0.6, 0.48), 0.55 * smoothstep(0.45, 0.8, fbm(q / r * 4.0 + float(i) * 3.0 + uSeed)));
-        vec3 c = metal(n, base) * br;
-        c *= 1.0 - 0.45 * exp(-pow((t - 1.035) / 0.005, 2.0)) - 0.3 * exp(-pow((t - 1.13) / 0.006, 2.0));
-        float sr = 0.03 * r;
-        for (int s = 0; s < 4; s++) {
-            float a = 0.7854 + 1.5708 * float(s);
-            vec2 sc = 1.165 * r * vec2(sin(a), -cos(a));
-            float ds = length(q - sc);
-            c *= mix(1.0, 0.55, smoothstep(sr * 1.4, sr * 0.6, length(q - sc - SOF(0.541) * sr)));
-            if (ds < sr + 1.0) c = screw((q - sc) / sr, hash(vec2(float(i), float(s)) + uSeed) * 3.14, c, ds - sr);
-        }
-        return c;
-    }
-
-    /* the clock's mahogany surround, turned and french-polished */
-    vec3 mahogany(vec2 q, float d, float r) {
-        float t = (d - 1.22 * r) / (0.3 * r);
-        float a = atan(q.y, q.x);
-        float grain = sin(a * 3.0 + d / r * 40.0 + 4.0 * fbm(vec2(a * 2.0, d / r * 3.0) + uSeed));
-        vec3 alb = mix(vec3(0.16, 0.05, 0.03), vec3(0.3, 0.1, 0.05), 0.5 + 0.5 * grain);
-        alb *= 0.85 + 0.25 * vnoise(vec2(a * 40.0, d * 0.4));
-        float prof = sin(t * 3.14159);
-        vec2 dir = q / max(d, 1e-3);
-        vec3 n = normalize(vec3(dir * -cos(t * 3.14159) * 0.9, 1.0));
-        return paint(alb, n, 0.55) * (0.8 + 0.2 * prof);
-    }
-
-    /* the water gauges' brass: two protector rods, the cocks top and bottom with their levers */
-    vec3 wgFrame(vec2 p, vec3 col, vec4 G, float side) {
-        float x = G.x, y0 = G.y, y1 = G.z, tr = G.w;
-        vec2 q = p - vec2(x, 0.0);
-        if (abs(q.x) > 6.0 * tr || p.y < y0 - 3.0 * tr || p.y > y1 + 3.0 * tr) return col;
-        /* shadow of the lot */
-        vec2 qs = q - SOF(0.721) * tr;
-        float dsh = min(sdBox(vec2(qs.x, p.y - 0.6 * tr - (y0 + y1) * 0.5), vec2(1.8 * tr, (y1 - y0) * 0.5 + 1.6 * tr), 0.5 * tr),
-                        sdSeg(vec2(qs.x, p.y - 0.6 * tr), vec2(side * 1.9 * tr, y0 - 0.85 * tr), vec2(side * 4.4 * tr, y0 - 0.85 * tr)) - 0.3 * tr);
-        col *= mix(1.0, 0.45, smoothstep(0.8 * tr, -0.2 * tr, dsh));
-        /* the dark slot behind the glass */
-        float dsl = sdBox(vec2(q.x, p.y - (y0 + y1) * 0.5), vec2(1.3 * tr, (y1 - y0) * 0.5), 0.0);
-        col = mix(col, vec3(0.02, 0.018, 0.016), aa(dsl));
-        /* protector rods */
-        float rx = abs(q.x) - 1.55 * tr;
-        if (abs(rx) < 0.3 * tr + 1.0 && p.y > y0 && p.y < y1) {
-            float v = clamp(rx / (0.25 * tr), -1.0, 1.0);
-            vec3 n = normalize(vec3(sign(q.x) * v, 0.0, sqrt(1.0 - v * v)));
-            col = mix(col, metal(n, uBrass * 0.9), aa((abs(rx) - 0.25 * tr)));
-        }
-        /* the two cocks */
-        for (int k = 0; k < 2; k++) {
-            float yc = k == 0 ? y0 - 0.85 * tr : y1 + 0.85 * tr;
-            vec2 c = vec2(x, yc);
-            /* lever: tapered bar outward, a ball on its end */
-            vec2 la = c + vec2(side * 1.5 * tr, 0.0), lb = c + vec2(side * 4.5 * tr, 0.0);
-            float dl = min(sdSeg(p, la, lb) - 0.2 * tr, length(p - lb) - 0.42 * tr);
-            if (dl < 1.0) {
-                float vy = clamp((p.y - yc) / (0.42 * tr), -1.0, 1.0);
-                vec3 n = length(p - lb) < 0.43 * tr ? normalize(vec3((p - lb) / (0.42 * tr), 0.6)) : normalize(vec3(0.0, vy, sqrt(1.0 - vy * vy) + 0.1));
-                col = mix(col, metal(n, vec3(0.32, 0.31, 0.3)), aa(dl));
-            }
-            float db = sdBox(p - c, vec2(1.9 * tr, 1.0 * tr), 0.4 * tr);
-            if (db < 1.0) {
-                vec2 lq = (p - c) / vec2(1.9 * tr, 1.0 * tr);
-                vec3 n = normalize(vec3(lq * vec2(0.5, 0.9) * smoothstep(0.4, 1.0, abs(lq)), 1.0));
-                vec3 c2 = metal(n, uBrass * (0.8 + 0.25 * vnoise(p * 0.3)));
-                /* the gland nut where the glass enters */
-                float gy = k == 0 ? y0 - 0.05 * tr : y1 + 0.05 * tr;
-                float dn = sdBox(p - vec2(x, gy), vec2(1.35 * tr, 0.32 * tr), 0.08 * tr);
-                c2 = mix(c2, metal(vec3(0.0, 0.0, 1.0), uBrass) * 0.9, aa(dn));
-                c2 *= 1.0 - 0.5 * aa(abs(dn) - 0.6);
-                col = mix(col, c2, aa(db));
-            }
-        }
-        return col;
-    }
-
-    /* the firehole: a heavy cast ring, and the butterfly doors left just apart */
-    vec3 firedoor(vec2 p, vec3 col) {
-        vec2 c = uFD.xy, hs = uFD.zw;
-        float u = uS;
-        vec2 q = p - c;
-        float ro = 0.24 * u;
-        float dOut = sdBox(q, hs + ro, 0.42 * u);
-        col *= mix(1.0, 0.4, smoothstep(0.25 * u, -0.05 * u, sdBox(q - SOF(0.117) * u, hs + ro, 0.42 * u)));
-        if (dOut > 1.0) return col;
-        float dIn = sdBox(q, hs, 0.3 * u);
-        vec2 e = vec2(1.0, 0.0);
-        vec3 c2;
-        if (dIn > 0.0) {
-            float t = clamp(dIn / ro, 0.0, 1.0);
-            vec2 g = normalize(vec2(sdBox(q + e.xy, hs, 0.3 * u) - sdBox(q - e.xy, hs, 0.3 * u),
-                                    sdBox(q + e.yx, hs, 0.3 * u) - sdBox(q - e.yx, hs, 0.3 * u)) + 1e-6);
-            vec3 n = normalize(vec3(g * -cos(t * 3.14159) * 1.1, 1.0));
-            vec3 alb = vec3(0.075, 0.07, 0.066) * (0.75 + 0.5 * fbm(q / u * 5.0 + 3.0));
-            alb = mix(alb, vec3(0.16, 0.08, 0.05), 0.4 * smoothstep(0.55, 0.8, fbm(q / u * 3.0 + 13.0)));
-            /* the bottom lip polished by the shovel */
-            float lip = smoothstep(0.3 * hs.y, hs.y, q.y) * smoothstep(hs.x * 0.9, hs.x * 0.3, abs(q.x)) * smoothstep(0.7, 0.2, t);
-            c2 = mix(paint(alb, n, 0.25), metal(n, vec3(0.4, 0.38, 0.36)), lip * 0.85);
-            /* studs round the ring */
-            float a = atan(q.y / (hs.y + 0.5 * ro), q.x / (hs.x + 0.5 * ro));
-            float st = 6.28318 / 14.0;
-            float ka = (floor(a / st) + 0.5) * st;
-            vec2 sc = vec2(cos(ka), sin(ka));
-            sc = sc / max(abs(sc.x) / (hs.x + 0.5 * ro), abs(sc.y) / (hs.y + 0.5 * ro)) * 0.97;
-            c2 = rivetP(q, sc, 0.06 * u, c2, vec3(0.12, 0.11, 0.1), 0.4);
-        } else {
-            float gap = 0.022 * u;
-            float side = q.x < 0.0 ? -1.0 : 1.0;
-            vec2 dc = vec2(abs(q.x) - hs.x * 0.5, q.y);
-            vec3 n = normalize(vec3(side * dc.x / hs.x * 0.35, dc.y / hs.y * 0.3, 1.0));
-            /* a raised rim round each leaf */
-            float leaf = max(sdBox(dc, vec2(hs.x * 0.5 - gap * 0.5, hs.y), 0.25 * u), dIn);
-            float rim = smoothstep(-0.09 * u, -0.06 * u, leaf);
-            vec2 lg = normalize(vec2(side * dc.x, dc.y * 1.6) + 1e-4);
-            n = normalize(n + vec3(side * lg.x, lg.y, 0.0) * 0.5 * rim * (1.0 - smoothstep(-0.03 * u, 0.0, leaf)));
-            vec3 alb = vec3(0.12, 0.11, 0.1) * (0.75 + 0.5 * fbm(q / u * 4.0 + 7.0));
-            /* heat-tempered and sooted, worst near the gap */
-            alb = mix(alb, vec3(0.16, 0.09, 0.07), 0.5 * smoothstep(0.6, 0.0, abs(q.x) / hs.x));
-            alb = mix(alb, vec3(0.08, 0.08, 0.12), 0.25 * smoothstep(0.45, 0.75, fbm(q / u * 2.5 + 5.0)));
-            c2 = paint(alb, n, 0.3);
-            /* the air holes, dark until the fire lights them */
-            float dsl = fhSlots(q, hs, u);
-            c2 = mix(c2, c2 * 1.5, aa(abs(dsl - 2.0) - 1.0));
-            c2 = mix(c2, vec3(0.015, 0.005, 0.0), aa(dsl));
-            /* hinge knuckles on the outer edges */
-            for (int k = 0; k < 2; k++) {
-                vec2 hc = vec2(side * (hs.x - 0.05 * u), (k == 0 ? -0.55 : 0.55) * hs.y);
-                float dh = sdBox(q - hc, vec2(0.06 * u, 0.13 * u), 0.05 * u);
-                if (dh < 1.0) {
-                    float v = clamp((q.x - hc.x) / (0.06 * u), -1.0, 1.0);
-                    c2 = mix(c2, metal(normalize(vec3(v, 0.0, sqrt(1.0 - v * v))), vec3(0.22, 0.21, 0.2)), aa(dh));
-                }
-            }
-            /* the handles: worn bright by the crew */
-            vec2 hc = vec2(side * (gap + 0.17 * u), -0.05 * hs.y);
-            float dh = sdBox(q - hc, vec2(0.035 * u, 0.24 * u), 0.03 * u);
-            c2 *= mix(1.0, 0.45, smoothstep(0.05 * u, -0.01 * u, sdBox(q - hc - SOF(0.0721) * u, vec2(0.035 * u, 0.24 * u), 0.03 * u)));
-            if (dh < 1.0) {
-                float v = clamp((q.x - hc.x) / (0.035 * u), -1.0, 1.0);
-                c2 = mix(c2, metal(normalize(vec3(v, 0.0, sqrt(1.0 - v * v))), vec3(0.55, 0.52, 0.48)), aa(dh));
-            }
-            /* the gap between the leaves and round them: dark (the fire is added each frame) */
-            float dark = max(aa(abs(q.x) - gap), aa(-(dIn + 0.03 * u)));
-            c2 = mix(c2, vec3(0.02, 0.006, 0.0), dark);
-        }
-        return mix(col, c2, aa(dOut));
-    }
-
-    /* the builder's plate: brass, beaded, the ground painted red, the drums sunk in */
-    vec3 plaque(vec2 p, vec3 col) {
-        vec4 P = uPq;
-        float h = P.w - P.y;
-        float cr = 0.12 * h;
-        float dq = sdRect(p, P, cr);
-        col *= mix(1.0, 0.4, smoothstep(0.08 * h, -0.02 * h, sdRect(p - SOF(0.043) * h, P, cr)));
-        if (dq > 1.0) return col;
-        vec2 e = vec2(1.0, 0.0);
-        vec2 g = normalize(vec2(sdRect(p + e.xy, P, cr) - sdRect(p - e.xy, P, cr), sdRect(p + e.yx, P, cr) - sdRect(p - e.yx, P, cr)) + 1e-6);
-        float br = 1.0 + 0.1 * (vnoise(vec2(p.x * 0.01, p.y * 1.7)) - 0.5);
-        vec3 base = mix(uBrass, uBrass * vec3(0.72, 0.62, 0.5), 0.4 * smoothstep(0.45, 0.8, fbm(p / h * 1.3 + 5.0 + uSeed)));
-        /* the ground */
-        vec3 red = uRed * vec3(0.62, 0.5, 0.5) * (0.85 + 0.25 * fbm(p / h * 6.0 + 11.0));
-        red *= 0.92 + 0.12 * hash(floor(p / 1.5));
-        vec3 c = paint(red, vec3(0.0, 0.0, 1.0), 0.15);
-        /* the beaded border */
-        float bw = 0.085 * h;
-        float v = (-dq - bw * 0.5) / (bw * 0.5);
-        if (v < 1.2) {
-            float vc = clamp(v, -1.0, 1.0);
-            vec3 n = normalize(vec3(g * vc * 1.2, sqrt(1.0 - vc * vc) + 0.05));
-            vec3 b = metal(n, base) * br;
-            c *= 1.0 - 0.6 * aa((v - 1.0) * bw * 0.5 - 2.0) * step(1.0, v);
-            c = mix(c, b, aa((v - 1.0) * bw * 0.5));
-        }
-        /* the raised rule */
-        float dr = max(abs(p.y - uRule.y) - uRule.w, max(uRule.x - p.x, p.x - uRule.z));
-        c = mix(c, c * 0.4, aa(max(abs(p.y - uRule.y - uRule.w - 1.0) - 1.0, max(uRule.x - p.x, p.x - uRule.z))));
-        c = mix(c, metal(normalize(vec3(0.0, clamp((p.y - uRule.y) / uRule.w, -1.0, 1.0) * 0.8, 1.0)), base), aa(dr));
-        /* the windows, sunk in with a brass bevel */
-        for (int w = 0; w < 2; w++) {
-            float rr = 0.12 * (uWin[w].w - uWin[w].y);
-            float dw = sdRect(p, uWin[w], rr);
-            float fw = 0.12 * (uWin[w].w - uWin[w].y);
-            if (dw < fw) {
-                vec2 gw = normalize(vec2(sdRect(p + e.xy, uWin[w], rr) - sdRect(p - e.xy, uWin[w], rr), sdRect(p + e.yx, uWin[w], rr) - sdRect(p - e.yx, uWin[w], rr)) + 1e-6);
-                vec3 fn = normalize(vec3(-gw * 0.9, 1.0));
-                c = mix(c, metal(fn, base * 0.9) * br, aa(-dw + fw - 0.5));
-                c = mix(c, vec3(0.03, 0.022, 0.016), aa(dw));
-            }
-        }
-        /* a bolt in each corner */
-        float sr = 0.05 * h;
-        for (int s = 0; s < 4; s++) {
-            vec2 sc = vec2(s % 2 == 0 ? P.x + 0.042 * h + bw * 0.5 : P.z - 0.042 * h - bw * 0.5, s < 2 ? P.y + 0.042 * h + bw * 0.5 : P.w - 0.042 * h - bw * 0.5);
-            float ds = length(p - sc);
-            c *= mix(1.0, 0.55, smoothstep(sr * 1.4, sr * 0.6, length(p - sc - SOF(0.541) * sr)));
-            if (ds < sr + 1.0) c = mix(c, dome((p - sc) / sr, base * 0.9), aa(ds - sr));
-        }
-        return mix(col, c, aa(dq));
-    }
-
-    /* little brass tags, riveted on */
-    vec3 tags(vec2 p, vec3 col) {
-        for (int i = 0; i < 2; i++) {
-            vec4 T = uTag[i];
-            float h = T.w - T.y;
-            float d = sdRect(p, T, 0.15 * h);
-            col *= mix(1.0, 0.5, smoothstep(0.2 * h, -0.05 * h, sdRect(p - SOF(0.117) * h, T, 0.15 * h)));
-            if (d > 1.0) continue;
-            vec2 e = vec2(1.0, 0.0);
-            vec2 g = normalize(vec2(sdRect(p + e.xy, T, 0.15 * h) - sdRect(p - e.xy, T, 0.15 * h), sdRect(p + e.yx, T, 0.15 * h) - sdRect(p - e.yx, T, 0.15 * h)) + 1e-6);
-            vec3 n = normalize(vec3(g * 0.8 * smoothstep(-0.12 * h, 0.0, d), 1.0));
-            vec3 c = metal(n, uBrass * (0.75 + 0.3 * fbm(p / h * 2.0 + float(i) * 9.0)));
-            for (int s = 0; s < 2; s++) {
-                vec2 rc = vec2(s == 0 ? T.x + 0.28 * h : T.z - 0.28 * h, (T.y + T.w) * 0.5);
-                float dr = length(p - rc) - 0.11 * h;
-                if (dr < 1.0) c = mix(c, dome((p - rc) / (0.11 * h), uBrass * 0.8), aa(dr));
-            }
-            col = mix(col, c, aa(d));
-        }
-        return col;
-    }
-
-    /* the governor's mounting: the throttle valve on the steam pipe, the
-     * red gearbox on it, the spindle's frame */
-    vec3 govBase(vec2 p, vec3 col) {
-        float gx = uGov.x, py = uGov.y, L = uGov.z, gy = uGov.w;
-        float vy = uGovB.x, vr = uGovB.y, gr = uGovB.z;
-        if (abs(p.x - gx) > 1.4 * L || p.y < py - 0.6 * L || p.y > vy + 1.4 * vr) return col;
-        vec2 so = SOF(0.108) * uS;
-        /* the valve body: a brass globe with a neck up to the gearbox */
-        float dv = sdBox(p - vec2(gx, vy), vec2(1.5 * vr, 0.95 * vr), 0.6 * vr);
-        float dn = sdBox(p - vec2(gx, (gy + vy) * 0.5), vec2(0.32 * vr, (vy - gy) * 0.5), 0.0);
-        col *= mix(1.0, 0.45, smoothstep(0.3 * vr, -0.1 * vr, min(sdBox(p - so - vec2(gx, vy), vec2(1.5 * vr, 0.95 * vr), 0.6 * vr), sdBox(p - so - vec2(gx, (gy + vy) * 0.5), vec2(0.32 * vr, (vy - gy) * 0.5), 0.0))));
-        if (dn < 1.0) {
-            float v = clamp((p.x - gx) / (0.32 * vr), -1.0, 1.0);
-            col = mix(col, metal(normalize(vec3(v, 0.0, sqrt(1.0 - v * v))), uBrass * 0.85), aa(dn));
-        }
-        if (dv < 1.0) {
-            vec2 lq = (p - vec2(gx, vy)) / vec2(1.5 * vr, 0.95 * vr);
-            vec3 n = normalize(vec3(lq.x * smoothstep(0.5, 1.0, abs(lq.x)) * 1.2, lq.y * 0.9, 1.0));
-            vec3 c = metal(n, uBrass * (0.78 + 0.25 * fbm(lq * 2.0 + 3.0)));
-            /* the bonnet flange across its top, the joints to the pipe */
-            c *= 1.0 - 0.45 * aa(abs(abs(lq.x) - 0.72) * 1.5 * vr - 1.0);
-            col = mix(col, c, aa(dv));
-        }
-        /* the gearbox: cast iron, oxide red */
-        vec2 gq = p - vec2(gx, gy);
-        float dg = sdBox(gq, vec2(1.3 * gr, 1.0 * gr), 0.3 * gr);
-        col *= mix(1.0, 0.45, smoothstep(0.3 * gr, -0.1 * gr, sdBox(gq - so, vec2(1.3 * gr, 1.0 * gr), 0.3 * gr)));
-        if (dg < 1.0) {
-            vec2 lq = gq / vec2(1.3 * gr, 1.0 * gr);
-            vec3 n = normalize(vec3(lq * smoothstep(0.55, 1.0, abs(lq)) * 1.2, 1.0));
-            vec3 alb = vec3(0.3, 0.085, 0.05) * (0.7 + 0.5 * fbm(gq / gr * 2.0 + 21.0));
-            col = mix(col, paint(alb, n, 0.3), aa(dg));
-            /* the gland on top where the spindle comes out */
-            float dgl = sdBox(gq + vec2(0.0, 1.05 * gr), vec2(0.28 * gr, 0.18 * gr), 0.05 * gr);
-            if (dgl < 1.0) col = mix(col, metal(normalize(vec3(clamp(gq.x / (0.28 * gr), -1.0, 1.0), 0.0, 0.8)), uBrass), aa(dgl));
-        }
-        return col;
-    }
-
-    /* the safety valve: a brass pop valve on its branch */
-    vec3 safety(vec2 p, vec3 col) {
-        float x = uSV.x, y = uSV.y, s = uSV.z;
-        vec2 q = p - vec2(x, y);
-        if (abs(q.x) > 0.8 * s || q.y < -1.4 * s || q.y > 0.4 * s) return col;
-        vec2 so = SOF(0.0943) * uS;
-        float d1 = sdBox(q - vec2(0.0, -0.06 * s), vec2(0.36 * s, 0.07 * s), 0.02 * s);
-        float d2 = sdBox(q - vec2(0.0, -0.45 * s), vec2(0.22 * s, 0.34 * s), 0.05 * s);
-        float d3 = sdBox(q - vec2(0.0, -0.86 * s), vec2(0.3 * s, 0.08 * s), 0.03 * s);
-        float d4 = sdBox(q - vec2(0.0, -1.0 * s), vec2(0.15 * s, 0.08 * s), 0.04 * s);
-        float dall = min(min(d1, d2), min(d3, d4));
-        vec2 qs = q - so;
-        float dsh = min(min(sdBox(qs - vec2(0.0, -0.06 * s), vec2(0.36 * s, 0.07 * s), 0.02 * s), sdBox(qs - vec2(0.0, -0.45 * s), vec2(0.22 * s, 0.34 * s), 0.05 * s)),
-                        min(sdBox(qs - vec2(0.0, -0.86 * s), vec2(0.3 * s, 0.08 * s), 0.03 * s), sdBox(qs - vec2(0.0, -1.0 * s), vec2(0.15 * s, 0.08 * s), 0.04 * s)));
-        col *= mix(1.0, 0.45, smoothstep(0.08 * s, -0.03 * s, dsh));
-        if (dall > 1.0) return col;
-        float hw = d1 == dall ? 0.36 : d2 == dall ? 0.22 : d3 == dall ? 0.3 : 0.15;
-        float v = clamp(q.x / (hw * s), -1.0, 1.0);
-        vec3 n = normalize(vec3(v, 0.0, sqrt(1.0 - v * v)));
-        vec3 base = uBrass * (0.78 + 0.3 * fbm(q / s * 3.0 + 4.0));
-        vec3 c = metal(n, base);
-        /* the joints between the parts */
-        c *= 1.0 - 0.5 * aa(min(min(abs(d1), abs(d2)), min(abs(d3), abs(d4))) - 0.7) * step(-2.0, -dall);
-        return mix(col, c, aa(dall));
-    }
-
-    /* the paraffin lamp: a tin reflector, a brass font, a glass chimney */
-    vec3 lampBody(vec2 p, vec3 col) {
-        float s = uLamp.z, side = uLamp.w;
-        vec2 q = p - uLamp.xy;
-        if (abs(q.x) > 1.6 * s || q.y < -1.3 * s || q.y > 1.0 * s) return col;
-        vec2 so = SOF(0.0943) * uS;
-        /* the bracket from the wall */
-        float db = min(sdBox(q - vec2(side * 0.55 * s, 0.62 * s), vec2(0.55 * s, 0.035 * s), 0.01 * s),
-                       sdBox(q - vec2(side * 1.1 * s, 0.45 * s), vec2(0.06 * s, 0.32 * s), 0.03 * s));
-        float dbs = min(sdBox(q - so - vec2(side * 0.55 * s, 0.62 * s), vec2(0.55 * s, 0.035 * s), 0.01 * s),
-                        sdBox(q - so - vec2(side * 1.1 * s, 0.45 * s), vec2(0.06 * s, 0.32 * s), 0.03 * s));
-        col *= mix(1.0, 0.5, smoothstep(0.05 * s, -0.02 * s, dbs));
-        if (db < 1.0) col = mix(col, paint(vec3(0.05), normalize(vec3(0.0, clamp((q.y - 0.62 * s) / (0.035 * s), -1.0, 1.0), 1.0)), 0.4), aa(db));
-        /* reflector: a dished tin disc behind */
-        vec2 rq = q - vec2(0.0, -0.15 * s);
-        float dr = length(rq) - 0.6 * s;
-        col *= mix(1.0, 0.5, smoothstep(0.1 * s, -0.05 * s, length(rq - so) - 0.6 * s));
-        if (dr < 1.0) {
-            vec2 sp = rq / (0.6 * s);
-            vec3 n = normalize(vec3(-sp * 0.5, 1.0));
-            vec3 c = metal(n, vec3(0.5, 0.48, 0.44) * (0.7 + 0.4 * fbm(sp * 3.0 + 2.0)));
-            c *= 1.0 - 0.5 * smoothstep(0.85, 1.0, length(sp));
-            col = mix(col, c, aa(dr));
-        }
-        /* the chimney: glass, bulging round the flame */
-        float cy = q.y + 0.2 * s;
-        float hwc = 0.12 * s + 0.08 * s * exp(-pow(cy / (0.25 * s), 2.0));
-        float dc = max(abs(q.x) - hwc, abs(q.y + 0.25 * s) - 0.5 * s);
-        if (dc < 1.0) {
-            float v = q.x / hwc;
-            vec3 gc = col * vec3(0.85, 0.82, 0.75) + vec3(0.06, 0.055, 0.05);
-            gc += vec3(1.0, 0.95, 0.85) * 0.35 * smoothstep(0.25, 0.0, abs(v + 0.55)) + vec3(1.0, 0.95, 0.85) * 0.15 * smoothstep(0.12, 0.0, abs(v - 0.7));
-            gc *= 1.0 - 0.4 * smoothstep(0.75, 1.0, abs(v));
-            col = mix(col, gc, aa(dc));
-        }
-        /* the cowl on top */
-        float dw = sdBox(q - vec2(0.0, -0.82 * s), vec2(0.17 * s, 0.08 * s), 0.03 * s);
-        float dw2 = sdBox(q - vec2(0.0, -0.95 * s), vec2(0.1 * s, 0.06 * s), 0.04 * s);
-        if (min(dw, dw2) < 1.0) col = mix(col, metal(normalize(vec3(clamp(q.x / (0.17 * s), -1.0, 1.0), 0.0, 0.9)), vec3(0.2, 0.19, 0.18)), aa(min(dw, dw2)));
-        /* the font and burner */
-        float df = length((q - vec2(0.0, 0.5 * s)) / vec2(0.36, 0.2)) - s;
-        float dbr = sdBox(q - vec2(0.0, 0.3 * s), vec2(0.15 * s, 0.06 * s), 0.02 * s);
-        col *= mix(1.0, 0.5, smoothstep(0.08 * s, -0.02 * s, length((q - so - vec2(0.0, 0.5 * s)) / vec2(0.36, 0.2)) - s));
-        if (dbr < 1.0) col = mix(col, metal(normalize(vec3(clamp(q.x / (0.15 * s), -1.0, 1.0), 0.0, 0.8)), uBrass), aa(dbr));
-        if (df < 1.0) {
-            vec2 sp = (q - vec2(0.0, 0.5 * s)) / vec2(0.36 * s, 0.2 * s);
-            col = mix(col, dome(sp * 0.95, uBrass * (0.85 + 0.2 * vnoise(sp * 4.0))), aa(df * 0.25));
-        }
-        return col;
-    }
-
-    void main() {
-        vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
-        gp = p;
-        /* shadows fall down and right from the roof light, and away from the fire */
-        SO = uPass < 0.5 ? vec2(0.55, 0.83) : normalize(p - uFireL.xy + vec2(0.0, 0.01));
-        vec3 col = wall(p);
-        col = boiler(p, col);
-        col = floorB(p, col);
-        col = lag(p, col);
-        col = pipes(p, col);
-        col = flanges(p, col);
-        col = wheels(p, col);
-        col = wgFrame(p, col, uWG[0], -1.0);
-        col = wgFrame(p, col, uWG[1], 1.0);
-        col = tags(p, col);
-        col = firedoor(p, col);
-        col = plaque(p, col);
-        col = govBase(p, col);
-        col = safety(p, col);
-        col = lampBody(p, col);
-        /* the instruments' shadows, then the instruments */
-        for (int i = 0; i < 4; i++) {
-            float rb = (uG[i].w > 0.5 ? 1.5 : 1.22) * uG[i].z;
-            float d = length(p - uG[i].xy - SOF(0.061) * rb) - rb;
-            col *= mix(1.0, 0.35, smoothstep(0.12 * rb, -0.03 * rb, d));
-        }
-        for (int i = 0; i < 4; i++) {
-            vec2 q = p - uG[i].xy;
-            float d = length(q), r = uG[i].z;
-            float ro = uG[i].w > 0.5 ? 1.5 : 1.22;
-            if (d > ro * r + 1.0) continue;
-            vec3 b = d > 1.22 * r ? mahogany(q, d, r) : bezel(i, q, d, r);
-            if (d < r + 1.0) b = mix(b, face(i, q, d, r), aa(d - r));
-            col *= 1.0 - 0.6 * aa(abs(d - ro * r - 0.002 * r) - 1.0);
-            col = mix(col, b, aa(d - ro * r));
-        }
-        /* the mains jewel's socket */
-        if (uML.z > 0.0) {
-            vec2 q = p - uML.xy;
-            float lr = uML.z, d = length(q);
-            col *= mix(1.0, 0.55, smoothstep(lr * 1.9, lr * 1.3, length(q - SOF(0.361) * lr)));
-            float u = clamp((d - lr) / (0.6 * lr), 0.0, 1.0);
-            vec2 dir = q / max(d, 1e-3);
-            col = mix(col, metal(normalize(vec3(dir * cos(u * 3.14159) * 0.9, 1.0)), uBrass), aa(d - 1.6 * lr));
-        }
-        o = vec4(col, 1.0);
-    });
-
-static const char *VS_TEXT = "#version 330 core\n" GLSL(
-    layout(location = 0) in vec2 aPos;
-    layout(location = 1) in vec2 aUV;
-    layout(location = 2) in vec4 aCol;
-    uniform vec2 uRes;
-    out vec2 vUV;
-    out vec4 vCol;
-    void main() {
-        vUV = aUV; vCol = aCol;
-        gl_Position = vec4(aPos.x / uRes.x * 2.0 - 1.0, 1.0 - aPos.y / uRes.y * 2.0, 0.0, 1.0);
-    });
-/* the print, in the fire's pass: what the fire would light of it */
-static const char *FS_TEXT = "#version 330 core\n" GLSL(
-    uniform sampler2D uAtlas;
-    uniform float uPass;
-    uniform vec4 uFireL;
-    uniform vec2 uRes;
-    in vec2 vUV;
-    in vec4 vCol;
-    out vec4 o;
-    void main() {
-        vec3 c = vCol.rgb;
-        if (uPass > 0.5) {
-            vec3 d = uFireL.xyz - vec3(gl_FragCoord.x, uRes.y - gl_FragCoord.y, 0.0);
-            c *= 0.45 / (1.0 + dot(d, d) / (uFireL.w * uFireL.w));
-        }
-        o = vec4(c, vCol.a * texelFetch(uAtlas, ivec2(vUV), 0).r);
-    });
-
-/* every frame: the static scene, then everything that moves */
-static const char *FS_DYN = "#version 330 core\n" GLSL(
-    uniform sampler2D uStatic, uAtlas, uStaticF;
-    uniform vec2 uRes;
-    uniform float uS, uT;
-    uniform vec4 uG[4];
-    uniform vec4 uN[4];
-    uniform vec4 uWin[2];
-    uniform vec4 uDp[17];
-    uniform vec4 uDr[17];
-    uniform vec4 uDig[10];
-    uniform vec4 uBH;
-    uniform vec4 uWG[2];
-    uniform vec2 uWL;            /* water level in each glass, 0..1 */
-    uniform vec4 uFD;
-    uniform vec4 uFire;          /* intensity, flicker, lamp flicker */
-    uniform vec4 uGov, uGovB, uGovS;   /* governor; its state: swing, phase, gear angle */
-    uniform vec4 uLamp;
-    uniform vec4 uML;            /* mains jewel x y r on */
-    uniform vec4 uSV;
-    uniform vec4 uPuff[3];       /* age, duration, strength, seed */
-    uniform vec4 uLeak[3];       /* x y size drift */
-    uniform vec3 uLeakA;
-    uniform vec4 uDrip[2];       /* x y radius stretch */
-    uniform vec3 uBrass, uRed, uSage;
-    out vec4 o;
-)
-COMMON
-GLSL(
-    float fbm4(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 4; i++) { s += a * vnoise(p); p = p * 2.07 + vec2(5.3, 1.9); a *= 0.5; } return s / 0.9375; }
-
-    float sdUC(vec2 p, float r1, float r2, float h) {
-        p.x = abs(p.x);
-        float b = (r1 - r2) / h, a = sqrt(1.0 - b * b);
-        float k = dot(p, vec2(-b, a));
-        if (k < 0.0) return length(p) - r1;
-        if (k > a * h) return length(p - vec2(0.0, h)) - r2;
-        return dot(p, vec2(a, b)) - r1;
-    }
-    float ndot(vec2 a, vec2 b) { return a.x * b.x - a.y * b.y; }
-    float sdRhombus(vec2 p, vec2 b) {
-        p = abs(p);
-        float h = clamp(ndot(b - 2.0 * p, b) / dot(b, b), -1.0, 1.0);
-        float d = length(p - 0.5 * b * vec2(1.0 - h, 1.0 + h));
-        return d * sign(p.x * b.y + p.y * b.x - b.x * b.y);
-    }
-    vec2 hframe(vec2 q, float a) {
-        vec2 dir = vec2(sin(a), -cos(a));
-        return vec2(dot(q, vec2(-dir.y, dir.x)), dot(q, dir));
-    }
-    /* a pressure-gauge pointer: a slim blade with a ring counterweight */
-    float needle(vec2 q, float a, float r) {
-        vec2 h = hframe(q, a);
-        float d = sdUC(h + vec2(0.0, 0.18 * r), 0.018 * r, 0.004 * r, 1.06 * r);
-        float ring = abs(length(h + vec2(0.0, 0.17 * r)) - 0.045 * r) - 0.016 * r;
-        return min(d, ring);
-    }
-    /* railway clock hands: plain spades */
-    float hourHand(vec2 q, float a, float r) {
-        vec2 h = hframe(q, a);
-        float d = sdUC(h + vec2(0.0, 0.12 * r), 0.028 * r, 0.012 * r, 0.5 * r);
-        return min(d, sdRhombus(h - vec2(0.0, 0.46 * r), vec2(0.055 * r, 0.11 * r)));
-    }
-    float minuteHand(vec2 q, float a, float r) {
-        vec2 h = hframe(q, a);
-        float d = sdUC(h + vec2(0.0, 0.14 * r), 0.022 * r, 0.008 * r, 0.82 * r);
-        return min(d, sdRhombus(h - vec2(0.0, 0.72 * r), vec2(0.036 * r, 0.12 * r)));
-    }
-    float secondHand(vec2 q, float a, float r) {
-        vec2 h = hframe(q, a);
-        float d = sdUC(h + vec2(0.0, 0.25 * r), 0.008 * r, 0.0035 * r, 1.12 * r);
-        return min(d, length(h + vec2(0.0, 0.2 * r)) - 0.032 * r);
-    }
-    vec3 steelHand(vec3 base, float d, float r) { return base * (1.0 + 1.6 * smoothstep(-0.012 * r, 0.0, d)); }
-
-    vec3 glass(vec2 q, float r, vec3 col) {
-        vec2 u = q / r;
-        float rr = length(u);
-        col *= 1.0 - 0.12 * smoothstep(0.75, 1.0, rr);
-        vec2 un = u / max(rr, 1e-3);
-        float c1 = length(u - vec2(-0.03, -0.04)), c2 = length(u - vec2(0.09, 0.12));
-        float cres = smoothstep(0.98, 0.92, c1) * smoothstep(0.84, 0.97, c2);
-        cres *= smoothstep(-0.1, 0.9, dot(un, vec2(-0.6, -0.8)));
-        col += vec3(1.0, 0.93, 0.8) * cres * 0.2;
-        float sheen = smoothstep(0.3, -0.7, dot(u, vec2(0.6, 0.8))) * smoothstep(1.0, 0.6, rr);
-        col += vec3(1.0, 0.9, 0.75) * sheen * 0.045;
-        vec2 sp = u - vec2(-0.4, -0.5);
-        col += vec3(1.0, 0.95, 0.85) * exp(-dot(sp, sp * vec2(60.0, 120.0))) * 0.35;
-        float glint = smoothstep(0.92, 0.975, rr) * smoothstep(1.0, 0.98, rr) * smoothstep(0.2, 0.95, dot(un, vec2(0.6, 0.8)));
-        col += vec3(1.0, 0.75, 0.5) * glint * 0.2;
-        return col;
-    }
-
-    vec3 instrument(int i, vec2 q, float r, vec3 col) {
-        float bl = max(0.012 * r, 1.0);
-        vec2 so = vec2(0.45, 0.65);
-        vec3 dark = vec3(0.04, 0.038, 0.04);
-        if (uG[i].w < 0.5) {
-            float a = uN[i].x;
-            col *= 1.0 - 0.38 * smoothstep(bl, -bl, needle(q - so * 0.035 * r, a, r));
-            float d = needle(q, a, r);
-            col = mix(col, steelHand(dark, d, r), aa(d));
-        } else {
-            vec4 n = uN[i];
-            float s1 = min(hourHand(q - so * 0.025 * r, n.x, r), minuteHand(q - so * 0.035 * r, n.y, r));
-            float s2 = secondHand(q - so * 0.05 * r, n.z, r);
-            col *= 1.0 - 0.36 * smoothstep(bl, -bl, s1);
-            col *= 1.0 - 0.3 * smoothstep(bl, -bl, s2);
-            float dh = hourHand(q, n.x, r);
-            col = mix(col, steelHand(dark, dh, r), aa(dh));
-            float dm = minuteHand(q, n.y, r);
-            col = mix(col, steelHand(dark, dm, r), aa(dm));
-            float dsec = secondHand(q, n.z, r);
-            col = mix(col, uRed * (1.0 + 0.5 * smoothstep(-0.006 * r, 0.0, dsec)), aa(dsec));
-        }
-        float hr = 0.055 * r, dh = length(q);
-        col *= 1.0 - 0.35 * smoothstep(hr * 1.4, hr * 0.8, length(q - so * 0.3 * hr));
-        if (dh < hr + 1.0) col = mix(col, dome(q / hr, uG[i].w > 0.5 ? vec3(0.12) : uBrass), aa(dh - hr));
-        return glass(q, r, col);
-    }
-
-    vec3 drum(int j, vec2 p, vec3 col) {
-        vec4 R = uDp[j];
-        vec2 c = (R.xy + R.zw) * 0.5;
-        vec2 lc = p - c;
-        float hh = (R.w - R.y) * 0.5;
-        float v = lc.y / hh;
-        float phi = asin(clamp(v * 0.42, -1.0, 1.0));
-        float pitch = hh / 0.42 * 0.62832;
-        vec4 D = uDr[j];
-        float s = D.z + phi / 0.62832;
-        float k = floor(s + 0.5);
-        float rad = abs(D.w);
-        float dg = k <= 0.0 ? mod(D.x + k + rad * 4.0, rad) : mod(D.y + k - 1.0, rad);
-        float ly = (s - k) * pitch;
-        vec4 g = uDig[int(dg + 0.5)];
-        vec2 uv = g.xy + g.zw * 0.5 + vec2(lc.x, ly);
-        float ink = 0.0;
-        if (abs(lc.x) < g.z * 0.5 + 1.0 && abs(ly) < g.w * 0.5 + 1.0)
-            ink = texture(uAtlas, uv / vec2(textureSize(uAtlas, 0))).r;
-        bool ivory = D.w < 0.0;
-        vec3 bg = ivory ? vec3(0.86, 0.8, 0.7) : vec3(0.06, 0.05, 0.045);
-        vec3 fg = ivory ? vec3(0.5, 0.12, 0.08) : vec3(0.9, 0.85, 0.76);
-        vec3 dc = mix(bg, fg, ink);
-        float cphi = cos(phi);
-        dc *= 0.3 + 0.75 * pow(smoothstep(0.86, 1.0, cphi), 1.2) + 0.08 * smoothstep(0.0, -0.8, v);
-        float hw = (R.z - R.x) * 0.5;
-        dc *= 1.0 - 0.5 * smoothstep(hw - 2.5, hw, abs(lc.x));
-        return dc;
-    }
-
-    /* the fire: a flickering blackbody ramp, moving up */
-    vec3 fireCol(vec2 p, float I) {
-        vec2 f = (p - uFD.xy) / uS;
-        float n = fbm3(vec2(f.x * 3.0, f.y * 2.2 + uT * 1.7)) * 0.65 + 0.35 * vnoise(vec2(f.x * 7.0 - uT * 0.4, f.y * 6.0 + uT * 3.1));
-        float h = I * (0.25 + 1.15 * smoothstep(0.2, 0.8, n)) * (0.85 + 0.3 * uFire.y);
-        vec3 c = mix(vec3(0.25, 0.02, 0.0), vec3(1.0, 0.28, 0.03), smoothstep(0.1, 0.5, h));
-        c = mix(c, vec3(1.0, 0.62, 0.18), smoothstep(0.45, 0.85, h));
-        c = mix(c, vec3(1.0, 0.9, 0.65), smoothstep(0.85, 1.25, h));
-        return c;
-    }
-
-    vec3 firehole(vec2 p, vec3 col) {
-        vec2 q = p - uFD.xy, hs = uFD.zw;
-        float u = uS, I = uFire.x;
-        float dIn = sdBox(q, hs, 0.3 * u);
-        if (dIn < 0.5) {
-            float gap = 0.022 * u;
-            float mg = aa(abs(q.x) - gap) * (0.75 + 0.25 * smoothstep(-hs.y, hs.y, q.y));
-            float mp = aa(-(dIn + 0.03 * u)) * aa(dIn) * (0.25 + 0.75 * smoothstep(-hs.y, hs.y, q.y));
-            float ms = aa(fhSlots(q, hs, u));
-            float m = max(mg, max(mp, ms * 0.9));
-            vec3 f = fireCol(p, I);
-            /* the leaves' edges and the holes' rims lit by the fire */
-            float near = exp(-max(abs(q.x) - gap, 0.0) / (0.05 * u)) * (1.0 - smoothstep(hs.y * 0.6, hs.y, abs(q.y)));
-            float rim = aa(abs(fhSlots(q, hs, u) - 1.5) - 1.5);
-            col += f * (col * 2.0 + 0.05) * (near * 0.8 + rim * 0.6) * I;
-            col += f * 0.12 * I * exp(-max(abs(q.x) - gap, 0.0) / (0.12 * u)) * smoothstep(hs.y * 1.1, hs.y * 0.5, abs(q.y));
-            col = mix(col, f, m);
-        }
-        return col;
-    }
-
-    /* the fire's light on the floor: a bar thrown through the gap between the doors, and the glow off the plate */
-    vec3 floorLight(vec2 p, vec3 col) {
-        float dy = p.y - uBH.w;
-        if (dy < 0.0) return col;
-        float I = uFire.x * (0.8 + 0.4 * uFire.y);
-        float w = 0.025 * uS + dy * 0.12;
-        float bar = exp(-pow((p.x - uFD.x) / w, 2.0)) * smoothstep(0.0, 0.08 * uS, dy);
-        float pool = exp(-length(vec2((p.x - uFD.x) / (2.2 * uS), dy / (1.0 * uS))));
-        return col * (1.0 + vec3(1.0, 0.5, 0.18) * (bar * 2.2 + pool * 0.5) * I);
-    }
-
-    /* the water gauge glasses: Klinger stripes behind, which the water
-     * turns the other way, a meniscus, a bubble now and then */
-    vec3 waterGlass(vec2 p, vec3 col, vec4 G, float lvl, float k) {
-        float x = G.x, y0 = G.y, y1 = G.z, tr = G.w;
-        float u = (p.x - x) / (1.2 * tr);
-        if (abs(u) > 1.0 || p.y < y0 || p.y > y1) return col;
-        float ws = y1 - (y1 - y0) * lvl;
-        /* the surface tilts and ripples a little */
-        ws += sin(uT * 2.3 + k * 2.0 + u * 1.5) * 0.04 * tr + sin(uT * 3.7 + k) * 0.03 * tr;
-        float wet = smoothstep(ws - 0.7, ws + 0.7, p.y);
-        float sx = asin(clamp(u, -0.99, 0.99)) / 1.5708;
-        float per = 0.95 * tr;
-        float dry = sin(((sx * 1.1 * tr) + (p.y - y0)) / per * 3.14159);
-        float wv = sin(((sx * 1.8 * tr) - (p.y - y0)) / per * 3.14159);
-        float stripes = mix(dry, wv, wet);
-        vec3 back = mix(vec3(0.05, 0.045, 0.04), vec3(0.72, 0.7, 0.64), smoothstep(-0.3, 0.3, stripes));
-        back = mix(back, back * vec3(0.8, 0.95, 0.95) + vec3(0.0, 0.02, 0.02), wet);
-        vec3 c = back * (0.65 + 0.35 * sqrt(max(1.0 - u * u, 0.0)));
-        /* the meniscus: a dark curve with a bright line over it */
-        float dm = p.y - ws + 0.25 * tr * (u * u);
-        c = mix(c, vec3(0.02), 0.85 * exp(-pow(dm / (0.09 * tr), 2.0)));
-        c += vec3(0.9, 0.95, 1.0) * 0.4 * exp(-pow((dm + 0.14 * tr) / (0.05 * tr), 2.0));
-        /* a bubble rising */
-        float bt = fract(uT * 0.11 + k * 0.37);
-        vec2 bc = vec2(x + 0.3 * tr * sin(uT * 3.0 + k), mix(y1, ws, bt));
-        float db = length(p - bc) - 0.12 * tr;
-        c = mix(c, c * 0.4 + vec3(0.5), 0.6 * aa(abs(db) - 0.6) * wet * step(ws + 0.2 * tr, bc.y));
-        /* the glass: lit edges and a long highlight */
-        c *= 1.0 - 0.5 * smoothstep(0.7, 1.0, abs(u));
-        c += vec3(1.0, 0.97, 0.9) * (0.35 * exp(-pow((u + 0.45) / 0.12, 2.0)) + 0.12 * exp(-pow((u - 0.6) / 0.08, 2.0)));
-        return mix(col, c, aa((abs(u) - 1.0) * 1.2 * tr));
-    }
-
-    /* the governor: spindle, the two flyball arms with their links, the sleeve, the bevel gear */
-    vec3 govArm(vec2 p, vec3 col, float ang, float th) {
-        float gx = uGov.x, py = uGov.y, L = uGov.z;
-        float z = sin(ang), cs = cos(ang);
-        vec2 piv = vec2(gx + 0.05 * L * cs, py);
-        vec2 ball = vec2(gx + L * sin(th) * cs, py + L * cos(th));
-        float ys = py + 0.95 * L * cos(th);
-        vec2 mid = mix(piv, ball, 0.5);
-        float rb = 0.19 * L * (1.0 + 0.06 * z);
-        vec2 so = vec2(0.1, 0.15) * L;
-        float darm = min(sdSeg(p, piv, ball) - 0.024 * L, sdSeg(p, mid, vec2(gx + 0.06 * L * cs, ys)) - 0.016 * L);
-        float dball = length(p - ball) - rb;
-        col *= mix(1.0, 0.6, smoothstep(0.03 * L, -0.02 * L, min(sdSeg(p - so, piv, ball) - 0.024 * L, length(p - so - ball) - rb)));
-        float shade = 0.8 + 0.2 * z;
-        if (darm < 1.0) {
-            vec2 dir = normalize(ball - piv);
-            float v = clamp(dot(p - piv, vec2(-dir.y, dir.x)) / (0.024 * L), -1.0, 1.0);
-            col = mix(col, metal(normalize(vec3(vec2(-dir.y, dir.x) * v, 1.0)), vec3(0.42, 0.4, 0.38)) * shade, aa(darm));
-        }
-        if (dball < 1.0) col = mix(col, dome((p - ball) / rb, uBrass) * shade, aa(dball));
-        return col;
-    }
-    vec3 governor(vec2 p, vec3 col) {
-        float gx = uGov.x, py = uGov.y, L = uGov.z, gy = uGov.w;
-        if (abs(p.x - gx) > 1.05 * L || p.y < py - 0.3 * L || p.y > gy + 1.2 * uGovB.z) return col;
-        float th = uGovS.x, ph = uGovS.y;
-        bool firstBack = sin(ph) < 0.0;
-        float a0 = firstBack ? ph : ph + 3.14159, a1 = firstBack ? ph + 3.14159 : ph;
-        col = govArm(p, col, a0, th);
-        /* spindle, sleeve and the top cap */
-        float ys = py + 0.95 * L * cos(th);
-        float dsp = sdBox(p - vec2(gx, (py - 0.12 * L + gy) * 0.5), vec2(0.03 * L, (gy - py + 0.12 * L) * 0.5), 0.0);
-        float dsl = sdBox(p - vec2(gx, ys), vec2(0.075 * L, 0.07 * L), 0.02 * L);
-        float dcap = length(p - vec2(gx, py - 0.12 * L)) - 0.07 * L;
-        float dhub = sdBox(p - vec2(gx, py), vec2(0.09 * L, 0.05 * L), 0.02 * L);
-        float dd = min(min(dsp, dsl), min(dcap, dhub));
-        if (dd < 1.0) {
-            float hw = dsp == dd ? 0.03 : dsl == dd ? 0.075 : dcap == dd ? 0.07 : 0.09;
-            float v = clamp((p.x - gx) / (hw * L), -1.0, 1.0);
-            vec3 n = normalize(vec3(v, 0.0, sqrt(1.0 - v * v)));
-            vec3 base = dsp == dd ? vec3(0.45, 0.44, 0.42) : uBrass;
-            col = mix(col, metal(n, base), aa(dd));
-        }
-        col = govArm(p, col, a1, th);
-        /* the bevel gear on the gearbox face, turning */
-        vec2 gq = p - vec2(gx, gy);
-        float gr = uGovB.z * 0.78, d = length(gq);
-        if (d < gr * 1.15) {
-            float a = atan(gq.y, gq.x) + uGovS.z;
-            float teeth = 0.5 + 0.5 * cos(a * 22.0);
-            float dg = d - gr * (1.0 + 0.07 * smoothstep(0.2, 0.8, teeth));
-            float sp = 6.28318 / 4.0;
-            float ka = floor(a / sp + 0.5) * sp;
-            float web = abs(sin(a - ka)) * d - 0.11 * gr;
-            float hole = max(-web, max(d - 0.72 * gr, 0.28 * gr - d));
-            float dgear = max(dg, -hole);
-            col *= mix(1.0, 0.5, smoothstep(0.05 * gr, -0.05 * gr, length(gq - vec2(0.05, 0.08) * gr) - gr));
-            if (dgear < 1.0) {
-                vec3 n = normalize(vec3(gq / gr * 0.5 * smoothstep(0.75, 1.0, d / gr), 1.0));
-                vec3 c = metal(n, uBrass * 0.85) * (1.0 - 0.3 * smoothstep(0.85, 1.0, d / gr) * (1.0 - teeth));
-                c = mix(c, dome(gq / (0.2 * gr), vec3(0.4, 0.38, 0.36)), aa(d - 0.2 * gr));
-                col = mix(col, c, aa(dgear));
-            }
-        }
-        return col;
-    }
-
-    /* the lamp's flame, and its glow in the chimney */
-    vec3 lampFlame(vec2 p, vec3 col) {
-        float s = uLamp.z;
-        vec2 q = (p - uLamp.xy) / s;
-        if (abs(q.x) > 1.0 || q.y < -1.2 || q.y > 0.6) return col;
-        float f = uFire.z;
-        float sw = 0.012 * sin(uT * 7.0) + 0.01 * sin(uT * 11.3);
-        vec2 fq = vec2(q.x - sw * (0.2 - q.y), q.y);
-        float hgt = 0.2 * (1.0 + 0.06 * f);
-        float wid = 0.055 * (1.0 + 0.6 * smoothstep(-hgt, 0.08, fq.y));
-        float d = length(vec2(fq.x / wid, (fq.y + 0.0) / hgt * (fq.y < 0.0 ? 1.0 : 2.2)));
-        float core = smoothstep(1.0, 0.3, d);
-        vec3 fc = mix(vec3(1.0, 0.55, 0.15), vec3(1.0, 0.95, 0.75), smoothstep(0.4, 0.0, d - 0.1 * fq.y / hgt));
-        fc = mix(fc, vec3(0.3, 0.4, 0.9), smoothstep(0.03, 0.09, fq.y) * smoothstep(0.6, 1.0, d) * 0.4);
-        float inGlass = step(abs(q.x), 0.2) * step(-0.75, q.y) * step(q.y, 0.25);
-        col += vec3(1.0, 0.72, 0.35) * (0.35 + 0.05 * f) * exp(-length(q * vec2(1.0, 0.7)) * 5.0) * inGlass;
-        col += vec3(1.0, 0.7, 0.35) * 0.1 * exp(-length(q) * 2.2);
-        return mix(col, fc * 1.2, core);
-    }
-
-    /* one plume of steam from src: billowing up and spreading, the part
-     * between heights lo and hi (the stretch emitted while the valve was open) */
-    float plume(vec2 p, vec2 src, float sz, float spd, float seed, float lo, float hi, float drift) {
-        vec2 q = (p - src) / sz;
-        float up = -q.y;
-        if (up < -0.3 || up > 4.6 || up < lo - 0.6 || up > hi + 0.8) return 0.0;
-        float x = q.x - drift * up * up * 0.2;
-        float w = 0.1 + 0.3 * up;
-        if (abs(x) > 2.2 * w + 0.15) return 0.0;
-        float env = exp(-x * x / (w * w)) * smoothstep(-0.15, 0.2, up) * exp(-up * 0.5) * smoothstep(4.6, 3.6, up);
-        env *= smoothstep(lo - 0.5, lo + 0.2, up) * smoothstep(hi + 0.7, hi - 0.1, up);
-        if (env < 0.004) return 0.0;
-        vec2 nq = vec2(x / (0.3 + 0.25 * up) + seed, up * 1.1 - uT * spd);
-        float wv = vnoise(nq * 1.4 + 3.7);
-        float f = fbm4(nq * vec2(1.8, 1.5) + vec2(wv * 1.4, wv * 0.6));
-        return env * smoothstep(0.3, 0.75, f + 0.15 * env);
-    }
-
-    vec3 steamOver(vec2 p, vec3 col, float a) {
-        vec2 dl = (p - uLamp.xy) / uS;
-        vec2 df = (p - uFD.xy) / uS;
-        vec3 lit = vec3(0.74, 0.74, 0.74) + vec3(1.0, 0.75, 0.45) * 0.35 * exp(-dot(dl, dl) / 8.0)
-                 + vec3(1.0, 0.45, 0.15) * 0.4 * uFire.x * exp(-length(df) * 0.7);
-        return mix(col, vec3(0.93, 0.92, 0.9) * lit, clamp(a, 0.0, 1.0));
-    }
-
-    /* a water drop: hanging, swelling, then falling */
-    vec3 drip(vec2 p, vec3 col, vec4 D) {
-        if (D.z <= 0.0) return col;
-        vec2 q = p - D.xy;
-        q.y /= D.w;
-        float d = length(q) - D.z;
-        if (d > 2.0) return col;
-        vec2 sp = q / D.z;
-        vec3 c = col * 0.45 + vec3(0.05, 0.06, 0.07);
-        c += vec3(1.0, 0.95, 0.85) * 0.8 * exp(-dot(sp - vec2(-0.35, -0.35), sp - vec2(-0.35, -0.35)) * 10.0);
-        c += vec3(1.0, 0.6, 0.3) * 0.25 * smoothstep(0.4, 1.0, sp.y) * smoothstep(1.0, 0.7, length(sp));
-        return mix(col, c, aa(d * min(D.w, 1.0)));
-    }
-
-    void main() {
-        vec2 fc = gl_FragCoord.xy;
-        vec2 p = vec2(fc.x, uRes.y - fc.y);
-        gp = p;
-        SO = vec2(0.55, 0.83);
-        /* the roof light and the lamp, baked; the fire's light at whatever it is doing now */
-        vec3 col = texelFetch(uStatic, ivec2(fc), 0).rgb + texelFetch(uStaticF, ivec2(fc), 0).rgb * uFireC;
-        vec2 dl = (p - uLamp.xy) / uS;
-        float pool = exp(-dot(dl, dl) / 5.0);
-        col *= 1.0 + vec3(1.0, 0.7, 0.4) * pool * 0.08 * uFire.z;
-        col = floorLight(p, col);
-        for (int i = 0; i < 4; i++) {
-            vec2 q = p - uG[i].xy;
-            float r = uG[i].z;
-            if (dot(q, q) < (r + 1.0) * (r + 1.0)) col = mix(col, instrument(i, q, r, col), aa(length(q) - r));
-        }
-        for (int w = 0; w < 2; w++) {
-            vec4 R = uWin[w];
-            if (p.x < R.x || p.x > R.z || p.y < R.y || p.y > R.w) continue;
-            for (int j = 0; j < 17; j++) {
-                vec4 D = uDp[j];
-                if (p.x >= D.x && p.x < D.z && p.y >= D.y && p.y < D.w) col = drum(j, p, col);
-            }
-            float t = (p.y - R.y) / (R.w - R.y);
-            col += vec3(1.0, 0.94, 0.82) * 0.07 * smoothstep(0.1, 0.2, t) * smoothstep(0.42, 0.25, t);
-            col *= 1.0 - 0.5 * smoothstep(0.2, 0.0, t) - 0.35 * smoothstep(0.8, 1.0, t);
-        }
-        col = waterGlass(p, col, uWG[0], uWL.x, 0.0);
-        col = waterGlass(p, col, uWG[1], uWL.y, 1.0);
-        col = firehole(p, col);
-        col = governor(p, col);
-        col = lampFlame(p, col);
-        if (uML.z > 0.0) {
-            vec2 q = p - uML.xy;
-            float lr = uML.z, on = uML.w, d = length(q);
-            if (d < lr * 6.0) {
-                col += uSage * on * 0.35 * exp(-max(d - lr, 0.0) / (lr * 1.1)) * step(lr * 1.6, d);
-                if (d < lr + 1.0) {
-                    vec2 sp = q / lr;
-                    float z = sqrt(max(1.0 - dot(sp, sp), 0.0));
-                    float fac = 0.85 + 0.15 * cos(floor(atan(sp.y, sp.x) / 0.7854) * 2.1 + floor(length(sp) * 3.0));
-                    vec3 j = uSage * (0.13 + on * (0.5 + 1.1 * z)) * fac;
-                    j += vec3(1.0, 0.95, 0.9) * exp(-dot(sp - vec2(-0.35, -0.4), sp - vec2(-0.35, -0.4)) * 25.0) * 0.55;
-                    col = mix(col, j, aa(d - lr));
-                }
-            }
-        }
-        col = drip(p, col, uDrip[0]);
-        col = drip(p, col, uDrip[1]);
-        /* steam: the leaking joints, then the safety valve */
-        float a = 0.0;
-        for (int i = 0; i < 3; i++)
-            a += uLeakA[i] * 1.5 * plume(p, uLeak[i].xy, uLeak[i].z, 0.55, float(i) * 17.0, -1.0, 99.0, uLeak[i].w);
-        vec2 sv = uSV.xy - vec2(0.0, 1.05 * uSV.z);
-        for (int i = 0; i < 3; i++) {
-            vec4 P = uPuff[i];
-            if (P.z <= 0.0) continue;
-            float spd = 1.5;
-            float hi = P.x * spd * 0.9, lo = max(P.x - P.y, 0.0) * spd * 0.9;
-            float fade = exp(-max(P.x - P.y, 0.0) * 0.45);
-            float jet = P.x < P.y ? smoothstep(0.0, 0.25, P.x) * smoothstep(0.0, 0.4, P.y - P.x) : 0.0;
-            float pl = plume(p, sv, 1.3 * uSV.z * 1.6, spd, P.w, lo, hi, 0.15);
-            a += P.z * fade * pl * 1.6;
-            /* the hard white jet right at the valve while it blows */
-            vec2 jq = (p - sv) / uSV.z;
-            a += jet * P.z * exp(-pow(jq.x / (0.12 + 0.25 * max(-jq.y, 0.0)), 2.0)) * smoothstep(0.0, 0.15, -jq.y) * exp(jq.y * 0.9) * 0.9
-                 * (0.7 + 0.3 * vnoise(vec2(jq.x * 4.0, jq.y * 3.0 + uT * 9.0)));
-        }
-        if (a > 0.002) col = steamOver(p, col, a);
-        /* gloom in the corners, and a soft shoulder on the highlights */
-        vec2 uv = p / uRes - 0.5;
-        col *= 1.0 - 0.5 * pow(clamp(length(uv * uRes / max(uRes.x, uRes.y)) * 1.45, 0.0, 1.0), 2.4);
-        vec3 k = max(col - 0.72, 0.0);
-        col = min(col, 0.72) + 0.28 * (1.0 - exp(-k / 0.28));
-        o = vec4(col, 1.0);
-    });
-static double t_start_wall;
-static double sim_t, sim_t_now;
-
-static GLuint prog_static, prog_text, prog_dyn, vao, vao_text, vbo_text;
-static GLuint tex_atlas, tex_static[2], fbo_static[2];
-static int static_w, static_h;
-static float lamp_l[4], fire_l[4];      /* the point lights: x y z reach, px */
-static float c_brass[3], c_red[3], c_amber[3], c_sage[3], c_copper[3], c_green[3];
-
-static GLuint compile(GLenum type, const char *src) {
-    GLuint s = glCreateShader(type);
-    glShaderSource(s, 1, &src, NULL);
-    glCompileShader(s);
-    GLint ok;
-    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[4096];
-        glGetShaderInfoLog(s, sizeof log, NULL, log);
-        fprintf(stderr, "steam: shader:\n%s\n", log);
-        exit(1);
-    }
-    return s;
-}
-
-static GLuint mk_prog(const char *vs, const char *fs) {
-    GLuint pr = glCreateProgram();
-    glAttachShader(pr, compile(GL_VERTEX_SHADER, vs));
-    glAttachShader(pr, compile(GL_FRAGMENT_SHADER, fs));
-    glLinkProgram(pr);
-    GLint ok;
-    glGetProgramiv(pr, GL_LINK_STATUS, &ok);
-    if (!ok) die("shader link failed");
-    return pr;
-}
-
-static void hex(const char *h, float *rgb) {
-    unsigned v = (unsigned)strtoul(h + 1, NULL, 16);
-    for (int i = 0; i < 3; i++) rgb[i] = ((v >> (16 - 8 * i)) & 255) / 255.0f;
-}
-
-#define U(p, n) glGetUniformLocation(p, n)
-
-static void gl_init(void) {
-    prog_static = mk_prog(VS, FS_STATIC);
-    prog_text = mk_prog(VS_TEXT, FS_TEXT);
-    prog_dyn = mk_prog(VS, FS_DYN);
-    glGenVertexArrays(1, &vao);
-    glGenVertexArrays(1, &vao_text);
-    glGenBuffers(1, &vbo_text);
-    glBindVertexArray(vao_text);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_text);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)(2 * sizeof(float)));
-    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)(4 * sizeof(float)));
-    glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(1);
-    glEnableVertexAttribArray(2);
-    glGenTextures(1, &tex_atlas);
-
-    /* Aged Brass, and the engine's own paint */
-    hex("#A53C2C", c_red); hex("#E9994A", c_amber); hex("#8FA672", c_sage);
-    c_brass[0] = 0.70f; c_brass[1] = 0.52f; c_brass[2] = 0.25f;
-    c_copper[0] = 0.72f; c_copper[1] = 0.36f; c_copper[2] = 0.22f;
-    c_green[0] = 0.07f; c_green[1] = 0.15f; c_green[2] = 0.1f;
-}
-
-/* (re)build everything that only changes with the size: layout, atlas,
- * print, and the static scene texture */
-static void build_static(void) {
-    layout();
+    for (const char *p = host; *p && n < 40; p++) host_uc[n++] = (char)toupper((unsigned char)*p);
+    host_uc[n] = 0;
+    char num[16];
+    uint32_t h = 2166136261u;
+    for (const char *p = host; *p; p++) h = (h ^ (unsigned char)*p) * 16777619u;
+    snprintf(num, sizeof num, "%u", 4000 + h % 5999);
+    sign_row(0, face_sans_b, num, 0.12f, 0.7f);
+    sign_row(1, face_sans_b, host_uc, 0.14f, 0.9f);
+    sign_row(2, face_serif, host_uc, 0.1f, 0.8f);
+    sign_row(3, face_sans_b, host_uc, 0.16f, 0.9f);
+    glGenTextures(1, &tex_sign);
+    glBindTexture(GL_TEXTURE_2D, tex_sign);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glBindTexture(GL_TEXTURE_2D, tex_atlas);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, AW, atlas_h, 0, GL_RED, GL_UNSIGNED_BYTE, atlas);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, SA_W, SA_RH * SA_ROWS, 0, GL_RED, GL_UNSIGNED_BYTE, sign_px);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    if (static_w != W || static_h != H) {
-        if (static_w) { glDeleteTextures(2, tex_static); glDeleteFramebuffers(2, fbo_static); }
-        glGenTextures(2, tex_static);
-        glGenFramebuffers(2, fbo_static);
-        for (int k = 0; k < 2; k++) {
-            glBindTexture(GL_TEXTURE_2D, tex_static[k]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, W, H, 0, GL_RGBA, GL_HALF_FLOAT, NULL);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            glBindFramebuffer(GL_FRAMEBUFFER, fbo_static[k]);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex_static[k], 0);
-        }
-        static_w = W; static_h = H;
-    }
-    /* the lights, in px: the lamp just below its flame and out from the wall; the fire just out of the firehole */
-    lamp_l[0] = SC.lamp[0]; lamp_l[1] = SC.lamp[1] - 0.05f * SC.s; lamp_l[2] = 0.9f * SC.s; lamp_l[3] = 2.6f * SC.s;
-    fire_l[0] = SC.fd[0]; fire_l[1] = SC.fd[1] + 0.25f * SC.s; fire_l[2] = 1.3f * SC.s; fire_l[3] = 2.4f * SC.s;
-    GLuint p = prog_static;
-    float gv[NG][4], av[NG][4], zv[NG][4];
-    for (int pass = 0; pass < 2; pass++) {
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_static[pass]);
-    glViewport(0, 0, W, H);
-    p = prog_static;
-    glUseProgram(p);
-    for (int i = 0; i < NG; i++) {
-        gv[i][0] = G[i].cx; gv[i][1] = G[i].cy; gv[i][2] = G[i].r; gv[i][3] = (float)G[i].kind;
-        av[i][0] = G[i].a0; av[i][1] = G[i].a1; av[i][2] = (float)G[i].nmaj; av[i][3] = (float)G[i].nmin;
-        zv[i][0] = G[i].red0; zv[i][1] = G[i].red1; zv[i][2] = G[i].amb0; zv[i][3] = G[i].amb1;
-    }
-    glUniform2f(U(p, "uRes"), (float)W, (float)H);
-    glUniform1f(U(p, "uSeed"), (opt_seed % 1000) * 0.137f);
-    glUniform1f(U(p, "uS"), SC.s);
-    glUniform4fv(U(p, "uBH"), 1, SC.bh);
-    glUniform4fv(U(p, "uHor"), 1, SC.hor);
-    glUniform4fv(U(p, "uLag"), 1, SC.lag);
-    glUniform4fv(U(p, "uPA"), MAXP, &SC.pa[0][0]);
-    glUniform4fv(U(p, "uPB"), MAXP, &SC.pb[0][0]);
-    glUniform1i(U(p, "uNP"), SC.np);
-    glUniform4fv(U(p, "uFl"), MAXF, &SC.fl[0][0]);
-    glUniform1i(U(p, "uNF"), SC.nf);
-    glUniform4fv(U(p, "uWh"), MAXW, &SC.wh[0][0]);
-    glUniform1i(U(p, "uNW"), SC.nw);
-    glUniform4fv(U(p, "uG"), NG, &gv[0][0]);
-    glUniform4fv(U(p, "uA"), NG, &av[0][0]);
-    glUniform4fv(U(p, "uZ"), NG, &zv[0][0]);
-    glUniform4fv(U(p, "uWG"), 2, &SC.wg[0][0]);
-    glUniform4fv(U(p, "uTag"), 2, &SC.tag[0][0]);
-    glUniform4fv(U(p, "uFD"), 1, SC.fd);
-    glUniform4fv(U(p, "uPq"), 1, SC.pq);
-    glUniform4fv(U(p, "uRule"), 1, SC.rule);
-    glUniform4fv(U(p, "uWin"), 2, &win_rect[0][0]);
-    glUniform4fv(U(p, "uGov"), 1, SC.gov);
-    glUniform4fv(U(p, "uGovB"), 1, SC.govb);
-    glUniform4fv(U(p, "uSV"), 1, SC.sv);
-    glUniform4fv(U(p, "uLamp"), 1, SC.lamp);
-    glUniform4fv(U(p, "uML"), 1, SC.ml);
-    glUniform3fv(U(p, "uRed"), 1, c_red);
-    float amb[3];
-    for (int i = 0; i < 3; i++) amb[i] = c_amber[i] * 0.9f;
-    glUniform3fv(U(p, "uAmber"), 1, amb);
-    glUniform3fv(U(p, "uBrass"), 1, c_brass);
-    glUniform3fv(U(p, "uCopper"), 1, c_copper);
-    glUniform3fv(U(p, "uGreen"), 1, c_green);
-    glUniform1f(U(p, "uPass"), (float)pass);
-    glUniform4fv(U(p, "uLampL"), 1, lamp_l);
-    glUniform4fv(U(p, "uFireL"), 1, fire_l);
-    glBindVertexArray(vao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-
-    /* the print */
-    glUseProgram(prog_text);
-    glUniform2f(U(prog_text, "uRes"), (float)W, (float)H);
-    glUniform1f(U(prog_text, "uPass"), (float)pass);
-    glUniform4fv(U(prog_text, "uFireL"), 1, fire_l);
-    glUniform1i(U(prog_text, "uAtlas"), 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex_atlas);
-    glBindVertexArray(vao_text);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_text);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(tvn * sizeof(float)), tv, GL_STATIC_DRAW);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDrawArrays(GL_TRIANGLES, 0, tvn / 8);
-    glDisable(GL_BLEND);
-    }
-
-    /* the dynamic pass's fixed uniforms */
-    p = prog_dyn;
-    glUseProgram(p);
-    glUniform2f(U(p, "uRes"), (float)W, (float)H);
-    glUniform1f(U(p, "uS"), SC.s);
-    glUniform1i(U(p, "uStatic"), 0);
-    glUniform1i(U(p, "uAtlas"), 1);
-    glUniform1i(U(p, "uStaticF"), 2);
-    glUniform1f(U(p, "uPass"), 2.0f);
-    glUniform4fv(U(p, "uLampL"), 1, lamp_l);
-    glUniform4fv(U(p, "uFireL"), 1, fire_l);
-    glUniform4fv(U(p, "uG"), NG, &gv[0][0]);
-    glUniform4fv(U(p, "uWin"), 2, &win_rect[0][0]);
-    glUniform4fv(U(p, "uDp"), NDRUM, &drum_rect[0][0]);
-    float dig[10][4];
-    for (int d = 0; d < 10; d++) {
-        const Glyph *g = glyph(drum_style, (unsigned char)('0' + d));
-        dig[d][0] = g->x; dig[d][1] = g->y; dig[d][2] = g->w; dig[d][3] = g->h;
-    }
-    glUniform4fv(U(p, "uDig"), 10, &dig[0][0]);
-    glUniform4fv(U(p, "uBH"), 1, SC.bh);
-    glUniform4fv(U(p, "uWG"), 2, &SC.wg[0][0]);
-    glUniform4fv(U(p, "uFD"), 1, SC.fd);
-    glUniform4fv(U(p, "uGov"), 1, SC.gov);
-    glUniform4fv(U(p, "uGovB"), 1, SC.govb);
-    glUniform4fv(U(p, "uLamp"), 1, SC.lamp);
-    glUniform4fv(U(p, "uSV"), 1, SC.sv);
-    glUniform4fv(U(p, "uLeak"), NLEAK, &SC.leak[0][0]);
-    glUniform3fv(U(p, "uBrass"), 1, c_brass);
-    glUniform3fv(U(p, "uRed"), 1, c_red);
-    glUniform3fv(U(p, "uSage"), 1, c_sage);
 }
-
-/* smooth value noise in time, -1..1 */
-static float tnoise(float t, float seed) {
-    float i = floorf(t), f = t - i;
-    float u = f * f * (3 - 2 * f);
-    uint32_t a = (uint32_t)(int32_t)i * 2654435761u ^ (uint32_t)(seed * 977), b = (uint32_t)(int32_t)(i + 1) * 2654435761u ^ (uint32_t)(seed * 977);
-    a ^= a >> 15; a *= 2246822519u; a ^= a >> 13;
-    b ^= b >> 15; b *= 2246822519u; b ^= b >> 13;
-    float va = (a & 0xffff) / 32767.5f - 1, vb = (b & 0xffff) / 32767.5f - 1;
-    return va + (vb - va) * u;
+/* row 4: the lineside board with the time away, redrawn when it changes */
+static char away_str[32];
+static void away_board(double wt) {
+    long away = (long)(wt - (double)locked_at);
+    if (away < 0) away = 0;
+    char s[32];
+    snprintf(s, sizeof s, "AWAY %ld:%02ld", away / 3600, away / 60 % 60);
+    if (!strcmp(s, away_str)) return;
+    snprintf(away_str, sizeof away_str, "%s", s);
+    sign_row(4, face_sans_b, s, 0.14f, 0.86f);
+    glBindTexture(GL_TEXTURE_2D, tex_sign);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 4 * SA_RH, SA_W, SA_RH, GL_RED, GL_UNSIGNED_BYTE, sign_px + 4 * SA_W * SA_RH);
+    glGenerateMipmap(GL_TEXTURE_2D);
 }
-
-/* t: seconds since start; wt: wall-clock time */
-static void render(double t, double wt, GLuint target) {
-    if (static_w != W || static_h != H) build_static();
-    glBindFramebuffer(GL_FRAMEBUFFER, target);
-    glViewport(0, 0, W, H);
-    GLuint p = prog_dyn;
-    glUseProgram(p);
-    float ft = (float)fmod(t, 10000.0);
-    glUniform1f(U(p, "uT"), ft);
-
-    float nv[NG][4] = {{0}};
-    for (int i = 0; i < G_CLOCK; i++) nv[i][0] = needle_angle(&G[i], t);
+/* the caption: the time, and how long the screen has been locked */
+#define CAP_W 1024
+#define CAP_H 192
+static unsigned char cap_px[CAP_W * CAP_H];
+static GLuint tex_cap;
+static char cap_str[160];
+static void caption_update(double wt) {
     time_t ts = (time_t)wt;
     struct tm tm;
     localtime_r(&ts, &tm);
-    float secs = tm.tm_sec + (float)(wt - floor(wt));
-    float mins = tm.tm_min + secs / 60;
-    nv[G_CLOCK][0] = ((tm.tm_hour % 12) + mins / 60) * 30 * DEG;
-    nv[G_CLOCK][1] = mins * 6 * DEG;
-    nv[G_CLOCK][2] = sec_angle * DEG;
-    glUniform4fv(U(p, "uN"), NG, &nv[0][0]);
-
-    /* drums: digit now, digit next, and the roll between over the last 0.3 s */
-    double up = sens.uptime + (now() - sens.uptime_at);
-    double away = wt - (double)locked_at;
+    long away = (long)(wt - (double)locked_at);
     if (away < 0) away = 0;
-    float dr[NDRUM][4];
-    for (int j = 0; j < NDRUM; j++) {
-        double v = j < 9 ? up : away;
-        long n = (long)v;
-        double fr = v - n;
-        int a = digit_of(n, drum_spec[j]), b = digit_of(n + 1, drum_spec[j]);
-        float f = 0;
-        if (a != b && fr > 0.7) {
-            float x = (float)((fr - 0.7) / 0.3);
-            float c1 = 1.2f, c3 = c1 + 1, xm = x - 1;
-            f = 1 + c3 * xm * xm * xm + c1 * xm * xm;
-        }
-        int ivory = drum_spec[j] == D_S1 || drum_spec[j] == D_S10;
-        dr[j][0] = (float)a; dr[j][1] = (float)b; dr[j][2] = f;
-        dr[j][3] = (float)radix_of(drum_spec[j]) * (ivory ? -1 : 1);
+    char t1[32], t2[128];
+    strftime(t1, sizeof t1, "%H:%M", &tm);
+    if (away < 60) snprintf(t2, sizeof t2, "%s", host_uc);
+    else if (away < 3600) snprintf(t2, sizeof t2, "%s   AWAY %ld MIN", host_uc, away / 60);
+    else snprintf(t2, sizeof t2, "%s   AWAY %ldH %02ldM", host_uc, away / 3600, away / 60 % 60);
+    char all[160];
+    snprintf(all, sizeof all, "%s|%s", t1, t2);
+    if (!strcmp(all, cap_str)) return;
+    snprintf(cap_str, sizeof cap_str, "%s", all);
+    memset(cap_px, 0, sizeof cap_px);
+    text_draw(cap_px, CAP_W, CAP_H, face_serif, 112, t1, 6, 112, 0.0f);
+    text_draw(cap_px, CAP_W, CAP_H, face_sans, 30, t2, 10, 168, 0.22f);
+    if (!tex_cap) {
+        glGenTextures(1, &tex_cap);
+        glBindTexture(GL_TEXTURE_2D, tex_cap);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     }
-    glUniform4fv(U(p, "uDr"), NDRUM, &dr[0][0]);
-
-    /* the water, the second glass a beat behind the first */
-    float wl0 = clampf(wat.x + 0.004f * sinf(ft * 1.3f), 0.02f, 0.98f);
-    float wl1 = clampf(wat.x + 0.004f * sinf(ft * 1.3f - 0.9f) - 0.002f, 0.02f, 0.98f);
-    glUniform2f(U(p, "uWL"), wl0, wl1);
-
-    /* the fire: its draw, a quick flicker, the lamp's slower one */
-    float fl = 0.5f * tnoise(ft * 3.1f, 1) + 0.3f * tnoise(ft * 7.3f, 2) + 0.2f * tnoise(ft * 13.0f, 3);
-    float lf = 0.6f * tnoise(ft * 2.3f, 4) + 0.4f * tnoise(ft * 6.1f, 5);
-    glUniform4f(U(p, "uFire"), fire_s, fl, lf, 0);
-    {
-        float I = fire_s * (0.85f + 0.3f * fl);
-        glUniform3f(U(p, "uFireC"), 1.0f * I, 0.5f * I, 0.2f * I);
-    }
-    glUniform4f(U(p, "uGovS"), gov_th, gov_ph, -gov_ph * 1.6f, 0);
-
-    float ml[4] = {SC.ml[0], SC.ml[1], SC.ml[2],
-                   sens.mains ? (sens.charging ? 0.7f + 0.3f * sinf(ft * 2.0f) : 1.0f) : 0.0f};
-    glUniform4fv(U(p, "uML"), 1, ml);
-
-    /* safety-valve lifts: age, how long it blew, strength (0: none), seed */
-    float pv[NPUFF][4] = {{0}};
-    for (int i = 0; i < NPUFF; i++) {
-        float age = (float)sim_t_now - puff[i].t0;
-        if (puff[i].amp > 0 && age >= 0 && age < puff[i].dur + 7) {
-            pv[i][0] = age; pv[i][1] = puff[i].dur; pv[i][2] = puff[i].amp; pv[i][3] = puff[i].seed;
-        }
-    }
-    glUniform4fv(U(p, "uPuff"), NPUFF, &pv[0][0]);
-    /* the leaks breathe in and out, slowly */
-    float la[3];
-    for (int i = 0; i < 3; i++) la[i] = clampf(0.6f + 0.35f * tnoise(ft * 0.12f + i * 7.0f, 10 + i), 0, 1) * (i == 2 ? 0.7f : 1.0f);
-    glUniform3fv(U(p, "uLeakA"), 1, la);
-
-    /* drips: swell under the pipe, let go, fall */
-    float dv[NDRIP][4] = {{0}};
-    for (int i = 0; i < NDRIP; i++) {
-        float per = SC.drip[i][2], ph = fmodf(ft + SC.drip[i][3], per) / per;
-        float s = SC.s, r0 = 0.05f * s;
-        dv[i][0] = SC.drip[i][0];
-        if (ph < 0.88f) {
-            float g = ph / 0.88f;
-            float r = r0 * (0.35f + 0.65f * sqrtf(g));
-            dv[i][1] = SC.drip[i][1] + r * (0.6f + 0.5f * g);
-            dv[i][2] = r; dv[i][3] = 1.0f + 0.35f * g;
-        } else {
-            float tf = (ph - 0.88f) * per;
-            float y = 0.5f * 40.0f * tf * tf * s;
-            dv[i][1] = SC.drip[i][1] + r0 + y;
-            dv[i][2] = y > 2.5f * s ? 0 : r0 * 0.85f; dv[i][3] = 1.0f + clampf(tf * 6.0f, 0, 1.5f);
-        }
-    }
-    glUniform4fv(U(p, "uDrip"), NDRIP, &dv[0][0]);
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex_static[0]);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, tex_static[1]);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, tex_atlas);
-    glActiveTexture(GL_TEXTURE0);
-    glBindVertexArray(vao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindTexture(GL_TEXTURE_2D, tex_cap);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, CAP_W, CAP_H, 0, GL_RED, GL_UNSIGNED_BYTE, cap_px);
+    glGenerateMipmap(GL_TEXTURE_2D);
 }
 
-/* advance the springs to time t (fixed sub-steps) and read the sensors once a second */
+/* a low-precision moon and sun (after Meeus) for the date, seen from about
+ * latitude 52 N and the longitude the time zone suggests */
+static void sky_init(double wt) {
+    double d = wt / 86400.0 + 2440587.5 - 2451545.0;
+    double R = M_PI / 180;
+    double L = 218.316 + 13.176396 * d, Mm = 134.963 + 13.064993 * d, F = 93.272 + 13.229350 * d;
+    double lon = (L + 6.289 * sin(Mm * R)) * R, lat = 5.128 * sin(F * R) * R;
+    double Ms = 357.529 + 0.98560028 * d, Ls = 280.459 + 0.98564736 * d;
+    double slon = (Ls + 1.915 * sin(Ms * R) + 0.020 * sin(2 * Ms * R)) * R;
+    double e = 23.439 * R;
+    double E = acos(cos(lat) * cos(lon - slon));
+    sky.phase = (float)E;
+    sky.lit = (float)((1 - cos(E)) / 2);
+    time_t ts = (time_t)wt;
+    struct tm tm;
+    localtime_r(&ts, &tm);
+    double olon = tm.tm_gmtoff / 3600.0 * 15 * R, olat = 52 * R;
+    double gmst = (280.46061837 + 360.98564736629 * d) * R;
+    V3 dirs[2];
+    for (int k = 0; k < 2; k++) {
+        double bl = k ? 0 : lat, ln = k ? slon : lon;
+        double ra = atan2(sin(ln) * cos(e) - tan(bl) * sin(e), cos(ln));
+        double dec = asin(sin(bl) * cos(e) + cos(bl) * sin(e) * sin(ln));
+        double ha = gmst + olon - ra;
+        double alt = asin(sin(olat) * sin(dec) + cos(olat) * cos(dec) * cos(ha));
+        double az = atan2(-sin(ha), tan(dec) * cos(olat) - sin(olat) * cos(ha));
+        if (k == 0) alt = fmax(fmin(alt, 50 * R), 22 * R);   /* lifted to be seen */
+        /* the line runs north along +z, east is -x */
+        dirs[k] = v3((float)(-cos(alt) * sin(az)), (float)sin(alt), (float)(cos(alt) * cos(az)));
+    }
+    sky.moon = vnorm(dirs[0]);
+    V3 toward = vsub(dirs[1], vmul(sky.moon, vdot(dirs[1], sky.moon)));
+    sky.moon_up = vlen(toward) > 1e-4f ? vnorm(toward) : v3(0, -1, 0);
+    uint32_t h = opt_seed * 2654435761u;
+    h ^= h >> 15;
+    sky.weather = opt_weather >= 0 ? opt_weather : (h % 100 < 55 ? 0 : h % 100 < 75 ? 1 : h % 100 < 87 ? 3 : 2);
+    sky.cloud = sky.weather == 0 ? 0.2f + 0.3f * ((h >> 8) % 100) / 100.0f : sky.weather == 3 ? 0.45f : 0.92f;
+    sky.towns[0] = (float)((h >> 12) % 628) / 100.0f;
+    sky.towns[1] = sky.towns[0] + 2.0f + (float)((h >> 20) % 200) / 100.0f;
+    sky.towns[2] = 1.0f;
+}
+
+/* ---- the simulation ---- */
 static double last_read;
+static int sim_started;
+static void physics(double dt) {
+    float load = clampf(sens.load, 0, 1);
+    tr.load_s += (load - tr.load_s) * (float)(dt / 4.0);
+    tr.temp_s += (sens.temp - tr.temp_s) * (float)(dt / 6.0);
+    /* she runs between 34 and 90 mph by how hard the CPU works */
+    tr.vt = 15 + 25 * tr.load_s;
+    double acc = clampf((float)(tr.vt - tr.v) / 6.0f, -0.6f, 0.45f);
+    tr.v += acc * dt;
+    tr.z += tr.v * dt;
+    tr.wa[0] += tr.v / DRV_R * dt;
+    tr.wa[1] += tr.v / 0.48 * dt;
+    tr.wa[2] += tr.v / 0.56 * dt;
+    tr.wa[3] += tr.v / 0.63 * dt;
+    tr.beats += tr.v / (2 * M_PI * DRV_R) * 4 * dt;
+    /* the driver notches up as she gathers speed, and opens out climbing */
+    float ct = clampf(0.62f - (float)(tr.v - 15) / 25 * 0.4f + 0.25f * (float)(acc > 0.1 ? acc : 0) + (float)track_dy(tr.z) * 8, 0.15f, 0.75f);
+    tr.cutoff += (ct - tr.cutoff) * (float)(dt / 3.0);
+    float ft = clampf((tr.temp_s - 35) / 50, 0, 1);
+    tr.fire += (0.45f + 0.55f * ft - tr.fire) * (float)(dt / 5.0);
+    float mf = sens.mem_total_gb > 0 ? sens.mem_gb / sens.mem_total_gb : 0.4f;
+    tr.ncoach_want = 3 + (int)lroundf(clampf(mf, 0, 1) * 6);
+    if (tr.ncoach_want > MAXCOACH) tr.ncoach_want = MAXCOACH;
+    smoke_step(dt);
+}
+static void sim_init(void) {
+    tr.load_s = clampf(sens.load, 0, 1);
+    tr.temp_s = sens.temp > 0 ? sens.temp : 50;
+    tr.v = tr.vt = 15 + 25 * tr.load_s;
+    tr.cutoff = 0.3f;
+    tr.fire = 0.7f;
+    float mf = sens.mem_total_gb > 0 ? sens.mem_gb / sens.mem_total_gb : 0.4f;
+    tr.ncoach = tr.ncoach_want = 3 + (int)lroundf(clampf(mf, 0, 1) * 6);
+    if (tr.ncoach > MAXCOACH) tr.ncoach = tr.ncoach_want = MAXCOACH;
+    tr.lit = 0.85f;
+}
+/* advance to t seconds after the epoch; read the sensors once a second (on
+ * the same wall-clock second as the other instances, when spanning) */
 static void advance(double t, double wt) {
-    /* spanning, every instance reads on the same wall-clock second, so
-     * their needles move together */
-    if (span_me >= 0 ? floor(wt) != last_read : t - last_read >= 1.0) {
+    if (span_me >= 0 ? floor(wt) != last_read : t - last_read >= 1.0 || !sim_started) {
         read_sensors();
-        set_targets();
         last_read = span_me >= 0 ? floor(wt) : t;
     }
-    const float h = 1.0f / 240;
-    if (t - sim_t > 10) sim_t = t - 10;     /* long after the epoch: the springs have settled anyway */
+    const double h = 1.0 / 120;
+    if (!sim_started) {
+        /* the train is where a steady run from the epoch would have put it,
+         * with the last half minute run for real (so the smoke's there) */
+        sim_started = 1;
+        double t0 = fmax(t - 30, 0);
+        sim_t = t0;
+        tr.z = 600 + 20 * t0;
+        director_init(t0);
+    }
+    if (t - sim_t > 30) {
+        tr.z += 20 * (t - 30 - sim_t);
+        sim_t = t - 30;
+    }
     while (sim_t + h <= t) {
         sim_t += h;
-        physics(wt - (t - sim_t), sim_t, h, sim_t > 0.6);
+        physics(h);
+        director_update(sim_t);
     }
-    sim_t_now = t;
 }
-/* ---- --layer: a native Wayland wallpaper (wlr-layer-shell + EGL) ---- */
-static struct {
-    struct wl_display *d;
-    struct wl_compositor *comp;
-    struct zwlr_layer_shell_v1 *shell;
-    struct wl_surface *surf;
-    struct zwlr_layer_surface_v1 *ls;
-    struct wl_egl_window *ew;
-    EGLDisplay ed;
-    EGLSurface es;
-    int configured, closed;
-} wl;
 
-static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
-    (void)data;
-    if (!strcmp(intf, wl_compositor_interface.name))
-        wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
-    else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
-        wl.shell = wl_registry_bind(r, name, &zwlr_layer_shell_v1_interface, ver < 4 ? ver : 4);
-}
-static void wl_global_remove(void *data, struct wl_registry *r, uint32_t name) { (void)data; (void)r; (void)name; }
-static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove};
+/* ---- drawing ---- */
+static GLuint p_obj, p_ter, p_tree, p_sky, p_down, p_up, p_post, p_shadow, p_tree_pre, p_ter_pre;
+static GLuint vao_full;
+static GMesh g_tree;
+static GLuint vao_tree;
 
-static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
-    (void)data;
-    zwlr_layer_surface_v1_ack_configure(ls, serial);
-    /* a resize rebuilds the panel at the next frame */
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+/* the canvas (see setup_view), and this output's slice of it */
+static float cam_cx, cam_cy, cam_f, view_x, view_y, view_w, view_h, lay_x0, lay_y0, lay_w, lay_h, front_w, front_h;
+static void setup_view(void) {
+    if (span_me < 0) {
+        view_x = view_y = 0; view_w = (float)W; view_h = (float)H;
+        cam_cx = W / 2.0f; cam_cy = H / 2.0f;
+        lay_x0 = lay_y0 = 0; lay_w = (float)W; lay_h = (float)H;
+        front_w = (float)W; front_h = (float)H;
+    } else {
+        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+        for (int i = 0; i < span_n; i++) {
+            x0 = fminf(x0, span[i][0]); x1 = fmaxf(x1, span[i][0] + span[i][2]);
+            y0 = fminf(y0, span[i][1]); y1 = fmaxf(y1, span[i][1] + span[i][3]);
+        }
+        lay_x0 = x0; lay_y0 = y0; lay_w = x1 - x0; lay_h = y1 - y0;
+        float mx = (x0 + x1) / 2;
+        int mid = 0;
+        for (int i = 0; i < span_n; i++)
+            if (span[i][0] <= mx && mx < span[i][0] + span[i][2]) { mid = i; break; }
+        cam_cx = span[mid][0] + span[mid][2] / 2;
+        cam_cy = span[mid][1] + span[mid][3] / 2;
+        front_w = span[mid][2]; front_h = span[mid][3];
+        view_x = span[span_me][0]; view_y = span[span_me][1];
+        view_w = span[span_me][2]; view_h = span[span_me][3];
     }
-    wl.configured = 1;
-}
-static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
-static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
-
-static void wl_init(void) {
-    if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
-    struct wl_registry *reg = wl_display_get_registry(wl.d);
-    wl_registry_add_listener(reg, &wl_reg_l, NULL);
-    wl_display_roundtrip(wl.d);
-    if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
-    wl.surf = wl_compositor_create_surface(wl.comp);
-    wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "steam");
-    zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
-    zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
-                                                ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
-    zwlr_layer_surface_v1_set_exclusive_zone(wl.ls, -1);
-    zwlr_layer_surface_v1_set_size(wl.ls, 0, 0);
-    struct wl_region *none = wl_compositor_create_region(wl.comp);
-    wl_surface_set_input_region(wl.surf, none);
-    wl_region_destroy(none);
-    wl_surface_commit(wl.surf);
-    while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
-    if (!wl.configured) die("the layer surface was never configured");
-
-    PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
-    wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
-    if (!eglInitialize(wl.ed, NULL, NULL)) die("eglInitialize failed");
-    eglBindAPI(EGL_OPENGL_API);
-    static const EGLint cfg_attr[] = {EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
-                                      EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 0, EGL_NONE};
-    EGLConfig cfg;
-    EGLint n = 0;
-    if (!eglChooseConfig(wl.ed, cfg_attr, &cfg, 1, &n) || n < 1) die("no suitable EGL config");
-    static const EGLint ctx_attr[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 3,
-                                      EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT, EGL_NONE};
-    EGLContext ctx = eglCreateContext(wl.ed, cfg, EGL_NO_CONTEXT, ctx_attr);
-    if (ctx == EGL_NO_CONTEXT) die("can't create a GL 3.3 context");
-    wl.ew = wl_egl_window_create(wl.surf, W, H);
-    wl.es = eglCreateWindowSurface(wl.ed, cfg, (EGLNativeWindowType)wl.ew, NULL);
-    if (wl.es == EGL_NO_SURFACE || !eglMakeCurrent(wl.ed, wl.es, wl.es, ctx)) die("can't make the EGL surface current");
-    eglSwapInterval(wl.ed, 1);
+    /* the lens is set for a 16:9 frame as wide as the front output allows */
+    float fw = fminf(front_w, front_h * 16 / 9.0f);
+    cam_f = fw / 2 / tanf(cam.hfov / 2 * (float)M_PI / 180);
 }
 
-static int wl_poll(void) {
-    while (wl_display_prepare_read(wl.d) != 0) wl_display_dispatch_pending(wl.d);
-    wl_display_flush(wl.d);
-    struct pollfd pf = {wl_display_get_fd(wl.d), POLLIN, 0};
-    if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
-    else wl_display_cancel_read(wl.d);
-    if (wl_display_dispatch_pending(wl.d) < 0) return 0;
-    return !wl.closed;
+static M4 VP;
+static float view_tan[4], rot3[9];
+static void setup_matrices(void) {
+    float l = (view_x - cam_cx) / cam_f, r = (view_x + view_w - cam_cx) / cam_f;
+    float b = (cam_cy - view_y - view_h) / cam_f, t = (cam_cy - view_y) / cam_f;
+    view_tan[0] = l; view_tan[1] = b; view_tan[2] = r - l; view_tan[3] = t - b;
+    M4 V = m4id();
+    V3 B = vmul(cam.F, -1);
+    V.m[0] = cam.R.x; V.m[4] = cam.R.y; V.m[8] = cam.R.z;
+    V.m[1] = cam.U.x; V.m[5] = cam.U.y; V.m[9] = cam.U.z;
+    V.m[2] = B.x; V.m[6] = B.y; V.m[10] = B.z;
+    /* camera -> world, column-major, for the sky */
+    rot3[0] = cam.R.x; rot3[1] = cam.R.y; rot3[2] = cam.R.z;
+    rot3[3] = cam.U.x; rot3[4] = cam.U.y; rot3[5] = cam.U.z;
+    rot3[6] = B.x; rot3[7] = B.y; rot3[8] = B.z;
+    float n = 0.2f, fa = 16000;
+    M4 P = {{0}};
+    P.m[0] = 2 / (r - l); P.m[8] = (r + l) / (r - l);
+    P.m[5] = 2 / (t - b); P.m[9] = (t + b) / (t - b);
+    P.m[10] = -(fa + n) / (fa - n); P.m[11] = -1; P.m[14] = -2 * fa * n / (fa - n);
+    VP = m4mul(P, V);
+}
+
+/* a frame's model matrix, camera-relative */
+static M4 frame_model(const Frame *f) {
+    return m4basis(f->X, f->Y, f->Z, v3((float)(f->o[0] - cam.p[0]), (float)(f->o[1] - cam.p[1]), (float)(f->o[2] - cam.p[2])));
+}
+
+/* the point lights for this frame */
+#define MAXPL 16
+static float pl[MAXPL][4], plc[MAXPL][4];
+static int npl;
+static void add_light(const double *wp, float rad, float r, float g, float b) {
+    if (npl >= MAXPL) return;
+    float x = (float)(wp[0] - cam.p[0]), y = (float)(wp[1] - cam.p[1]), z = (float)(wp[2] - cam.p[2]);
+    if (x * x + y * y + z * z > 600.0f * 600.0f) return;
+    pl[npl][0] = x; pl[npl][1] = y; pl[npl][2] = z;
+    pl[npl][3] = rad;
+    plc[npl][0] = r; plc[npl][1] = g; plc[npl][2] = b; plc[npl][3] = 0;
+    npl++;
+}
+
+static float car_u[12][4], car_d[12][4];
+static int ncar_u;
+static M4 shadowM;
+static float fog_col[3], fog_den, mist_y, moon_col[3], sky_col[3], gnd_col[3];
+
+static void set_common(GLuint p) {
+    glUseProgram(p);
+    glUniform3f(UL(p, "uMoonDir"), sky.moon.x, sky.moon.y, sky.moon.z);
+    glUniform3fv(UL(p, "uMoonCol"), 1, moon_col);
+    glUniform3fv(UL(p, "uSkyCol"), 1, sky_col);
+    glUniform3fv(UL(p, "uGndCol"), 1, gnd_col);
+    glUniform3fv(UL(p, "uFogCol"), 1, fog_col);
+    glUniform1f(UL(p, "uFogDen"), fog_den);
+    glUniform1f(UL(p, "uMistY"), mist_y);
+    glUniform1f(UL(p, "uMistDen"), sky.weather == 3 ? 0.012f : 0.004f);
+    glUniform1f(UL(p, "uTime"), (float)fmod(t_now, 1000.0));
+    glUniform3f(UL(p, "uWOff"), (float)fmod(cam.p[0], 4096.0), (float)cam.p[1], (float)fmod(cam.p[2], 4096.0));
+    glUniform4fv(UL(p, "uPL"), MAXPL, &pl[0][0]);
+    glUniform4fv(UL(p, "uPLC"), MAXPL, &plc[0][0]);
+    glUniform1i(UL(p, "uNPL"), npl);
+    glUniform4fv(UL(p, "uCar"), 12, &car_u[0][0]);
+    glUniform4fv(UL(p, "uCarD"), 12, &car_d[0][0]);
+    glUniform1i(UL(p, "uNCar"), ncar_u);
+    glUniform1i(UL(p, "uShadow"), 4);
+    glUniformMatrix4fv(UL(p, "uShadowM"), 1, GL_FALSE, shadowM.m);
+    glUniformMatrix4fv(UL(p, "uVP"), 1, GL_FALSE, VP.m);
+}
+
+/* ---- render targets ---- */
+static int scene_w, scene_h;
+static GLuint fbo_scene, tex_scene, tex_depth;
+#define NBLOOM 6
+static GLuint fbo_bloom[NBLOOM], tex_bloom[NBLOOM];
+static int bloom_w[NBLOOM], bloom_h[NBLOOM];
+static GLuint fbo_shadow, tex_shadow;
+#define SHADOW_N 2048
+static void targets(int sw, int sh) {
+    if (sw == scene_w && sh == scene_h) return;
+    if (scene_w) {
+        glDeleteFramebuffers(1, &fbo_scene); glDeleteTextures(1, &tex_scene); glDeleteTextures(1, &tex_depth);
+        glDeleteFramebuffers(NBLOOM, fbo_bloom); glDeleteTextures(NBLOOM, tex_bloom);
+        smoke_targets_free();
+    }
+    scene_w = sw; scene_h = sh;
+    tex_scene = mk_tex(sw, sh, GL_R11F_G11F_B10F, GL_RGB, GL_FLOAT, GL_LINEAR);
+    tex_depth = mk_tex(sw, sh, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, GL_NEAREST);
+    fbo_scene = mk_fbo(tex_scene, tex_depth);
+    int bw = sw, bh = sh;
+    for (int i = 0; i < NBLOOM; i++) {
+        bw = (bw + 1) / 2; bh = (bh + 1) / 2;
+        bloom_w[i] = bw; bloom_h[i] = bh;
+        tex_bloom[i] = mk_tex(bw, bh, GL_R11F_G11F_B10F, GL_RGB, GL_FLOAT, GL_LINEAR);
+        fbo_bloom[i] = mk_fbo(tex_bloom[i], 0);
+    }
+    smoke_targets(sw, sh);
+}
+
+static void fullscreen(void) {
+    glBindVertexArray(vao_full);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+}
+static void fullscreen_tri(void) { fullscreen(); }
+static char fs_buf[1 << 17];
+#define FSRC(a, b) (snprintf(fs_buf, sizeof fs_buf, "%s%s%s%s", HDR, GL_COMMON, a, b), fs_buf)
+#include "smoke.h"
+
+/* the tree mesh: a conifer (material 0) and a broadleaf crown (material 1), unit height */
+static void trees_init(void) {
+    static Mesh m;
+    mb_begin(&m);
+    mb->mat = 0;
+    M4 up = m4rotx(-(float)M_PI / 2);
+    for (int k = 0; k < 4; k++) {
+        float y0 = 0.12f + k * 0.2f, r = 0.3f - k * 0.06f;
+        float pr[] = {0, y0, r, y0, r * 0.75f, y0 + 0.08f, 0, y0 + 0.36f};
+        mb->xf = up;
+        mb_lathe(pr, 4, 9, 0, 2 * (float)M_PI);
+    }
+    {
+        float pr[] = {0.025f, 0, 0.025f, 0.2f};
+        mb->xf = up;
+        mb_lathe(pr, 2, 5, 0, 2 * (float)M_PI);
+    }
+    mb->mat = 1;
+    {
+        float pr[18];
+        for (int i = 0; i < 9; i++) {
+            float a = (float)M_PI * i / 8;
+            pr[2 * i] = 0.36f * sinf(a) * (1 + 0.12f * sinf(a * 5));
+            pr[2 * i + 1] = 0.58f - 0.4f * cosf(a);
+        }
+        mb->xf = up;
+        mb_lathe(pr, 9, 11, 0, 2 * (float)M_PI);
+        float tr2[] = {0.035f, 0, 0.035f, 0.3f};
+        mb_lathe(tr2, 2, 5, 0, 2 * (float)M_PI);
+    }
+    mb->xf = m4id();
+    gm_upload(&g_tree, &m);
+    glGenVertexArrays(1, &vao_tree);
+    glBindVertexArray(vao_tree);
+    glBindBuffer(GL_ARRAY_BUFFER, g_tree.vbo);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, VF * sizeof(float), (void *)0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, VF * sizeof(float), (void *)(3 * sizeof(float)));
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, VF * sizeof(float), (void *)(6 * sizeof(float)));
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, VF * sizeof(float), (void *)(8 * sizeof(float)));
+    for (int i = 0; i < 6; i++) glEnableVertexAttribArray((GLuint)i);
+    glVertexAttribDivisor(4, 1);
+    glVertexAttribDivisor(5, 1);
+}
+
+static int tile_visible(const Tile *t) {
+    double size = TROOT / (1 << t->level);
+    float hx = (float)(size / 2), hy = (t->hmax - t->hmin) / 2 + 15;
+    return visible((float)(t->ox + size / 2 - cam.p[0]), (float)((t->hmax + t->hmin) / 2 - cam.p[1]), (float)(t->oz + size / 2 - cam.p[2]), sqrtf(2 * hx * hx + hy * hy));
+}
+static void draw_trees(GLuint p) {
+    glBindVertexArray(vao_tree);
+    for (int i = 0; i < ndraw; i++) {
+        Tile *t = drawlist[i];
+        if (!t->ntree || !tile_visible(t)) continue;
+        glUniform3f(UL(p, "uTileO"), (float)(t->ox - cam.p[0]), (float)(-cam.p[1]), (float)(t->oz - cam.p[2]));
+        glBindBuffer(GL_ARRAY_BUFFER, t->tree_vbo);
+        glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)0);
+        glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)(4 * sizeof(float)));
+        glDrawArraysInstanced(GL_TRIANGLES, 0, g_tree.n, t->ntree);
+    }
+}
+
+/* the valve gear and rods for one side (s = +1 / -1), the engine's frame f */
+static void draw_motion(GLuint p, const Frame *f, int s) {
+    M4 base = frame_model(f);
+    /* this side's crank leads the other's by a quarter turn */
+    float th = (float)tr.wa[0] + (s > 0 ? 0 : (float)M_PI / 2);
+    float x = s * 0.93f;
+    float cz = CRANK_R * cosf(th), cy = DRV_R + CRANK_R * sinf(th);
+    /* the crosshead, driven by the connecting rod from the middle pin */
+    float dy = CYL_Y - cy;
+    float xz = cz + sqrtf(CON_L * CON_L - dy * dy);
+    /* the return crank and eccentric rod, the expansion link, radius rod, combination lever */
+    float ea = th - (float)M_PI / 2;
+    float ez = 0.21f * cosf(ea), ey = DRV_R + 0.21f * sinf(ea);
+    float kz = 1.6f, ky = 1.62f;
+    float lo = -0.8f, hi = 0.8f;
+    for (int i = 0; i < 24; i++) {
+        float a = (lo + hi) / 2;
+        float fz = kz + 0.3f * sinf(a), fy = ky - 0.3f * cosf(a);
+        float d = sqrtf((fz - ez) * (fz - ez) + (fy - ey) * (fy - ey));
+        if (d > 1.55f) hi = a; else lo = a;
+    }
+    float la = (lo + hi) / 2;
+    float fz = kz + 0.3f * sinf(la), fy = ky - 0.3f * cosf(la);
+    float die = 0.06f + (tr.cutoff - 0.15f) / 0.6f * 0.2f;
+    float dz = kz - die * sinf(la), dyy = ky + die * cosf(la);
+    float tz = dz + sqrtf(2.3f * 2.3f - (1.62f - dyy) * (1.62f - dyy)), ty = 1.62f;
+    float uz = xz + 0.35f, uy = 0.78f;
+    struct { float az, ay, bz, by, xo; GMesh *m; } parts[] = {
+        {cz + drv_z[0], cy, cz + drv_z[2], cy, x + s * 0.05f, &g_rod},
+        {cz, cy, xz, CYL_Y, x + s * 0.12f, &g_rod},
+        {ez, ey, fz, fy, x + s * 0.2f, &g_link},
+        {kz + 0.3f * sinf(la), ky - 0.3f * cosf(la), kz - 0.32f * sinf(la), ky + 0.32f * cosf(la), x + s * 0.16f, &g_rod},
+        {dz, dyy, tz, ty, x + s * 0.14f, &g_link},
+        {tz, ty + 0.05f, uz, uy, x + s * 0.1f, &g_link},
+        {uz, uy, xz, CYL_Y - 0.1f, x + s * 0.1f, &g_link},
+    };
+    for (size_t i = 0; i < sizeof parts / sizeof *parts; i++) {
+        V3 a = v3(parts[i].xo, parts[i].ay, parts[i].az), b = v3(parts[i].xo, parts[i].by, parts[i].bz);
+        V3 Z = vsub(b, a);
+        float L = vlen(Z);
+        Z = vmul(Z, 1 / L);
+        V3 X = v3(1, 0, 0), Y = vcross(Z, X);
+        M4 m = m4mul(base, m4basis(X, Y, vmul(Z, L), a));
+        glUniformMatrix4fv(UL(p, "uModel"), 1, GL_FALSE, m.m);
+        gm_draw(parts[i].m);
+    }
+    M4 m = m4mul(base, m4trans(x + s * 0.12f, CYL_Y, xz));
+    glUniformMatrix4fv(UL(p, "uModel"), 1, GL_FALSE, m.m);
+    gm_draw(&g_xhead);
+    for (int i = 0; i < 3; i++) {
+        M4 pm = m4mul(base, m4mul(m4trans(s * 0.8f, cy, cz + drv_z[i]), m4scale((float)s, 1, 1)));
+        glUniformMatrix4fv(UL(p, "uModel"), 1, GL_FALSE, pm.m);
+        gm_draw(&g_pin);
+    }
+}
+
+static void draw_train(GLuint p, int wheels) {
+    glUniform1i(UL(p, "uTex"), 3);
+    float wa[4], ww[4];
+    static const float rr[4] = {DRV_R, 0.48f, 0.56f, 0.63f};
+    for (int i = 0; i < 4; i++) {
+        wa[i] = (float)fmod(tr.wa[i], 2 * M_PI);
+        ww[i] = (float)(tr.v / rr[i]);
+    }
+    glUniform4fv(UL(p, "uWheelA4"), 1, wa);
+    glUniform4fv(UL(p, "uWheelW4"), 1, ww);
+    int nveh = 2 + tr.ncoach;
+    for (int i = 0; i < nveh; i++) {
+        Frame f = veh_frame(i);
+        double d2 = (f.o[0] - cam.p[0]) * (f.o[0] - cam.p[0]) + (f.o[2] - cam.p[2]) * (f.o[2] - cam.p[2]);
+        if (d2 > 3000.0 * 3000.0) continue;
+        double c[3];
+        fpt(&f, 0, 2.0f, i == 0 ? 1.0f : 0.0f, c);
+        if (!visible((float)(c[0] - cam.p[0]), (float)(c[1] - cam.p[1]), (float)(c[2] - cam.p[2]), i == 0 ? 8.0f : i == 1 ? 5.0f : 11.0f)) continue;
+        M4 m = frame_model(&f);
+        glUniformMatrix4fv(UL(p, "uModel"), 1, GL_FALSE, m.m);
+        glUniform4f(UL(p, "uObj"), 1.0f, tr.lit, (float)i * 1.37f, tr.fire * (0.85f + 0.3f * flick));
+        if (wheels) { gm_draw(i == 0 ? &g_loco_w : i == 1 ? &g_tender_w : &g_coach_w); continue; }
+        gm_draw(i == 0 ? &g_loco : i == 1 ? &g_tender : &g_coach);
+        if (i == 0 && d2 < 400.0 * 400.0) { draw_motion(p, &f, 1); draw_motion(p, &f, -1); }
+    }
+}
+
+/* the moon's shadow map, round what the camera's looking at */
+static void render_shadow(void) {
+    float fd = fminf(cam.focus, 45);
+    V3 c = vmul(cam.F, fd);
+    float R = 55;
+    V3 Z = sky.moon;
+    V3 X = vnorm(vcross(v3(0, 1, 0), Z));
+    V3 Y = vcross(Z, X);
+    /* snap the centre to the map's texels so edges don't crawl */
+    float texel = 2 * R / SHADOW_N;
+    V3 wc = vadd(c, v3((float)fmod(cam.p[0], 1024.0), (float)cam.p[1], (float)fmod(cam.p[2], 1024.0)));
+    float cx = vdot(c, X), cy = vdot(c, Y), cz = vdot(c, Z);
+    float wx = vdot(wc, X), wy = vdot(wc, Y);
+    cx -= wx - floorf(wx / texel) * texel;
+    cy -= wy - floorf(wy / texel) * texel;
+    M4 V = m4id();
+    V.m[0] = X.x; V.m[4] = X.y; V.m[8] = X.z;
+    V.m[1] = Y.x; V.m[5] = Y.y; V.m[9] = Y.z;
+    V.m[2] = Z.x; V.m[6] = Z.y; V.m[10] = Z.z;
+    V.m[12] = -cx; V.m[13] = -cy; V.m[14] = -cz;
+    float d = 200;
+    M4 P = m4id();
+    P.m[0] = 1 / R; P.m[5] = 1 / R; P.m[10] = -1 / d;
+    shadowM = m4mul(P, V);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_shadow);
+    glViewport(0, 0, SHADOW_N, SHADOW_N);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glUseProgram(p_shadow);
+    glUniformMatrix4fv(UL(p_shadow, "uVP"), 1, GL_FALSE, shadowM.m);
+    glUniform4fv(UL(p_shadow, "uPal2"), 48, &pal2[0][0]);
+    glUniform1f(UL(p_shadow, "uPre"), 0);
+    cull_on = 0;
+    draw_train(p_shadow, 0);
+    draw_train(p_shadow, 1);
+    lineside_draw(p_shadow, 1);
+    glUseProgram(p_tree);
+    glUniformMatrix4fv(UL(p_tree, "uVP"), 1, GL_FALSE, shadowM.m);
+    glUniform1f(UL(p_tree, "uTime"), (float)fmod(t_now, 1000.0));
+    draw_trees(p_tree);
+    cull_on = 1;
+}
+
+static float render_scale = 1;
+static int frame_no;
+/* --bench: GPU time per pass */
+enum { PR_SHADOW, PR_PRE, PR_OBJ, PR_LINE, PR_TREE, PR_TER, PR_SKY, PR_RESOLVE, PR_SMOKE, PR_BLOOM, PR_POST, PR_N };
+static const char *prof_name[PR_N] = {"shadow", "prepass", "train", "lineside", "trees", "terrain", "sky", "resolve", "smoke", "bloom", "post"};
+static GLuint prof_q[PR_N + 1];
+static double prof_ms[PR_N], prof_cpu;
+static int prof_on;
+static void prof_mark(int i) { if (prof_on) glQueryCounter(prof_q[i], GL_TIMESTAMP); }
+static void prof_collect(void) {
+    if (!prof_on) return;
+    GLuint64 t[PR_N + 1];
+    for (int i = 0; i <= PR_N; i++) glGetQueryObjectui64v(prof_q[i], GL_QUERY_RESULT, &t[i]);
+    for (int i = 0; i < PR_N; i++) prof_ms[i] += (t[i + 1] - t[i]) / 1e6;
+}
+static void render(GLuint target) {
+    t_now = sim_t;
+    director_camera(sim_t);
+    setup_view();
+    setup_matrices();
+    frustum_from(&VP);
+    int sw = (int)(W * render_scale + 0.5f), sh = (int)(H * render_scale + 0.5f);
+    targets(sw, sh);
+    tiles_update(cam.p[0], cam.p[2], 9000, opt_shot || frame_no < 2 ? 100000 : 3);
+    lineside_update();
+    frame_no++;
+    if (tr.ncoach != tr.ncoach_want && director_offscreen_tail()) tr.ncoach = tr.ncoach_want;
+
+    /* light and air */
+    float ml = 0.3f + 0.7f * sky.lit;
+    float cl = sky.weather == 0 ? 1.0f : 0.5f;
+    moon_col[0] = 0.30f * ml * cl; moon_col[1] = 0.34f * ml * cl; moon_col[2] = 0.45f * ml * cl;
+    sky_col[0] = 0.010f + 0.012f * ml; sky_col[1] = 0.013f + 0.016f * ml; sky_col[2] = 0.022f + 0.028f * ml;
+    gnd_col[0] = 0.004f; gnd_col[1] = 0.0045f; gnd_col[2] = 0.005f;
+    fog_col[0] = 0.008f + 0.010f * ml; fog_col[1] = 0.011f + 0.013f * ml; fog_col[2] = 0.018f + 0.022f * ml;
+    fog_den = sky.weather == 3 ? 1 / 700.0f : sky.weather == 1 ? 1 / 1300.0f : sky.weather == 2 ? 1 / 1000.0f : 1 / 3000.0f;
+    mist_y = (float)(-16 - cam.p[1]);
+    flick = 0.6f * sinf((float)t_now * 7.3f) * sinf((float)t_now * 3.1f + 1) + 0.4f * sinf((float)t_now * 13.7f + 2);
+
+    /* lights: the fire under the engine and in the cab, the lamps; the carriages' windows */
+    npl = 0;
+    Frame f0 = veh_frame(0);
+    double wp[3];
+    float fi = tr.fire * (0.85f + 0.15f * flick);
+    fpt(&f0, 0, 0.45f, -3.3f, wp); add_light(wp, 1.3f, 4.0f * fi, 1.3f * fi, 0.3f * fi);
+    fpt(&f0, 0, 2.9f, -4.4f, wp); add_light(wp, 1.3f, 5.0f * fi, 1.8f * fi, 0.5f * fi);
+    for (int s = -1; s <= 1; s += 2) { fpt(&f0, s * 0.87f, 1.48f, 7.7f, wp); add_light(wp, 1.0f, 0.8f, 0.68f, 0.45f); }
+    {
+        Frame ft = veh_frame(1 + tr.ncoach);
+        fpt(&ft, 0.6f, 1.6f, -COACH_L / 2 - 0.4f, wp); add_light(wp, 0.6f, 0.6f, 0.03f, 0.01f);
+    }
+    lineside_lights();
+    ncar_u = 0;
+    for (int i = 2; i < 2 + tr.ncoach && ncar_u < 12; i++) {
+        Frame f = veh_frame(i);
+        car_u[ncar_u][0] = (float)(f.o[0] - cam.p[0]); car_u[ncar_u][1] = (float)(f.o[1] - cam.p[1] + 2.5);
+        car_u[ncar_u][2] = (float)(f.o[2] - cam.p[2]); car_u[ncar_u][3] = COACH_L / 2;
+        V3 fz = vnorm(v3(f.Z.x, 0, f.Z.z));
+        car_d[ncar_u][0] = fz.x; car_d[ncar_u][1] = fz.z; car_d[ncar_u][2] = tr.lit * (lineside_in_tunnel(f.o[2]) ? 0.3f : 1.0f); car_d[ncar_u][3] = 0;
+        ncar_u++;
+    }
+
+    prof_mark(PR_SHADOW);
+    render_shadow();
+    prof_mark(PR_PRE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_scene);
+    glViewport(0, 0, scene_w, scene_h);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, tex_shadow);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, tex_sign);
+    glActiveTexture(GL_TEXTURE0);
+
+    /* depth first, cheaply, so the costly shading runs once a pixel (the
+     * wheels, blurred and partly see-through, are left to the main pass) */
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    glUseProgram(p_shadow);
+    glUniformMatrix4fv(UL(p_shadow, "uVP"), 1, GL_FALSE, VP.m);
+    glUniform1f(UL(p_shadow, "uPre"), 1);
+    draw_train(p_shadow, 0);
+    lineside_draw(p_shadow, 0);
+    glUseProgram(p_tree_pre);
+    glUniformMatrix4fv(UL(p_tree_pre, "uVP"), 1, GL_FALSE, VP.m);
+    glUniform1f(UL(p_tree_pre, "uTime"), (float)fmod(t_now, 1000.0));
+    draw_trees(p_tree_pre);
+    glUseProgram(p_ter_pre);
+    glUniformMatrix4fv(UL(p_ter_pre, "uVP"), 1, GL_FALSE, VP.m);
+    for (int i = 0; i < ndraw; i++) {
+        Tile *t = drawlist[i];
+        if (!tile_visible(t)) continue;
+        glUniform3f(UL(p_ter_pre, "uTileO"), (float)(t->ox - cam.p[0]), (float)(-cam.p[1]), (float)(t->oz - cam.p[2]));
+        gm_draw(&t->mesh);
+    }
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthFunc(GL_LEQUAL);
+
+    /* the train and the lineside */
+    prof_mark(PR_OBJ);
+    set_common(p_obj);
+    glUniform4fv(UL(p_obj, "uPal"), 48, &pal[0][0]);
+    glUniform4fv(UL(p_obj, "uPal2"), 48, &pal2[0][0]);
+    draw_train(p_obj, 0);
+    prof_mark(PR_LINE);
+    lineside_draw(p_obj, 0);
+    /* the wheels' spoked centres, blurred by their turning: blended over */
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    draw_train(p_obj, 1);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+
+    prof_mark(PR_TREE);
+    set_common(p_tree);
+    draw_trees(p_tree);
+
+    prof_mark(PR_TER);
+    set_common(p_ter);
+    {
+        double tz = cam.p[2];
+        float t4[4] = {(float)(track_x(tz) - cam.p[0]), 0, (float)track_dx(tz), (float)(track_y(tz) - cam.p[1])};
+        Feat cr = feat_near(tz, F_CROSSING);
+        Feat vd = feat_near(tz, F_VIADUCT);
+        float t5[4] = {(float)track_ddx(tz), (float)track_dy(tz), cr.on ? (float)((cr.z0 + cr.z1) / 2 - tz) : 1e6f, 0};
+        double vm = (vd.z0 + vd.z1) / 2;
+        float rv[4] = {(float)(vm - tz), (float)((vd.z1 - vd.z0) / 2), (float)(track_y(vm) - 41.5 - cam.p[1]), 0};
+        glUniform4fv(UL(p_ter, "uTrack"), 1, t4);
+        glUniform4fv(UL(p_ter, "uTrack2"), 1, t5);
+        glUniform4fv(UL(p_ter, "uRiver"), 1, rv);
+    }
+    for (int i = 0; i < ndraw; i++) {
+        Tile *t = drawlist[i];
+        if (!tile_visible(t)) continue;
+        glUniform3f(UL(p_ter, "uTileO"), (float)(t->ox - cam.p[0]), (float)(-cam.p[1]), (float)(t->oz - cam.p[2]));
+        glUniform3f(UL(p_ter, "uTileW"), (float)fmod(t->ox, 4096.0), 0, (float)fmod(t->oz, 4096.0));
+        gm_draw(&t->mesh);
+    }
+
+    /* the sky behind it all */
+    prof_mark(PR_SKY);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_FALSE);
+    set_common(p_sky);
+    glUniformMatrix3fv(UL(p_sky, "uCamRot"), 1, GL_FALSE, rot3);
+    glUniform4fv(UL(p_sky, "uViewTan"), 1, view_tan);
+    glUniform1f(UL(p_sky, "uPhase"), sky.phase);
+    glUniform3f(UL(p_sky, "uMoonUp"), sky.moon_up.x, sky.moon_up.y, sky.moon_up.z);
+    glUniform1f(UL(p_sky, "uCloud"), sky.cloud);
+    glUniform1f(UL(p_sky, "uStars"), sky.weather == 0 ? 1.0f : 0.15f);
+    glUniform4f(UL(p_sky, "uTowns"), sky.towns[0], sky.towns[1], sky.towns[2], 0);
+    fullscreen();
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+
+    prof_mark(PR_RESOLVE);
+    glDisable(GL_DEPTH_TEST);
+
+    /* smoke and steam, at half resolution, over it */
+    prof_mark(PR_SMOKE);
+    smoke_draw();
+    prof_mark(PR_BLOOM);
+
+    /* bloom */
+    glUseProgram(p_down);
+    glActiveTexture(GL_TEXTURE5);
+    for (int i = 0; i < NBLOOM; i++) {
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo_bloom[i]);
+        glViewport(0, 0, bloom_w[i], bloom_h[i]);
+        int sw2 = i ? bloom_w[i - 1] : scene_w, sh2 = i ? bloom_h[i - 1] : scene_h;
+        glBindTexture(GL_TEXTURE_2D, i ? tex_bloom[i - 1] : tex_scene);
+        glUniform1i(UL(p_down, "uSrc"), 5);
+        glUniform2f(UL(p_down, "uTexel"), 1.0f / sw2, 1.0f / sh2);
+        glUniform1f(UL(p_down, "uPrefilter"), i ? 0.0f : 0.15f);
+        fullscreen();
+    }
+    glUseProgram(p_up);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);
+    for (int i = NBLOOM - 1; i > 0; i--) {
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo_bloom[i - 1]);
+        glViewport(0, 0, bloom_w[i - 1], bloom_h[i - 1]);
+        glBindTexture(GL_TEXTURE_2D, tex_bloom[i]);
+        glUniform1i(UL(p_up, "uSrc"), 5);
+        glUniform2f(UL(p_up, "uTexel"), 1.0f / bloom_w[i], 1.0f / bloom_h[i]);
+        fullscreen();
+    }
+    glDisable(GL_BLEND);
+
+    prof_mark(PR_POST);
+    glBindFramebuffer(GL_FRAMEBUFFER, target);
+    glViewport(0, 0, W, H);
+    set_common(p_post);
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D, tex_scene);
+    glActiveTexture(GL_TEXTURE6);
+    glBindTexture(GL_TEXTURE_2D, tex_bloom[0]);
+    glActiveTexture(GL_TEXTURE7);
+    glBindTexture(GL_TEXTURE_2D, tex_cap);
+    glActiveTexture(GL_TEXTURE8);
+    glBindTexture(GL_TEXTURE_2D, tex_depth);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(UL(p_post, "uScene"), 5);
+    glUniform1i(UL(p_post, "uBloom"), 6);
+    glUniform1i(UL(p_post, "uCap"), 7);
+    glUniform1i(UL(p_post, "uDepth"), 8);
+    glUniform1f(UL(p_post, "uExposure"), 3.5f);
+    glUniform1f(UL(p_post, "uBloomAmt"), 0.05f);
+    glUniform1f(UL(p_post, "uFade"), director_fade(sim_t));
+    glUniform4f(UL(p_post, "uVig"), (view_x - lay_x0) / lay_w, (lay_y0 + lay_h - view_y - view_h) / lay_h, view_w / lay_w, view_h / lay_h);
+    {
+        /* the caption sits in the front output's bottom left corner */
+        int show = opt_caption && (span_me < 0 || (view_w == front_w && fabsf(view_x + view_w / 2 - cam_cx) < 1));
+        float ch = front_h * 0.075f, cw = ch * CAP_W / CAP_H;
+        float x0 = front_h * 0.05f, y0 = front_h * 0.045f;
+        glUniform4f(UL(p_post, "uCapRect"), x0 / W, y0 / H, cw / W, ch / H);
+        glUniform1f(UL(p_post, "uCapOn"), show ? 1.0f : 0.0f);
+    }
+    fullscreen();
+    prof_mark(PR_N);
+}
+
+static void gl_init(void) {
+    p_obj = mk_prog("obj", VS_OBJ, FSRC(FS_OBJ_HEAD, FS_OBJ));
+    p_shadow = mk_prog("shadow", VS_OBJ, FSRC(FS_OBJ_HEAD, FS_SHADOW));
+    p_ter = mk_prog("terrain", VS_TER, FSRC(FS_TER, ""));
+    p_tree = mk_prog("tree", VS_TREE, FSRC(FS_TREE, ""));
+    p_tree_pre = mk_prog("tree_pre", VS_TREE, FSRC(FS_NONE, ""));
+    p_ter_pre = mk_prog("ter_pre", VS_TER, FSRC(FS_NONE, ""));
+    p_sky = mk_prog("sky", VS_FULL, FSRC(FS_SKY, ""));
+    p_down = mk_prog("down", VS_FULL, FSRC(FS_DOWN, ""));
+    p_up = mk_prog("up", VS_FULL, FSRC(FS_UP, ""));
+    p_post = mk_prog("post", VS_FULL, FSRC(FS_POST, ""));
+    p_smoke = mk_prog("smoke", VS_SMOKE, FSRC(FS_SMOKE, ""));
+    p_smokecomp = mk_prog("smokecomp", VS_FULL, FSRC(FS_SMOKECOMP, ""));
+    glGenVertexArrays(1, &vao_full);
+    tex_shadow = mk_tex(SHADOW_N, SHADOW_N, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, GL_LINEAR);
+    fbo_shadow = mk_fbo(0, tex_shadow);
+    loco_meshes_init();
+    trees_init();
+    lineside_init();
+    smoke_init();
+    signs_build();
 }
 
 static void usage(void) {
     fprintf(stderr,
         "usage: steam [--window | --root | --layer] [--seed N] [--fps N] [--font FAMILY] [--sans FAMILY]\n"
         "             [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "             [--scale F] [--weather 0-3] [--view N] [--no-caption]\n"
         "             [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH]\n");
     exit(1);
 }
@@ -2781,27 +1071,6 @@ static void parse_layout(const char *str) {
     }
 }
 
-/* Spanning, the output under the middle of the layout is the front one and
- * gets the backhead; the rest, left to right, take the fireman's side and
- * the driver's side in turn. */
-static int pick_role(void) {
-    if (span_me < 0) return R_FRONT;
-    float x0 = 1e9f, x1 = -1e9f;
-    for (int i = 0; i < span_n; i++) { x0 = fminf(x0, span[i][0]); x1 = fmaxf(x1, span[i][0] + span[i][2]); }
-    float mx = (x0 + x1) / 2;
-    int front = 0;
-    for (int i = 0; i < span_n; i++)
-        if (span[i][0] <= mx && mx < span[i][0] + span[i][2]) { front = i; break; }
-    if (span_me == front) return R_FRONT;
-    int rank = 0;
-    for (int i = 0; i < span_n; i++) {
-        if (i == front || i == span_me) continue;
-        if (span[i][0] < span[span_me][0] || (span[i][0] == span[span_me][0] && (span[i][1] < span[span_me][1] ||
-                                               (span[i][1] == span[span_me][1] && i < span_me)))) rank++;
-    }
-    return rank % 2 ? R_DRIVER : R_FIREMAN;
-}
-
 static void save_ppm(const char *path) {
     unsigned char *px = malloc((size_t)W * H * 3);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -2813,6 +1082,14 @@ static void save_ppm(const char *path) {
     fclose(f);
     free(px);
 }
+
+/* keep about a 1200p scene's worth of pixels */
+static float auto_scale(void) {
+    if (opt_scale > 0) return opt_scale;
+    float px = (float)W * H;
+    return px > 1920.0f * 1200 ? sqrtf(1920.0f * 1200 / px) : 1.0f;
+}
+
 int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -2831,16 +1108,19 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-epoch") && i + 1 < argc) opt_epoch = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-layout") && i + 1 < argc) parse_layout(argv[++i]);
         else if (!strcmp(a, "-output") && i + 1 < argc) span_me = atoi(argv[++i]);
+        else if (!strcmp(a, "-scale") && i + 1 < argc) opt_scale = strtof(argv[++i], NULL);
+        else if (!strcmp(a, "-view") && i + 1 < argc) opt_view = atoi(argv[++i]);
+        else if (!strcmp(a, "-weather") && i + 1 < argc) opt_weather = atoi(argv[++i]);
+        else if (!strcmp(a, "-no-caption")) opt_caption = 0;
         else usage();
     }
     if (span_me >= span_n) span_me = -1;
-    role = pick_role();
     if (opt_fps < 1) opt_fps = 1;
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
-    rng = opt_seed | 1;
+    wseed = opt_seed * 0x9e3779b9u;
+    for (int i = 0; i < 6; i++) tph[i] = hrand(i, 0, 77) * 2 * M_PI;
     int offscreen = opt_shot || opt_bench > 0;
 
-    /* sensors first: the scales depend on them */
     gethostname(host, sizeof host - 1);
     host[strcspn(host, ".")] = 0;
     ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN);
@@ -2853,20 +1133,20 @@ int main(int argc, char **argv) {
         nanosleep(&ts, NULL);
         read_sensors();
     }
-    erng = rng ^ 0x9e3779b9u;
-    if (!erng) erng = 1;
-    sv_next = 5 + 10 * efrand();
-    gauges_init();
-    set_targets();
-    fonts_init();
+    if (!FcInit()) die("fontconfig init failed");
+    if (FT_Init_FreeType(&ft)) die("freetype init failed");
+    face_serif = load_face(opt_font, "weight=regular");
+    face_sans = load_face(opt_sans, "weight=regular");
+    face_sans_b = load_face(opt_sans, "weight=bold");
 
-    /* --epoch: when the engine was lit, shared by every instance; a --shot
-     * then shows the moment --at seconds after it */
+    /* --epoch: when the run began, shared by every instance; a --shot then
+     * shows the moment --at seconds after it */
     double t_wall0 = opt_epoch ? opt_epoch : wall();
     if (opt_shot && !opt_epoch) t_wall0 -= opt_at;
-    t_start_wall = t_wall0;
     locked_at = lock_start();
     if (!locked_at) locked_at = (time_t)t_wall0;
+    sky_init(t_wall0);
+    sim_init();
 
     Display *dpy = NULL;
     Window root = 0, win = 0;
@@ -2888,7 +1168,7 @@ int main(int argc, char **argv) {
         swa.override_redirect = opt_root;
         if (opt_root) { W = ra.width; H = ra.height; XSelectInput(dpy, root, StructureNotifyMask); }
         if (offscreen) { W = off_w; H = off_h; }
-        win = XCreateWindow(dpy, root, 0, 0, W, H, 0, vi->depth, InputOutput, vi->visual,
+        win = XCreateWindow(dpy, root, 0, 0, (unsigned)W, (unsigned)H, 0, vi->depth, InputOutput, vi->visual,
                             CWColormap | CWEventMask | CWOverrideRedirect, &swa);
         XStoreName(dpy, win, "Steam");
         XClassHint chint = {"steam", "Steam"};
@@ -2902,56 +1182,58 @@ int main(int argc, char **argv) {
     gl_init();
 
     if (offscreen) {
-        GLuint tex, fbo;
-        glGenTextures(1, &tex);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-        glGenFramebuffers(1, &fbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
-        last_read = 0;
+        GLuint tex = mk_tex(W, H, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, GL_NEAREST);
+        GLuint fbo = mk_fbo(tex, 0);
+        render_scale = auto_scale();
         if (opt_shot) {
-            /* let the springs run to --at (the readings held still) */
-            double wt = opt_epoch ? opt_epoch + opt_at : wall();
-            const float h = 1.0f / 240;
-            sec_angle = (float)(((time_t)wt % 60) * 6);
-            for (sim_t = 0; sim_t < opt_at; sim_t += h) physics(wt - (opt_at - sim_t), sim_t, h, sim_t > 0.6);
-            sim_t_now = opt_at;
-            render(opt_at, wt, fbo);
+            double wt = t_wall0 + opt_at;
+            advance(opt_at, wt);
+            caption_update(wt);
+            away_board(wt);
+            render(fbo);
             glFinish();
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
             save_ppm(opt_shot);
             return 0;
         }
-        double t0 = now();
-        build_static();
+        double wt0 = wall();
+        advance(opt_at, wt0);
+        caption_update(wt0);
+        away_board(wt0);
+        render(fbo);
         glFinish();
-        double tb = now() - t0, sum = 0, worst = 0;
+        double sum = 0, worst = 0;
+        glGenQueries(PR_N + 1, prof_q);
+        prof_on = 1;
         for (int i = 0; i < opt_bench; i++) {
             double f0 = now();
-            double t = 1.0 + i / 60.0;
-            advance(t, wall());
-            render(t, wall(), fbo);
+            advance(opt_at + (i + 1) / 60.0, wt0 + (i + 1) / 60.0);
+            double c0 = now();
+            render(fbo);
+            prof_cpu += now() - c0;
             glFinish();
+            prof_collect();
             double ms = (now() - f0) * 1000;
             sum += ms;
             if (ms > worst) worst = ms;
         }
-        printf("steam: %dx%d, %d frames: avg %.3f ms, worst %.3f ms per frame (static scene built once in %.1f ms)\n",
-               W, H, opt_bench, sum / opt_bench, worst, tb * 1000);
+        printf("steam: %dx%d (scene x%.2f), %d frames: avg %.3f ms, worst %.3f ms per frame\n", W, H, render_scale, opt_bench, sum / opt_bench, worst);
+        printf("steam: verts loco %d tender %d coach %d chunk0 %d tree %d\n", g_loco.n, g_tender.n, g_coach.n, chunks[0].mesh.n, g_tree.n);
+        printf("steam: GPU ms/frame:");
+        for (int i = 0; i < PR_N; i++) printf(" %s %.2f", prof_name[i], prof_ms[i] / opt_bench);
+        printf("; CPU in render %.2f\n", prof_cpu * 1000 / opt_bench);
         printf("steam: GL renderer: %s\n", (const char *)glGetString(GL_RENDERER));
         return 0;
     }
 
     double t0 = now();
-    sim_t = 0;
-    last_read = 0;
     for (;;) {
         if (opt_layer && !wl_poll()) return 0;
         while (dpy && XPending(dpy)) {
             XEvent ev;
             XNextEvent(dpy, &ev);
             if (ev.type == ConfigureNotify) {
-                if (ev.xconfigure.window == root) XResizeWindow(dpy, win, ev.xconfigure.width, ev.xconfigure.height);
+                if (ev.xconfigure.window == root) XResizeWindow(dpy, win, (unsigned)ev.xconfigure.width, (unsigned)ev.xconfigure.height);
                 else { W = ev.xconfigure.width; H = ev.xconfigure.height; }
             } else if (ev.type == KeyPress) {
                 KeySym k = XLookupKeysym(&ev.xkey, 0);
@@ -2961,8 +1243,11 @@ int main(int argc, char **argv) {
             }
         }
         double t = now(), wt = wall(), el = opt_epoch ? fmax(wt - opt_epoch, 0) : t - t0;
+        render_scale = auto_scale();
         advance(el, wt);
-        render(el, wt, 0);
+        caption_update(wt);
+        away_board(wt);
+        render(0);
         if (opt_layer) eglSwapBuffers(wl.ed, wl.es);
         else glXSwapBuffers(dpy, win);
         double spare = 1.0 / opt_fps - (now() - t);
