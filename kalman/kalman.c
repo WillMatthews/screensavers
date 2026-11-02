@@ -236,8 +236,8 @@ static double chi2inv(double p, int k) {
 }
 
 /* ---- motion models ---- */
-enum { M_CV, M_CA, M_CV5, M_CT };      /* state x y vx vy [ax ay | omega] */
-static int model_n(int m) { return m == M_CV ? 4 : m == M_CA ? 6 : 5; }
+enum { M_CV, M_CA, M_CV5, M_CT, M_CVB };      /* state x y vx vy [ax ay | omega | odometer bias bx by] */
+static int model_n(int m) { return m == M_CV ? 4 : m == M_CA || m == M_CVB ? 6 : 5; }
 
 static void model_f(int model, double *x, double dt) {
     if (model == M_CA) {
@@ -298,6 +298,7 @@ static void model_Q(int model, double dt, double q, double qw, double *Q) {
         }
     }
     if (n == 5) Q[24] = qw * dt;
+    if (model == M_CVB) Q[28] = Q[35] = qw * dt;     /* the bias random-walks */
 }
 
 /* ---- a Kalman-family filter: the state, and what the display needs of its
@@ -524,17 +525,23 @@ static void path_add(Path *p, int kind, double dur, double par) {
 
 /* ==================================================================== */
 /* ---- the acts ---- */
-enum { A_KF, A_UKF, A_IMM, A_PF, A_MTT, NACT };
+enum { A_KF, A_UKF, A_IMM, A_PF, A_MTT, A_RTS, A_FUSE, A_NUM, A_SLAM, NACT };
 static const char *ACT_NAME[NACT] = {
     "KF vs raw GPS", "EKF vs UKF on a turning target", "IMM through manoeuvres",
-    "Particle filter, bearings-only", "Multi-target association in clutter"};
+    "Particle filter, bearings-only", "Multi-target association in clutter",
+    "Smoothing: Rauch\xe2\x80\x93Tung\xe2\x80\x93Striebel", "Sensor fusion in information form",
+    "Square root vs naive: float32", "EKF-SLAM: mapping as you go"};
 static const char *ACT_LINE[NACT] = {
     "a car on winding roads, one GPS fix a second (\xcf\x83 5 m), filtered with constant-velocity and constant-acceleration models",
     "one radar, range and bearing: the same CV model linearised (EKF) or carried through by sigma points (UKF)",
     "an aircraft flying legs and hard turns; constant-velocity and coordinated-turn models, mixed by their probabilities",
     "a listening ship hears only bearings; 2000 hypotheses of range, course and speed, culled as it manoeuvres",
-    "a radar in clutter with missed detections: gates, global-nearest-neighbour assignment, M-of-N track management"};
-static const float ACT_TS[NACT] = {1, 3, 3, 15, 3};   /* sim seconds per real second */
+    "a radar in clutter with missed detections: gates, global-nearest-neighbour assignment, M-of-N track management",
+    "the same car, GPS through two tunnels: the forward filter, and every fix the whole past re-estimated backwards; the estimate eight seconds late is the fixed-lag smoother",
+    "a rover with GPS (lost in an urban canyon), wheel odometry with a wandering bias and two range beacons; information adds, and the base station's track, which has swallowed our own reports, is merged by covariance intersection",
+    "a coarse cue (\xcf\x83 30 m) hands a drone to a laser tracker (\xcf\x83 1 mm): one update shrinks P a billionfold, past float32's seven digits",
+    "a robot drives a loop among landmarks it has never seen: range and bearing, odometry between, one state for robot and map, and the map pulls together when it comes round again"};
+static const float ACT_TS[NACT] = {1, 3, 3, 15, 3, 2, 1, 1, 2};   /* sim seconds per real second */
 
 /* palette slots */
 enum { C_BG, C_PANEL, C_GRID, C_FRAME, C_TEXT, C_DIM, C_TRUTH, C_MEAS, C_CLUT, C_F1, C_F2, C_F3, C_WARN, NC };
@@ -614,7 +621,7 @@ static struct {
     float inn[RING][2]; int inn_n, inn_h, inn_m;      /* whitened innovations */
     float es[3][RING][2]; int es_n, es_h;              /* error space: meas, f0, f1 minus truth */
 
-    Series ser[14]; Chart ch[3];
+    Series ser[16]; Chart ch[3];
     double acc_nis[3], acc_nees[3]; int acc_nn[3], acc_ne[3];
 } A;
 
@@ -1430,6 +1437,1045 @@ static void mtt_scan(int n) {
     }
 }
 
+/* ---------------- act 6: the Rauch-Tung-Striebel smoother ---------------- */
+/* A car with GPS (and two outages, tunnels), a forward Kalman filter, and on
+ * every fix the whole history smoothed backwards with the data so far; the
+ * estimate of eight seconds ago is the fixed-lag smoother's. */
+#define RK 400
+#define RTS_LAG 8
+#define RTS_SIG 6.0
+static struct {
+    int n, n0;                          /* steps so far (one a second); before the latest */
+    double t[RK], xf[RK][4], Pf[RK][16], xp[RK][4], Pp[RK][16];
+    double xs[RK][4], Ps[RK][16], C[RK][16], xs0[RK][4], Ps0[RK][16];
+    double xl[RK][4], Pl[RK][16];       /* the fixed-lag estimate of step k, made at k + L */
+    double tr[RK][4];                   /* truth at each step */
+    int fix[RK];
+    double zx[RK], zy[RK];
+    double out[2][2];                   /* the outages, sim s */
+    double se[3], sn[3]; int ne[3];     /* squared errors, NEES: filter, lag, smoothed */
+} RT;
+
+static int rts_outage(double t) {
+    for (int i = 0; i < 2; i++) if (t >= RT.out[i][0] && t < RT.out[i][1]) return 1;
+    return 0;
+}
+
+/* the backward pass over steps 0..n-1: x_{k|N}, P_{k|N} and the gains C_k */
+static void rts_smooth(int n, double (*xf)[4], double (*Pf)[16], double (*xp)[4], double (*Pp)[16],
+                       double (*xs)[4], double (*Ps)[16], double (*C)[16], const double *F) {
+    memcpy(xs[n - 1], xf[n - 1], sizeof xs[0]);
+    memcpy(Ps[n - 1], Pf[n - 1], sizeof Ps[0]);
+    for (int k = n - 2; k >= 0; k--) {
+        double PFt[16], Pi[16], d[4], D[16], T[16];
+        mmT(Pf[k], F, PFt, 4, 4, 4);
+        inv(Pp[k + 1], Pi, 4);
+        mm(PFt, Pi, C[k], 4, 4, 4);
+        for (int i = 0; i < 4; i++) d[i] = xs[k + 1][i] - xp[k + 1][i];
+        for (int i = 0; i < 16; i++) D[i] = Ps[k + 1][i] - Pp[k + 1][i];
+        for (int i = 0; i < 4; i++) {
+            xs[k][i] = xf[k][i];
+            for (int j = 0; j < 4; j++) xs[k][i] += C[k][i * 4 + j] * d[j];
+        }
+        mm(C[k], D, T, 4, 4, 4);
+        mmT(T, C[k], Ps[k], 4, 4, 4);
+        for (int i = 0; i < 16; i++) Ps[k][i] += Pf[k][i];
+        symm(Ps[k], 4);
+    }
+}
+
+static double nees_pos(const double *x, const double *P, const double *tr) {
+    double Pi[4], P2[4] = {P[0], P[1], P[4], P[5]}, e0 = x[0] - tr[0], e1 = x[1] - tr[1];
+    if (!inv(P2, Pi, 2)) return 0;
+    return e0 * (Pi[0] * e0 + Pi[1] * e1) + e1 * (Pi[2] * e0 + Pi[3] * e1);
+}
+
+static void rts_init(void) {
+    memset(&RT, 0, sizeof RT);
+    Path *p = &A.tp[0];
+    path_start(p, 0, 0, 0, rn_range(&A.rt, 11, 16), rn_range(&A.rt, 0, TAU));
+    gen_path(p, A.len_s + 20, 6, 14, 6, 14, 40, 110, 1, 8, 22);
+    A.nt = 1; A.tb[0] = 0; A.te[0] = 1e9;
+    double t0 = rn_range(&A.rt, 0.18, 0.3) * A.len_s, t1 = rn_range(&A.rt, 0.6, 0.72) * A.len_s;
+    RT.out[0][0] = t0; RT.out[0][1] = t0 + rn_range(&A.rt, 10, 14);
+    RT.out[1][0] = t1; RT.out[1][1] = t1 + rn_range(&A.rt, 10, 14);
+    for (int i = 0; i < 2; i++) {
+        A.man[A.nman][0] = (float)rt_of(RT.out[i][0]); A.man[A.nman][1] = (float)rt_of(RT.out[i][1]); A.nman++;
+    }
+    A.follow = 1; A.follow_w = 300; A.follow_b = 14; A.follow_f = 2;
+    A.nf = 1;
+    f_init(&A.f[0], M_CV, 3.0, 0); A.fname[0] = "FILTER"; A.fcol[0] = C_F2;
+    chart(0, "POSITION \xcf\x83", "m, \xe2\x88\x9a" "trace of the x, y block", 1, 0.5f, 100);
+    chart_ser(0, S_(0, C_F2, ST_LINE, "filter"));
+    chart_ser(0, S_(1, C_F3, ST_LINE, "lag 8 s"));
+    chart_ser(0, S_(2, C_F1, ST_LINE, "smoothed"));
+    chart(1, "POSITION ERROR", "m", 1, 0.1f, 100);
+    chart_ser(1, S_(3, C_F2, ST_LINE, "filter"));
+    chart_ser(1, S_(4, C_F3, ST_LINE, "lag 8 s"));
+    chart_ser(1, S_(5, C_F1, ST_LINE, "smoothed"));
+    chart(2, "NEES", "\xcf\x87\xc2\xb2\xe2\x82\x82 95%, position", 1, 0.01f, 100);
+    chart_bounds(2, 2, 10);
+    chart_ser(2, S_(6, C_F2, ST_DOTS, "filter"));
+    chart_ser(2, S_(7, C_F1, ST_DOTS, "smoothed"));
+    for (int k = 0; k < 3; k++) A.ch[k].shade = 1;
+}
+
+static void rts_step(void) {
+    int k = RT.n;
+    if (k >= RK) { RT.n++; return; }
+    double t = 0.5 + k, o[6];
+    path_eval(&A.tp[0], t, o);
+    double nx = rn_n(&A.rm) * RTS_SIG, ny = rn_n(&A.rm) * RTS_SIG, u = rn_u(&A.rm);
+    int fix = !rts_outage(t) && u < 0.95;
+    double z[2] = {o[0] + nx, o[1] + ny}, R[4] = {RTS_SIG * RTS_SIG, 0, 0, RTS_SIG * RTS_SIG};
+    Filt *f = &A.f[0];
+    RT.t[k] = t; RT.fix[k] = fix; RT.zx[k] = z[0]; RT.zy[k] = z[1];
+    memcpy(RT.tr[k], o, sizeof RT.tr[k]);
+    if (k == 0) {                       /* the first second always has a fix */
+        f->t = t; f->x[0] = z[0]; f->x[1] = z[1];
+        f->P[0] = f->P[5] = R[0]; f->P[10] = f->P[15] = 15 * 15;
+        f->t_upd = t; f->nupd = 1; RT.fix[0] = 1;
+        memcpy(RT.xp[0], f->x, sizeof RT.xp[0]); memcpy(RT.Pp[0], f->P, sizeof RT.Pp[0]);
+    } else {
+        f_predict(f, t);
+        memcpy(RT.xp[k], f->x, sizeof RT.xp[0]); memcpy(RT.Pp[k], f->P, sizeof RT.Pp[0]);
+        if (fix) {
+            f_update_pos(f, z, R);
+            ring_inn(f->nuw[0], f->nuw[1]);
+            A.inn_m = 2;
+        } else { f_ease_begin(f); f_ease_end(f); f->nupd--; }
+    }
+    memcpy(RT.xf[k], f->x, sizeof RT.xf[0]); memcpy(RT.Pf[k], f->P, sizeof RT.Pf[0]);
+    trail_push(&A.ft[0], f->x[0], f->x[1]);
+    /* smooth everything so far; keep the last pass to ease from */
+    memcpy(RT.xs0, RT.xs, sizeof(double) * 4 * k);
+    memcpy(RT.Ps0, RT.Ps, sizeof(double) * 16 * k);
+    RT.n0 = k;
+    RT.n = k + 1;
+    double F[16];
+    model_F(M_CV, f->x, 1.0, F);
+    rts_smooth(RT.n, RT.xf, RT.Pf, RT.xp, RT.Pp, RT.xs, RT.Ps, RT.C, F);
+    if (k >= RTS_LAG) {
+        int j = k - RTS_LAG;
+        memcpy(RT.xl[j], RT.xs[j], sizeof RT.xl[0]); memcpy(RT.Pl[j], RT.Ps[j], sizeof RT.Pl[0]);
+        double e = hypot(RT.xl[j][0] - RT.tr[j][0], RT.xl[j][1] - RT.tr[j][1]);
+        ser_add(&A.ser[1], rt_of(RT.t[j]), sqrt(RT.Pl[j][0] + RT.Pl[j][5]));
+        ser_add(&A.ser[4], rt_of(RT.t[j]), e);
+        RT.se[1] += e * e; RT.sn[1] += nees_pos(RT.xl[j], RT.Pl[j], RT.tr[j]); RT.ne[1]++;
+    }
+    double rt = rt_of(t), e = hypot(f->x[0] - o[0], f->x[1] - o[1]), ne = nees_pos(f->x, f->P, o);
+    ser_add(&A.ser[0], rt, sqrt(f->P[0] + f->P[5]));
+    ser_add(&A.ser[3], rt, e);
+    ser_add(&A.ser[6], rt, ne);
+    RT.se[0] += e * e; RT.sn[0] += ne; RT.ne[0]++;
+    if (fix) { A.acc_nis[0] += f->nis; A.acc_nn[0]++; }
+    A.acc_nees[0] += ne; A.acc_ne[0]++;
+    /* the smoothed curves are redrawn whole: the past moves */
+    A.ser[2].n = A.ser[5].n = A.ser[7].n = 0;
+    RT.se[2] = RT.sn[2] = 0; RT.ne[2] = 0;
+    for (int i = 0; i < RT.n; i++) {
+        double es = hypot(RT.xs[i][0] - RT.tr[i][0], RT.xs[i][1] - RT.tr[i][1]), ns = nees_pos(RT.xs[i], RT.Ps[i], RT.tr[i]);
+        ser_add(&A.ser[2], rt_of(RT.t[i]), sqrt(RT.Ps[i][0] + RT.Ps[i][5]));
+        ser_add(&A.ser[5], rt_of(RT.t[i]), es);
+        ser_add(&A.ser[7], rt_of(RT.t[i]), ns);
+        RT.se[2] += es * es; RT.sn[2] += ns; RT.ne[2]++;
+    }
+    A.finit = 1;
+}
+
+/* ---------------- act 7: sensor fusion in information form ---------------- */
+/* A rover with a GPS (that drops out in an urban canyon), wheel odometry
+ * (velocity, with a slowly wandering bias the filter estimates), and two
+ * range beacons, fused by an information filter. The base station keeps its
+ * own track of the rover from its radar and from our position reports, which
+ * it takes as news; its errors and ours are then correlated by an amount
+ * nobody knows, so the two tracks are combined by covariance intersection
+ * (and, for contrast, naively, which double-counts). */
+#define FU_DT 0.1
+#define FU_GPS 4.0
+#define FU_ODO 0.06
+#define FU_RNG 1.0
+#define FU_BRG (0.5 * DEGR)
+#define FU_BRNG 1.5
+#define FU_QB 8e-5                      /* the odometer bias's random walk, (m/s)^2 per s */
+#define FN 6
+enum { SN_GPS, SN_ODO, SN_B1, SN_B2, NSN };
+static const char *const SN_NAME[NSN] = {"GPS", "odometry", "beacon 1", "beacon 2"};
+static const int SN_COL[NSN] = {C_MEAS, C_F2, C_F3, C_F3};
+static struct {
+    long tick;
+    double Y[FN * FN], y[FN];           /* the information filter */
+    Filt kf;                            /* the same filter in covariance form (for --check) */
+    Filt rem;                           /* the base station's track: GPS and its bearing camera */
+    double dr[2];                       /* dead reckoning: odometry integrated */
+    double bias[2];
+    double bx[3], by[3];                /* the beacons, and the base station */
+    double canyon[2];                   /* no GPS between these sim seconds */
+    int nupd[NSN];
+    double bits[NSN], bits_pred, last_nis[NSN];
+    double bin[NSN][200];               /* bits gained in each sim second */
+    /* the latest update, for the picture: prior and posterior position
+     * covariance, and what the sensor added (H'R^-1 H) */
+    int last_sn; double t_last, Pm[3], Pp[3], HRH[FN * FN];
+    double upd_t[NSN], upd_Pm[NSN][3], upd_Pp[NSN][3], upd_J[NSN][3];
+    double rng_t[2], rng_r[2];          /* each beacon's latest range */
+    double brg_t, brg_b, brg_r;         /* the base's latest range and bearing */
+    /* covariance intersection against the base's track, once a second */
+    double ci_t, ci_a[2], ci_A[3], ci_b[2], ci_B[3], ci_n[2], ci_N[3], ci_c[2], ci_C[3], ci_w;
+    double nees_a, nees_n, nees_c, wsum; int nci;
+    double se_f, se_dr, se_g; int nse, nseg;
+} FU;
+
+static void fu_cov(void) {                /* the covariance form, for display */
+    Filt *f = &A.f[0];
+    inv(FU.Y, f->P, FN);
+    symm(f->P, FN);
+    mm(f->P, FU.y, f->x, FN, FN, 1);
+}
+
+static double logdetn(const double *M, int n) {
+    double L[MX * MX], s = 0;
+    chol(M, L, n);
+    for (int i = 0; i < n; i++) s += log(L[i * n + i]);
+    return 2 * s;
+}
+
+/* an update in information form: z ~ h(x) + v, linearised at the prior */
+static void fu_update(int sn, const double *z, const double *zh, const double *Hm, const double *R, int m) {
+    Filt *f = &A.f[0];
+    double Ri[4], HtRi[FN * 2], HRH[FN * FN], nu[2], ld0 = logdetn(FU.Y, FN);
+    inv(R, Ri, m);
+    for (int i = 0; i < FN; i++)            /* H' R^-1, FN x m */
+        for (int j = 0; j < m; j++) {
+            double s = 0;
+            for (int k = 0; k < m; k++) s += Hm[k * FN + i] * Ri[k * m + j];
+            HtRi[i * m + j] = s;
+        }
+    mm(HtRi, Hm, HRH, FN, m, FN);
+    for (int i = 0; i < m; i++) nu[i] = z[i] - zh[i];
+    {                                       /* the NIS, from the prior */
+        double PHt[FN * 2], S[4];
+        mmT(f->P, Hm, PHt, FN, FN, m);
+        mm(Hm, PHt, S, m, FN, m);
+        for (int i = 0; i < m * m; i++) S[i] += R[i];
+        innov_stats(f, S, nu, m);
+        FU.last_nis[sn] = f->nis;
+    }
+    double Hx[2];
+    mm(Hm, f->x, Hx, m, FN, 1);
+    for (int i = 0; i < FN; i++)
+        for (int j = 0; j < m; j++) FU.y[i] += HtRi[i * m + j] * (nu[j] + Hx[j]);
+    for (int i = 0; i < FN * FN; i++) FU.Y[i] += HRH[i];
+    symm(FU.Y, FN);
+    FU.Pm[0] = f->P[0]; FU.Pm[1] = f->P[1]; FU.Pm[2] = f->P[FN + 1];
+    f_ease_begin(f);
+    fu_cov();
+    f_ease_end(f);
+    FU.Pp[0] = f->P[0]; FU.Pp[1] = f->P[1]; FU.Pp[2] = f->P[FN + 1];
+    memcpy(FU.HRH, HRH, sizeof HRH);
+    FU.last_sn = sn; FU.t_last = f->t;
+    FU.upd_t[sn] = f->t;
+    memcpy(FU.upd_Pm[sn], FU.Pm, sizeof FU.Pm); memcpy(FU.upd_Pp[sn], FU.Pp, sizeof FU.Pp);
+    FU.upd_J[sn][0] = HRH[0]; FU.upd_J[sn][1] = HRH[1]; FU.upd_J[sn][2] = HRH[FN + 1];
+    double b = 0.5 * (logdetn(FU.Y, FN) - ld0) / log(2.0);
+    FU.bits[sn] += b;
+    int sec = (int)f->t;
+    if (sec >= 0 && sec < 200) FU.bin[sn][sec] += b;
+    FU.nupd[sn]++;
+    /* the same update in covariance form (Joseph), linearised at the same
+     * point: the two must agree (--check compares them) */
+    f_update(&FU.kf, z, zh, Hm, R, m, -1);
+    if (sn == SN_GPS) { ring_inn(f->nuw[0], f->nuw[1]); A.inn_m = 2; }
+}
+
+static void fu_init(void) {
+    memset(&FU, 0, sizeof FU);
+    Path *p = &A.tp[0];
+    path_start(p, 0, 0, 0, rn_range(&A.rt, 2.5, 4), rn_range(&A.rt, 0, TAU));
+    gen_path(p, A.len_s + 20, 6, 14, 8, 20, 50, 120, 0, 0, 0);
+    A.nt = 1; A.tb[0] = 0; A.te[0] = 1e9;
+    for (int j = 0; j < 3; j++) {        /* beacons and base, off the route */
+        double o[6], tt = A.len_s * (j < 2 ? 0.25 + 0.45 * j : 0.5);
+        path_eval(p, tt, o);
+        double side = rn_sign(&A.rt) * rn_range(&A.rt, 25, 45) * (j == 2 ? 1.5 : 1), h = o[4] + PI / 2;
+        FU.bx[j] = o[0] + side * cos(h); FU.by[j] = o[1] + side * sin(h);
+    }
+    FU.rng_t[0] = FU.rng_t[1] = FU.brg_t = -1e9;
+    for (int s = 0; s < NSN; s++) FU.upd_t[s] = -1e9;
+    FU.canyon[0] = rn_range(&A.rt, 0.3, 0.4) * A.len_s; FU.canyon[1] = FU.canyon[0] + rn_range(&A.rt, 20, 28);
+    A.man[0][0] = (float)rt_of(FU.canyon[0]); A.man[0][1] = (float)rt_of(FU.canyon[1]); A.nman = 1;
+    A.follow = 1; A.follow_w = 130; A.follow_b = 6; A.follow_f = 2;
+    A.nf = 1;
+    f_init(&A.f[0], M_CVB, 1.0, FU_QB); A.fname[0] = "FUSED"; A.fcol[0] = C_F1;
+    f_init(&FU.kf, M_CVB, 1.0, FU_QB);
+    f_init(&FU.rem, M_CV, 1.0, 0);
+    double o[6];
+    path_eval(p, 0, o);
+    FU.bias[0] = 0.05 * rn_n(&A.rm); FU.bias[1] = 0.05 * rn_n(&A.rm);
+    double P0[FN * FN] = {0};
+    /* started from a GPS fix and a first odometer reading */
+    P0[0] = P0[7] = FU_GPS * FU_GPS; P0[14] = P0[21] = 0.1 * 0.1; P0[28] = P0[35] = 0.05 * 0.05;
+    double x0[FN] = {o[0] + FU_GPS * rn_n(&A.rf), o[1] + FU_GPS * rn_n(&A.rf), o[2] + 0.1 * rn_n(&A.rf), o[3] + 0.1 * rn_n(&A.rf), 0, 0};
+    inv(P0, FU.Y, FN);
+    mm(FU.Y, x0, FU.y, FN, FN, 1);
+    Filt *f = &A.f[0];
+    fu_cov();
+    f->t = 0; f->t_upd = -1e9;
+    FU.kf.t = 0; memcpy(FU.kf.x, x0, sizeof x0); memcpy(FU.kf.P, P0, sizeof P0);
+    double P4[16] = {16, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0.01, 0, 0, 0, 0, 0.01};
+    FU.rem.t = 0; memcpy(FU.rem.x, x0, sizeof(double) * 4); memcpy(FU.rem.P, P4, sizeof P4);
+    FU.dr[0] = x0[0]; FU.dr[1] = x0[1];
+    FU.ci_t = -1e9;
+    A.finit = 1;
+    chart(0, "POSITION ERROR", "m", 1, 0.1f, 100);
+    chart_ser(0, S_(0, C_MEAS, ST_DOTS, "GPS"));
+    chart_ser(0, S_(1, C_F2, ST_LINE, "dead reckoning"));
+    chart_ser(0, S_(2, C_F1, ST_LINE, "fused"));
+    chart(1, "INFORMATION GAINED", "bits per second, 4 s average", 1, 0.01f, 100);
+    chart_ser(1, S_(3, C_MEAS, ST_LINE, "GPS"));
+    chart_ser(1, S_(4, C_F2, ST_LINE, "odometry"));
+    chart_ser(1, S_(5, C_F3, ST_LINE, "beacons"));
+    chart(2, "NEES", "\xcf\x87\xc2\xb2\xe2\x82\x82 95%, position", 1, 0.01f, 100);
+    chart_bounds(2, 2, 10);
+    chart_ser(2, S_(6, C_F1, ST_DOTS, "fused"));
+    chart_ser(2, S_(7, C_WARN, ST_DOTS, "naive"));
+    chart_ser(2, S_(8, C_F3, ST_DOTS, "CI"));
+    for (int k = 0; k < 3; k++) A.ch[k].shade = 1;
+}
+
+static void fu_predict(double t) {
+    Filt *f = &A.f[0];
+    double ld0 = logdetn(FU.Y, FN);
+    f_predict(f, t);                    /* Y- = (F Y^-1 F' + Q)^-1 */
+    inv(f->P, FU.Y, FN);
+    symm(FU.Y, FN);
+    mm(FU.Y, f->x, FU.y, FN, FN, 1);
+    FU.bits_pred += 0.5 * (logdetn(FU.Y, FN) - ld0) / log(2.0);
+    f_predict(&FU.kf, t);
+    f_predict(&FU.rem, t);
+}
+
+/* the CI weight: the omega in [0, 1] that minimises det P (golden section) */
+static double ci_omega(const double *Ai, const double *Bi) {
+    double a = 0, b = 1, g = 0.6180339887498949;
+    for (int it = 0; it < 60; it++) {
+        double c = b - g * (b - a), d = a + g * (b - a), Mc[4], Md[4];
+        for (int i = 0; i < 4; i++) { Mc[i] = c * Ai[i] + (1 - c) * Bi[i]; Md[i] = d * Ai[i] + (1 - d) * Bi[i]; }
+        if (det2(Mc) > det2(Md)) b = d; else a = c;      /* maximise det of the information */
+    }
+    return (a + b) / 2;
+}
+
+/* fuse (a, A) and (b, B): naively as if independent, and by CI */
+static void ci_fuse(const double *a, const double *A2, const double *b, const double *B2, double w,
+                    double *xn, double *Pn, double *xc, double *Pc) {
+    double Ai[4], Bi[4], M[4], Mi[4], u[2];
+    inv(A2, Ai, 2); inv(B2, Bi, 2);
+    for (int pass = 0; pass < 2; pass++) {
+        double wa = pass ? w : 1, wb = pass ? 1 - w : 1;
+        for (int i = 0; i < 4; i++) M[i] = wa * Ai[i] + wb * Bi[i];
+        inv(M, Mi, 2);
+        for (int i = 0; i < 2; i++) u[i] = wa * (Ai[i * 2] * a[0] + Ai[i * 2 + 1] * a[1]) + wb * (Bi[i * 2] * b[0] + Bi[i * 2 + 1] * b[1]);
+        double *x = pass ? xc : xn, *P = pass ? Pc : Pn;
+        x[0] = Mi[0] * u[0] + Mi[1] * u[1]; x[1] = Mi[2] * u[0] + Mi[3] * u[1];
+        memcpy(P, Mi, sizeof Mi);
+    }
+}
+
+static void fu_tick(void) {
+    long i = ++FU.tick;
+    double t = i * FU_DT, o[6];
+    path_eval(&A.tp[0], t, o);
+    Filt *f = &A.f[0];
+    fu_predict(t);
+    /* the odometer: velocity plus a wandering bias, five times a second */
+    if (i % 2 == 0) {
+        for (int k = 0; k < 2; k++) FU.bias[k] += sqrt(FU_QB * 2 * FU_DT) * rn_n(&A.rm);
+        double z[2] = {o[2] + FU.bias[0] + FU_ODO * rn_n(&A.rm), o[3] + FU.bias[1] + FU_ODO * rn_n(&A.rm)};
+        FU.dr[0] += z[0] * 2 * FU_DT; FU.dr[1] += z[1] * 2 * FU_DT;
+        double Hm[2 * FN] = {0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 1}, zh[2], R[4] = {FU_ODO * FU_ODO, 0, 0, FU_ODO * FU_ODO};
+        zh[0] = f->x[2] + f->x[4]; zh[1] = f->x[3] + f->x[5];
+        fu_update(SN_ODO, z, zh, Hm, R, 2);
+    }
+    /* GPS once a second, but not in the canyon */
+    if (i % 10 == 5) {
+        double z[2] = {o[0] + FU_GPS * rn_n(&A.rm), o[1] + FU_GPS * rn_n(&A.rm)}, u = rn_u(&A.rm);
+        if (!(t >= FU.canyon[0] && t < FU.canyon[1]) && u < 0.95) {
+            double Hm[2 * FN] = {1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0}, zh[2] = {f->x[0], f->x[1]}, R[4] = {FU_GPS * FU_GPS, 0, 0, FU_GPS * FU_GPS};
+            fu_update(SN_GPS, z, zh, Hm, R, 2);
+            add_det(t, 0, 0, 0);
+            Det *d = &A.dh[(A.dhn - 1) % DH];
+            d->x = z[0]; d->y = z[1];
+            ser_add(&A.ser[0], rt_of(t), hypot(z[0] - o[0], z[1] - o[1]));
+            FU.se_g += (z[0] - o[0]) * (z[0] - o[0]) + (z[1] - o[1]) * (z[1] - o[1]); FU.nseg++;
+        }
+    }
+    /* each beacon every two seconds, staggered */
+    for (int j = 0; j < 2; j++)
+        if (i % 20 == 3 + 10 * j) {
+            double r = hypot(o[0] - FU.bx[j], o[1] - FU.by[j]) + FU_RNG * rn_n(&A.rm), R[1] = {FU_RNG * FU_RNG};
+            /* iterated: relinearise at the posterior a few times (a range is
+             * curved enough, close in, to bias a single linearisation) */
+            double xl[2] = {f->x[0], f->x[1]}, Hm[FN] = {0}, z[1] = {r}, zh[1];
+            for (int it = 0; it < 4; it++) {
+                double dx = xl[0] - FU.bx[j], dy = xl[1] - FU.by[j], rh = fmax(hypot(dx, dy), 1);
+                Hm[0] = dx / rh; Hm[1] = dy / rh;
+                zh[0] = rh + Hm[0] * (f->x[0] - xl[0]) + Hm[1] * (f->x[1] - xl[1]);
+                if (it == 3) break;
+                double Y2[FN * FN], y2[FN], P2[FN * FN], x2[FN], c = (r - zh[0] + Hm[0] * f->x[0] + Hm[1] * f->x[1]) / R[0];
+                memcpy(Y2, FU.Y, sizeof Y2); memcpy(y2, FU.y, sizeof y2);
+                for (int u = 0; u < 2; u++) {
+                    y2[u] += Hm[u] * c;
+                    for (int v = 0; v < 2; v++) Y2[u * FN + v] += Hm[u] * Hm[v] / R[0];
+                }
+                inv(Y2, P2, FN);
+                mm(P2, y2, x2, FN, FN, 1);
+                xl[0] = x2[0]; xl[1] = x2[1];
+            }
+            fu_update(SN_B1 + j, z, zh, Hm, R, 1);
+            FU.rng_t[j] = t; FU.rng_r[j] = r;
+        }
+    /* the base station's own tracker: range and bearing to the rover, once a second */
+    if (i % 10 == 7) {
+        double z[2] = {hypot(o[0] - FU.bx[2], o[1] - FU.by[2]) + FU_BRNG * rn_n(&A.rm),
+                       wrap_pi(atan2(o[1] - FU.by[2], o[0] - FU.bx[2]) + FU_BRG * rn_n(&A.rm))};
+        double R[4] = {FU_BRNG * FU_BRNG, 0, 0, FU_BRG * FU_BRG};
+        ekf_update_rb(&FU.rem, z, FU.bx[2], FU.by[2], R);
+        FU.brg_t = t; FU.brg_b = z[1]; FU.brg_r = z[0];
+    }
+    /* ...and our own position reports, which it folds in as if they were
+     * news: from then on its errors and ours are correlated, by an amount
+     * neither side knows */
+    if (i % 10 == 8) {
+        double z[2] = {f->x[0], f->x[1]}, R[4] = {f->P[0], f->P[1], f->P[FN], f->P[FN + 1]};
+        f_update_pos(&FU.rem, z, R);
+    }
+    /* once a second: the scores, and CI against the base's track */
+    if (i % 10 == 0) {
+        double rt = rt_of(t), tr[2] = {o[0], o[1]};
+        double e = hypot(f->x[0] - o[0], f->x[1] - o[1]), edr = hypot(FU.dr[0] - o[0], FU.dr[1] - o[1]);
+        ser_add(&A.ser[1], rt, edr);
+        ser_add(&A.ser[2], rt, e);
+        FU.se_f += e * e; FU.se_dr += edr * edr; FU.nse++;
+        double Pf4[16] = {f->P[0], f->P[1], 0, 0, f->P[FN], f->P[FN + 1]};
+        double ne = nees_pos(f->x, Pf4, o);
+        ser_add(&A.ser[6], rt, ne);
+        A.acc_nees[0] += ne; A.acc_ne[0]++;
+        int sec = (int)t;
+        for (int k = 0; k < 3; k++) {
+            double s = 0;
+            for (int b = sec - 4; b < sec; b++) {
+                if (b < 0) continue;
+                s += k < 2 ? FU.bin[k][b] : FU.bin[SN_B1][b] + FU.bin[SN_B2][b];
+            }
+            ser_add(&A.ser[3 + k], rt, s / 4);
+        }
+        double a[2] = {f->x[0], f->x[1]}, A2[4] = {f->P[0], f->P[1], f->P[FN], f->P[FN + 1]};
+        double b[2] = {FU.rem.x[0], FU.rem.x[1]}, B2[4] = {FU.rem.P[0], FU.rem.P[1], FU.rem.P[4], FU.rem.P[5]};
+        double Ai[4], Bi[4], xn[2], Pn[4], xc[2], Pc[4];
+        inv(A2, Ai, 2); inv(B2, Bi, 2);
+        double w = ci_omega(Ai, Bi);
+        ci_fuse(a, A2, b, B2, w, xn, Pn, xc, Pc);
+        FU.ci_t = t; FU.ci_w = w;
+        memcpy(FU.ci_a, a, sizeof a); memcpy(FU.ci_b, b, sizeof b); memcpy(FU.ci_n, xn, sizeof xn); memcpy(FU.ci_c, xc, sizeof xc);
+        FU.ci_A[0] = A2[0]; FU.ci_A[1] = A2[1]; FU.ci_A[2] = A2[3];
+        FU.ci_B[0] = B2[0]; FU.ci_B[1] = B2[1]; FU.ci_B[2] = B2[3];
+        FU.ci_N[0] = Pn[0]; FU.ci_N[1] = Pn[1]; FU.ci_N[2] = Pn[3];
+        FU.ci_C[0] = Pc[0]; FU.ci_C[1] = Pc[1]; FU.ci_C[2] = Pc[3];
+        double Pn4[16] = {Pn[0], Pn[1], 0, 0, Pn[2], Pn[3]}, Pc4[16] = {Pc[0], Pc[1], 0, 0, Pc[2], Pc[3]};
+        double nn = nees_pos(xn, Pn4, tr), nc = nees_pos(xc, Pc4, tr);
+        ser_add(&A.ser[7], rt, nn);
+        ser_add(&A.ser[8], rt, nc);
+        FU.nees_a += ne; FU.nees_n += nn; FU.nees_c += nc; FU.nci++; FU.wsum += w;
+        trail_push(&A.ft[1], FU.dr[0], FU.dr[1]);
+        trail_push(&A.ft[2], FU.rem.x[0], FU.rem.x[1]);
+    }
+    if (i % 2 == 0) trail_push(&A.ft[0], f->x[0], f->x[1]);
+}
+
+/* ---------------- act 8: numerical stability in float32 ---------------- */
+/* A coarse cue (sigma 30 m, correlated) hands a hovering drone to a laser
+ * tracker (sigma 1 mm): one update shrinks P by a factor of 10^9, beyond
+ * float32's 7 digits. The textbook update loses symmetry and positive
+ * definiteness; the Joseph form and the square-root (array) form hold. */
+#define NU_DT 0.1
+#define NU_SIG 1e-3
+#define NU_CYC 22.5
+#define NU_COAST 4.0                    /* seconds on the coarse cue alone before the laser */
+#define NU_Q 1e-4
+enum { NF_NAIVE, NF_JOSEPH, NF_SQRT, NNF };
+static const char *const NF_NAME[NNF] = {"naive", "Joseph", "sqrt"};
+static const int NF_COL[NNF] = {C_WARN, C_F2, C_F1};
+#define NUH 1024
+static struct {
+    long k; int cyc;
+    double xt[4];                       /* truth */
+    double xr[4], Pr[16];               /* reference: double precision, Joseph */
+    float x[NNF][4], P[NNF][16];        /* P, or for sqrt its factor S (P = S S') */
+    int bad[NNF], broken[NNF], nbad[NNF];
+    double t_cue, t_bad[NNF];
+    double Pd[NNF][16];                 /* each P in double, for the display */
+    double nis[NNF], rel[NNF], asym[NNF], lmin[NNF], err[NNF], eig[NNF + 1][4];
+    double hs[NUH]; int hn;             /* log10 of the reference sigma, each step */
+    double ht[NUH];
+    double tx[NUH][2]; int txn;         /* the truth's trail */
+    double se[NNF + 1]; int nse;
+} NU;
+
+/* L (n x n, lower) with L L' = A A', A n x p, by Householder reflections
+ * from the right: the "tria" of the square-root filters */
+#define DEF_TRIA(T, NAME, SQ)                                                              \
+    static void NAME(const T *A0, int n, int p, T *L) {                                     \
+        T Aw[12 * 12], v[12];                                                               \
+        memcpy(Aw, A0, sizeof(T) * n * p);                                                  \
+        for (int i = 0; i < n; i++) {                                                       \
+            T nrm = 0;                                                                      \
+            for (int j = i; j < p; j++) nrm += Aw[i * p + j] * Aw[i * p + j];               \
+            nrm = SQ(nrm);                                                                  \
+            if (nrm == 0) continue;                                                         \
+            T al = Aw[i * p + i] > 0 ? -nrm : nrm, vv = 0;                                  \
+            for (int j = i; j < p; j++) v[j] = Aw[i * p + j];                               \
+            v[i] -= al;                                                                     \
+            for (int j = i; j < p; j++) vv += v[j] * v[j];                                  \
+            if (vv == 0) continue;                                                          \
+            for (int r = i; r < n; r++) {                                                   \
+                T d = 0;                                                                    \
+                for (int j = i; j < p; j++) d += Aw[r * p + j] * v[j];                      \
+                d = 2 * d / vv;                                                             \
+                for (int j = i; j < p; j++) Aw[r * p + j] -= d * v[j];                      \
+            }                                                                               \
+        }                                                                                   \
+        for (int i = 0; i < n; i++)                                                         \
+            for (int j = 0; j < n; j++) L[i * n + j] = j <= i ? Aw[i * p + j] : 0;          \
+    }
+DEF_TRIA(float, tria_f, sqrtf)
+DEF_TRIA(double, tria_d, sqrt)
+
+/* the three float filters and their double twins (for --check), one
+ * template: CV, position measured, R = r I */
+#define DEF_NUMF(T, SUF, SQ)                                                                \
+    static void predP_##SUF(T *P, const T *F, const T *Q) {                                 \
+        T A1[16], B1[16];                                                                   \
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {                           \
+            T s = 0; for (int k = 0; k < 4; k++) s += F[i * 4 + k] * P[k * 4 + j];          \
+            A1[i * 4 + j] = s; }                                                            \
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {                           \
+            T s = 0; for (int k = 0; k < 4; k++) s += A1[i * 4 + k] * F[j * 4 + k];         \
+            B1[i * 4 + j] = s + Q[i * 4 + j]; }                                             \
+        memcpy(P, B1, sizeof B1);                                                           \
+    }                                                                                       \
+    static void predx_##SUF(T *x, const T *F) {                                             \
+        T y[4];                                                                             \
+        for (int i = 0; i < 4; i++) { T s = 0; for (int k = 0; k < 4; k++) s += F[i * 4 + k] * x[k]; y[i] = s; } \
+        memcpy(x, y, sizeof y);                                                             \
+    }                                                                                       \
+    /* S (n x n lower): S- = tria([F S, Lq]) */                                             \
+    static void predS_##SUF(T *S, const T *F, const T *Lq) {                                \
+        T Aw[4 * 8];                                                                        \
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {                           \
+            T s = 0; for (int k = 0; k < 4; k++) s += F[i * 4 + k] * S[k * 4 + j];          \
+            Aw[i * 8 + j] = s; Aw[i * 8 + 4 + j] = Lq[i * 4 + j]; }                         \
+        tria_##SUF(Aw, 4, 8, S);                                                            \
+    }                                                                                       \
+    /* 2x2 S^-1; returns 0 if not positive */                                              \
+    static int gainK_##SUF(const T *P, T r, T *K, T *Sm) {                                  \
+        T a = P[0] + r, b = P[1], c = P[4], d = P[5] + r, det = a * d - b * c;               \
+        Sm[0] = a; Sm[1] = b; Sm[2] = c; Sm[3] = d;                                         \
+        if (!(det > 0) || !(a > 0)) return 0;                                               \
+        T i00 = d / det, i01 = -b / det, i10 = -c / det, i11 = a / det;                     \
+        for (int i = 0; i < 4; i++) {                                                       \
+            K[i * 2] = P[i * 4] * i00 + P[i * 4 + 1] * i10;                                 \
+            K[i * 2 + 1] = P[i * 4] * i01 + P[i * 4 + 1] * i11; }                           \
+        return 1;                                                                           \
+    }                                                                                       \
+    static int upd_naive_##SUF(T *x, T *P, const T *z, T r, T *nis) {                       \
+        T K[8], Sm[4], IKH[16], N[16];                                                      \
+        if (!gainK_##SUF(P, r, K, Sm)) return 0;                                            \
+        T n0 = z[0] - x[0], n1 = z[1] - x[1], dt = Sm[0] * Sm[3] - Sm[1] * Sm[2];             \
+        *nis = (n0 * (Sm[3] * n0 - Sm[1] * n1) + n1 * (-Sm[2] * n0 + Sm[0] * n1)) / dt;     \
+        for (int i = 0; i < 4; i++) x[i] += K[i * 2] * n0 + K[i * 2 + 1] * n1;              \
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++)                              \
+            IKH[i * 4 + j] = (i == j) - (j < 2 ? K[i * 2 + j] : 0);                         \
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {                           \
+            T s = 0; for (int k = 0; k < 4; k++) s += IKH[i * 4 + k] * P[k * 4 + j];        \
+            N[i * 4 + j] = s; }                                                             \
+        memcpy(P, N, sizeof N);                                                             \
+        return 1;                                                                           \
+    }                                                                                       \
+    static int upd_joseph_##SUF(T *x, T *P, const T *z, T r, T *nis) {                      \
+        T K[8], Sm[4], IKH[16], N[16], M[16];                                               \
+        if (!gainK_##SUF(P, r, K, Sm)) return 0;                                            \
+        T n0 = z[0] - x[0], n1 = z[1] - x[1], dt = Sm[0] * Sm[3] - Sm[1] * Sm[2];             \
+        *nis = (n0 * (Sm[3] * n0 - Sm[1] * n1) + n1 * (-Sm[2] * n0 + Sm[0] * n1)) / dt;     \
+        for (int i = 0; i < 4; i++) x[i] += K[i * 2] * n0 + K[i * 2 + 1] * n1;              \
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++)                              \
+            IKH[i * 4 + j] = (i == j) - (j < 2 ? K[i * 2 + j] : 0);                         \
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {                           \
+            T s = 0; for (int k = 0; k < 4; k++) s += IKH[i * 4 + k] * P[k * 4 + j];        \
+            N[i * 4 + j] = s; }                                                             \
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {                           \
+            T s = 0; for (int k = 0; k < 4; k++) s += N[i * 4 + k] * IKH[j * 4 + k];        \
+            M[i * 4 + j] = s + r * (K[i * 2] * K[j * 2] + K[i * 2 + 1] * K[j * 2 + 1]); }   \
+        memcpy(P, M, sizeof M);                                                             \
+        return 1;                                                                           \
+    }                                                                                       \
+    /* the array form: tria([sqrt(r) I, H S; 0, S]) = [Se^1/2, 0; Kbar, S+], K = Kbar Se^-1/2 */ \
+    static T lastw_##SUF[2];                                                                \
+    static int upd_sqrt_##SUF(T *x, T *S, const T *z, T r, T *nis) {                        \
+        T Aw[6 * 6] = {0}, L[36], sr = SQ(r);                                               \
+        Aw[0] = sr; Aw[7] = sr;                                                             \
+        for (int i = 0; i < 2; i++) for (int j = 0; j < 4; j++) Aw[i * 6 + 2 + j] = S[i * 4 + j]; \
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) Aw[(2 + i) * 6 + 2 + j] = S[i * 4 + j]; \
+        tria_##SUF(Aw, 6, 6, L);                                                            \
+        T x00 = L[0], x10 = L[6], x11 = L[7];                                               \
+        if (x00 == 0 || x11 == 0) return 0;                                                 \
+        T n0 = z[0] - x[0], n1 = z[1] - x[1];                                               \
+        T w0 = n0 / x00, w1 = (n1 - x10 * w0) / x11;      /* Se^-1/2 nu */                   \
+        *nis = w0 * w0 + w1 * w1;                                                           \
+        lastw_##SUF[0] = w0; lastw_##SUF[1] = w1;                                           \
+        for (int i = 0; i < 4; i++) x[i] += L[(2 + i) * 6] * w0 + L[(2 + i) * 6 + 1] * w1;  \
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) S[i * 4 + j] = L[(2 + i) * 6 + 2 + j]; \
+        return 1;                                                                           \
+    }
+DEF_NUMF(float, f, sqrtf)
+DEF_NUMF(double, d, sqrt)
+
+static void nu_FQ(double *F, double *Q, double *Lq) {
+    model_F(M_CV, NULL, NU_DT, F);
+    model_Q(M_CV, NU_DT, NU_Q, 0, Q);
+    chol(Q, Lq, 4);
+}
+
+/* eigenvalues of a symmetric 4x4 (cyclic Jacobi), ascending */
+static void eig4(const double *M, double *ev) {
+    double a[16];
+    memcpy(a, M, sizeof a);
+    for (int sw = 0; sw < 30; sw++) {
+        double off = 0;
+        for (int p = 0; p < 4; p++) for (int q = p + 1; q < 4; q++) off += a[p * 4 + q] * a[p * 4 + q];
+        if (off < 1e-300) break;
+        for (int p = 0; p < 4; p++)
+            for (int q = p + 1; q < 4; q++) {
+                double apq = a[p * 4 + q];
+                if (fabs(apq) < 1e-300) continue;
+                double th = (a[q * 4 + q] - a[p * 4 + p]) / (2 * apq);
+                double t = (th >= 0 ? 1 : -1) / (fabs(th) + sqrt(th * th + 1)), c = 1 / sqrt(t * t + 1), s = t * c;
+                for (int k = 0; k < 4; k++) {
+                    double akp = a[k * 4 + p], akq = a[k * 4 + q];
+                    a[k * 4 + p] = c * akp - s * akq; a[k * 4 + q] = s * akp + c * akq;
+                }
+                for (int k = 0; k < 4; k++) {
+                    double apk = a[p * 4 + k], aqk = a[q * 4 + k];
+                    a[p * 4 + k] = c * apk - s * aqk; a[q * 4 + k] = s * apk + c * aqk;
+                }
+            }
+    }
+    for (int i = 0; i < 4; i++) ev[i] = a[i * 4 + i];
+    for (int i = 1; i < 4; i++)
+        for (int j = i; j > 0 && ev[j] < ev[j - 1]; j--) { double t = ev[j]; ev[j] = ev[j - 1]; ev[j - 1] = t; }
+}
+
+static void nu_init(void) {
+    memset(&NU, 0, sizeof NU);
+    NU.cyc = -1;
+    NU.xt[0] = rn_range(&A.rt, -3, 3); NU.xt[1] = rn_range(&A.rt, -3, 3);
+    NU.xt[2] = rn_range(&A.rt, -0.03, 0.03); NU.xt[3] = rn_range(&A.rt, -0.03, 0.03);
+    A.nf = 0;
+    for (int c = 0; c * NU_CYC < A.len_s && A.nman < 32; c++) {
+        A.man[A.nman][0] = (float)rt_of(c * NU_CYC); A.man[A.nman][1] = (float)rt_of(c * NU_CYC + NU_COAST); A.nman++;
+    }
+    chart(0, "NIS", "\xcf\x87\xc2\xb2\xe2\x82\x82 95%", 1, 0.01f, 1e4f);
+    chart_bounds(0, 2, 10);
+    for (int i = 0; i < NNF; i++) chart_ser(0, S_(i, NF_COL[i], ST_DOTS, NF_NAME[i]));
+    chart(1, "\xe2\x80\x96P \xe2\x88\x92 P_ref\xe2\x80\x96 / \xe2\x80\x96P_ref\xe2\x80\x96", "float32 against float64", 1, 1e-9f, 1e3f);
+    for (int i = 0; i < NNF; i++) chart_ser(1, S_(3 + i, NF_COL[i], ST_LINE, NF_NAME[i]));
+    chart(2, "POSITION ERROR", "mm", 1, 0.01f, 1e5f);
+    chart_ser(2, S_(6, C_TRUTH, ST_LINE, "float64"));
+    for (int i = 0; i < NNF; i++) chart_ser(2, S_(7 + i, NF_COL[i], ST_LINE, NF_NAME[i]));
+    for (int k = 0; k < 3; k++) A.ch[k].shade = 1;
+}
+
+/* every filter's P in double (for sqrt: S S') */
+static void nu_Pd(int i, double *P) {
+    if (i == NF_SQRT) {
+        for (int a = 0; a < 4; a++)
+            for (int b = 0; b < 4; b++) {
+                double s = 0;
+                for (int k = 0; k < 4; k++) s += (double)NU.P[i][a * 4 + k] * NU.P[i][b * 4 + k];
+                P[a * 4 + b] = s;
+            }
+    } else for (int k = 0; k < 16; k++) P[k] = NU.P[i][k];
+}
+
+static void nu_step(void) {
+    long k = ++NU.k;
+    double t = k * NU_DT, F[16], Q[16], Lq[16];
+    nu_FQ(F, Q, Lq);
+    /* truth: the same CV process the filters assume */
+    {
+        double w[4] = {rn_n(&A.rt), rn_n(&A.rt), rn_n(&A.rt), rn_n(&A.rt)}, y[4];
+        mm(F, NU.xt, y, 4, 4, 1);
+        for (int i = 0; i < 4; i++) {
+            NU.xt[i] = y[i];
+            for (int j = 0; j <= i; j++) NU.xt[i] += Lq[i * 4 + j] * w[j];
+        }
+    }
+    if (NU.txn < NUH) { NU.tx[NU.txn][0] = NU.xt[0]; NU.tx[NU.txn][1] = NU.xt[1]; NU.txn++; }
+    int cyc = (int)floor(t / NU_CYC + 1e-9);
+    if (cyc != NU.cyc) {                 /* a new cue: every filter starts from it */
+        NU.cyc = cyc; NU.t_cue = t;
+        double Aq[16], w[4], P0[16];
+        static const double sc[4] = {30, 30, 2, 2};
+        for (int i = 0; i < 16; i++) Aq[i] = sc[i / 4] * rn_n(&A.rf);
+        mmT(Aq, Aq, P0, 4, 4, 4);
+        for (int i = 0; i < 4; i++) w[i] = rn_n(&A.rf);
+        double L0[16];
+        chol(P0, L0, 4);
+        for (int i = 0; i < 4; i++) {
+            NU.xr[i] = NU.xt[i];
+            for (int j = 0; j <= i; j++) NU.xr[i] += L0[i * 4 + j] * w[j];
+        }
+        memcpy(NU.Pr, P0, sizeof P0);
+        for (int f = 0; f < NNF; f++) {
+            for (int i = 0; i < 4; i++) NU.x[f][i] = (float)NU.xr[i];
+            for (int i = 0; i < 16; i++) NU.P[f][i] = (float)(f == NF_SQRT ? L0[i] : P0[i]);
+            NU.bad[f] = NU.broken[f] = 0;
+        }
+        return;
+    }
+    float Ff[16], Qf[16], Lqf[16];
+    for (int i = 0; i < 16; i++) { Ff[i] = (float)F[i]; Qf[i] = (float)Q[i]; Lqf[i] = (float)Lq[i]; }
+    double z[2] = {NU.xt[0] + NU_SIG * rn_n(&A.rm), NU.xt[1] + NU_SIG * rn_n(&A.rm)}, r = NU_SIG * NU_SIG, nisr = 0;
+    float zf[2] = {(float)z[0], (float)z[1]}, rf = (float)r;
+    int laser = t - NU.t_cue >= NU_COAST - 1e-9;      /* before that, the filters coast on the cue */
+    predx_d(NU.xr, F); predP_d(NU.Pr, F, Q);
+    if (laser) upd_joseph_d(NU.xr, NU.Pr, z, r, &nisr);
+    symm(NU.Pr, 4);
+    for (int f = 0; f < NNF; f++) {
+        if (NU.broken[f]) continue;
+        predx_f(NU.x[f], Ff);
+        if (f == NF_SQRT) predS_f(NU.P[f], Ff, Lqf); else predP_f(NU.P[f], Ff, Qf);
+        float nis = 0;
+        int ok = !laser ? 1 : f == NF_NAIVE ? upd_naive_f(NU.x[f], NU.P[f], zf, rf, &nis)
+               : f == NF_JOSEPH ? upd_joseph_f(NU.x[f], NU.P[f], zf, rf, &nis) : upd_sqrt_f(NU.x[f], NU.P[f], zf, rf, &nis);
+        int fin = 1;
+        for (int i = 0; i < 16; i++) fin &= isfinite(NU.P[f][i]);
+        for (int i = 0; i < 4; i++) fin &= isfinite(NU.x[f][i]);
+        if (!ok || !fin) { NU.broken[f] = 1; NU.t_bad[f] = t; NU.nbad[f]++; continue; }
+        NU.nis[f] = nis;
+        if (f == NF_SQRT && laser) { ring_inn(lastw_f[0], lastw_f[1]); A.inn_m = 2; }   /* the array form whitens it */
+    }
+    /* how far each has strayed from the reference */
+    double rt = rt_of(t), mr = 0;
+    for (int i = 0; i < 16; i++) mr = fmax(mr, fabs(NU.Pr[i]));
+    eig4(NU.Pr, NU.eig[NNF]);
+    double e0 = hypot(NU.xr[0] - NU.xt[0], NU.xr[1] - NU.xt[1]) * 1000;
+    ser_add(&A.ser[6], rt, e0);
+    int settled = t - NU.t_cue > NU_COAST + 1;      /* RMS once the laser has settled */
+    if (settled) NU.se[NNF] += e0 * e0;
+    for (int f = 0; f < NNF; f++) {
+        if (NU.broken[f]) {             /* a gap in its curves */
+            if (A.ser[3 + f].n && A.ser[3 + f].v[A.ser[3 + f].n - 1] == A.ser[3 + f].v[A.ser[3 + f].n - 1]) {
+                ser_add(&A.ser[3 + f], rt, NAN); ser_add(&A.ser[7 + f], rt, NAN);
+            }
+            continue;
+        }
+        double *P = NU.Pd[f], Ps[16], d = 0, as = 0, mp = 0;
+        nu_Pd(f, P);
+        for (int i = 0; i < 16; i++) { d = fmax(d, fabs(P[i] - NU.Pr[i])); mp = fmax(mp, fabs(P[i])); }
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {
+            as = fmax(as, fabs(P[i * 4 + j] - P[j * 4 + i]));
+            Ps[i * 4 + j] = 0.5 * (P[i * 4 + j] + P[j * 4 + i]);
+        }
+        eig4(Ps, NU.eig[f]);
+        NU.rel[f] = d / mr; NU.asym[f] = as / fmax(mp, 1e-300); NU.lmin[f] = NU.eig[f][0];
+        int bad = NU.eig[f][0] <= 0;
+        if (bad && !NU.bad[f]) { NU.t_bad[f] = t; NU.nbad[f]++; }
+        NU.bad[f] = bad;
+        NU.err[f] = hypot(NU.x[f][0] - NU.xt[0], NU.x[f][1] - NU.xt[1]) * 1000;
+        if (settled) NU.se[f] += NU.err[f] * NU.err[f];
+        if (laser) ser_add(&A.ser[f], rt, NU.nis[f]);
+        ser_add(&A.ser[3 + f], rt, fmax(NU.rel[f], 1e-12));
+        ser_add(&A.ser[7 + f], rt, NU.err[f]);
+    }
+    NU.nse += settled;
+    double a = NU.Pr[0], b = NU.Pr[1], c = NU.Pr[5], l1 = (a + c) / 2 + sqrt(fmax((a - c) * (a - c) / 4 + b * b, 0));
+    if (NU.hn < NUH) { NU.hs[NU.hn] = log10(sqrt(fmax(l1, 1e-30))); NU.ht[NU.hn] = t; NU.hn++; }
+    double tr4[4] = {NU.xt[0], NU.xt[1], NU.xt[2], NU.xt[3]};
+    Filt g; memset(&g, 0, sizeof g); g.n = 4; memcpy(g.x, NU.xr, sizeof NU.xr); memcpy(g.P, NU.Pr, sizeof NU.Pr);
+    if (laser) acc_stats(0, nisr, nees(&g, tr4, 4));
+    A.finit = 1;
+}
+
+/* ---------------- act 9: EKF-SLAM ---------------- */
+/* A robot drives a loop among landmarks it has never seen, measuring range
+ * and bearing to those within reach and dead-reckoning between with noisy
+ * odometry; robot and map share one state and one covariance, and when it
+ * comes round again the map pulls itself together. */
+#define LMAX 16
+#define NSL (3 + 2 * LMAX)
+#define SL_DT 0.5
+#define SL_RMAX 14.0
+#define SL_SR 0.25
+#define SL_SB (2.0 * DEGR)
+#define SL_SV 0.08
+#define SL_SW (1.5 * DEGR)
+#define SLH 512
+static struct {
+    int L;                              /* true landmarks */
+    double mx[LMAX], my[LMAX];
+    int slot[LMAX], id[LMAX], nl, n;    /* map slots <-> landmarks; state size */
+    double x[NSL], P[NSL * NSL], x0[NSL], P0[NSL * NSL];
+    long k; double t;
+    double first[LMAX], last[LMAX];
+    double t_close[8]; int nclose, close_lm[8];
+    double rx[SLH][3]; int rn;          /* the estimated robot path */
+    int seen[LMAX];                     /* observed in the latest step */
+    double nees_r, nees_m; int nnr, nnm;
+} SL;
+
+static double sl_at(int i, int j) { return SL.P[i * NSL + j]; }
+
+static void sl_init(void) {
+    memset(&SL, 0, sizeof SL);
+    Path *p = &A.tp[0];
+    double v = 1.5, r = rn_range(&A.rt, 5, 8), lx = rn_range(&A.rt, 26, 38), ly = rn_range(&A.rt, 14, 24), sg = rn_sign(&A.rt);
+    double h0 = rn_range(&A.rt, 0, TAU);
+    path_start(p, 0, 0, 0, v, h0);
+    for (int lap = 0; lap < 3; lap++)
+        for (int side = 0; side < 4; side++) {
+            path_add(p, S_CV, (side % 2 ? ly : lx) / v, 0);
+            path_add(p, S_TURN, (PI / 2) * r / v, sg * v / r);
+        }
+    A.nt = 1; A.tb[0] = 0; A.te[0] = 1e9;
+    /* landmarks scattered about the loop, not too close together */
+    double cx = 0, cy = 0, o[6], lap_t = (2 * (lx + ly) + TAU * r) / v;
+    for (int i = 0; i < 40; i++) { path_eval(p, lap_t * i / 40, o); cx += o[0] / 40; cy += o[1] / 40; }
+    SL.L = 0;
+    for (int tries = 0; tries < 400 && SL.L < 14; tries++) {
+        path_eval(p, rn_range(&A.rt, 0, lap_t), o);
+        double side = rn_sign(&A.rt) * rn_range(&A.rt, 3, 10), hh = o[4] + PI / 2;
+        double x = o[0] + side * cos(hh), y = o[1] + side * sin(hh);
+        int ok = 1;
+        for (int j = 0; j < SL.L; j++) ok &= hypot(x - SL.mx[j], y - SL.my[j]) > 7;
+        for (int j = 0; j < 40 && ok; j++) { double q[6]; path_eval(p, lap_t * j / 40, q); ok &= hypot(x - q[0], y - q[1]) > 2.5; }
+        if (!ok) continue;
+        SL.mx[SL.L] = x; SL.my[SL.L] = y; SL.L++;
+    }
+    for (int j = 0; j < LMAX; j++) SL.slot[j] = -1;
+    path_eval(p, 0, o);
+    SL.x[0] = o[0]; SL.x[1] = o[1]; SL.x[2] = o[4];   /* the map's frame is the start pose */
+    SL.n = 3;
+    memcpy(SL.x0, SL.x, sizeof SL.x);
+    /* view: the loop and the landmarks */
+    A.nt = 1;
+    view_fit(0, 0.18, 30);
+    for (int j = 0; j < SL.L; j++) {
+        A.view[0] = fminf(A.view[0], (float)SL.mx[j] - 4); A.view[2] = fmaxf(A.view[2], (float)SL.mx[j] + 4);
+        A.view[1] = fminf(A.view[1], (float)SL.my[j] - 4); A.view[3] = fmaxf(A.view[3], (float)SL.my[j] + 4);
+    }
+    (void)cx; (void)cy;
+    A.nf = 0;
+    chart(0, "NIS", "\xcf\x87\xc2\xb2\xe2\x82\x82 95%, every landmark sighting", 1, 0.01f, 100);
+    chart_bounds(0, 2, 20);
+    chart_ser(0, S_(0, C_F1, ST_DOTS, "sightings"));
+    chart(1, "ROBOT POSITION", "m, error and 2\xcf\x83", 0, 0, 5);
+    chart_ser(1, S_(1, C_F2, ST_LINE, "2\xcf\x83"));
+    chart_ser(1, S_(2, C_F1, ST_LINE, "error"));
+    chart(2, "MAP UNCERTAINTY", "m, landmark \xcf\x83 (mean, worst)", 0, 0, 3);
+    chart_ser(2, S_(3, C_F3, ST_LINE, "worst"));
+    chart_ser(2, S_(4, C_F1, ST_LINE, "mean"));
+}
+
+/* the robot moves by odometry (v, w) over dt: an exact arc */
+static void sl_move(double *x, double v, double w, double dt, double *Gx, double *Gu) {
+    double th = x[2];
+    if (fabs(w) < 1e-6) {
+        double c = cos(th), s = sin(th);
+        x[0] += v * dt * c; x[1] += v * dt * s;
+        if (Gx) { double G[9] = {1, 0, -v * dt * s, 0, 1, v * dt * c, 0, 0, 1}; memcpy(Gx, G, sizeof G); }
+        if (Gu) { double G[6] = {dt * c, -0.5 * v * dt * dt * s, dt * s, 0.5 * v * dt * dt * c, 0, dt}; memcpy(Gu, G, sizeof G); }
+    } else {
+        double th1 = th + w * dt, r = v / w;
+        x[0] += r * (sin(th1) - sin(th)); x[1] -= r * (cos(th1) - cos(th)); x[2] = wrap_pi(th1);
+        if (Gx) { double G[9] = {1, 0, r * (cos(th1) - cos(th)), 0, 1, r * (sin(th1) - sin(th)), 0, 0, 1}; memcpy(Gx, G, sizeof G); }
+        if (Gu) {
+            double dxv = (sin(th1) - sin(th)) / w, dyv = -(cos(th1) - cos(th)) / w;
+            double dxw = -v / (w * w) * (sin(th1) - sin(th)) + r * cos(th1) * dt;
+            double dyw = v / (w * w) * (cos(th1) - cos(th)) + r * sin(th1) * dt;
+            double G[6] = {dxv, dxw, dyv, dyw, 0, dt};
+            memcpy(Gu, G, sizeof G);
+        }
+    }
+}
+
+/* the odometry the robot would read over [t, t + dt]: the arc that joins the poses */
+static void sl_odo_true(double t, double dt, double *v, double *w) {
+    double a[6], b[6];
+    path_eval(&A.tp[0], t, a); path_eval(&A.tp[0], t + dt, b);
+    double dth = wrap_pi(b[4] - a[4]), ch = hypot(b[0] - a[0], b[1] - a[1]);
+    *w = dth / dt;
+    *v = fabs(dth) > 1e-9 ? ch / dt * (dth / 2) / sin(dth / 2) : ch / dt;
+}
+
+static void sl_step(void) {
+    long k = ++SL.k;
+    double t = k * SL_DT, t0 = t - SL_DT;
+    int n = SL.n;
+    memcpy(SL.x0, SL.x, sizeof SL.x);
+    memcpy(SL.P0, SL.P, sizeof SL.P);
+    /* predict: robot by noisy odometry; robot-map cross terms through Gx */
+    double v, w, Gx[9], Gu[6];
+    sl_odo_true(t0, SL_DT, &v, &w);
+    v += SL_SV * rn_n(&A.rm); w += SL_SW * rn_n(&A.rm);
+    sl_move(SL.x, v, w, SL_DT, Gx, Gu);
+    {
+        double M[4] = {SL_SV * SL_SV, 0, 0, SL_SW * SL_SW}, T[NSL * 3];
+        /* P_rr */
+        double Prr[9], A1[9], B1[9], GM[6], GQ[9];
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) Prr[i * 3 + j] = sl_at(i, j);
+        mm(Gx, Prr, A1, 3, 3, 3); mmT(A1, Gx, B1, 3, 3, 3);
+        mm(Gu, M, GM, 3, 2, 2); mmT(GM, Gu, GQ, 3, 2, 3);
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) SL.P[i * NSL + j] = B1[i * 3 + j] + GQ[i * 3 + j];
+        /* P_rm = Gx P_rm */
+        for (int i = 0; i < 3; i++)
+            for (int j = 3; j < n; j++) {
+                double s = 0;
+                for (int l = 0; l < 3; l++) s += Gx[i * 3 + l] * sl_at(l, j);
+                T[i * NSL + j] = s;
+            }
+        for (int i = 0; i < 3; i++)
+            for (int j = 3; j < n; j++) SL.P[i * NSL + j] = SL.P[j * NSL + i] = T[i * NSL + j];
+    }
+    /* observe every landmark within reach */
+    double o[6];
+    path_eval(&A.tp[0], t, o);
+    for (int j = 0; j < SL.L; j++) {
+        SL.seen[j] = 0;
+        double dx = SL.mx[j] - o[0], dy = SL.my[j] - o[1], r = hypot(dx, dy);
+        if (r > SL_RMAX) continue;
+        double z[2] = {r + SL_SR * rn_n(&A.rm), wrap_pi(atan2(dy, dx) - o[4] + SL_SB * rn_n(&A.rm))};
+        double R[4] = {SL_SR * SL_SR, 0, 0, SL_SB * SL_SB};
+        SL.seen[j] = 1;
+        int s = SL.slot[j];
+        n = SL.n;
+        if (s < 0) {                    /* a new landmark: augment the state */
+            if (SL.nl >= LMAX) continue;
+            s = SL.slot[j] = SL.nl; SL.id[s] = j; SL.nl++;
+            int a = 3 + 2 * s;
+            double th = SL.x[2] + z[1], c = cos(th), sn = sin(th);
+            SL.x[a] = SL.x[0] + z[0] * c; SL.x[a + 1] = SL.x[1] + z[0] * sn;
+            double Gr[6] = {1, 0, -z[0] * sn, 0, 1, z[0] * c}, Gz[4] = {c, -z[0] * sn, sn, z[0] * c};
+            /* P_mx = Gr P_r. (2 x n), P_mm = Gr Prr Gr' + Gz R Gz' */
+            double Pmx[2 * NSL];
+            for (int i = 0; i < 2; i++)
+                for (int jj = 0; jj < n; jj++) {
+                    double q = 0;
+                    for (int l = 0; l < 3; l++) q += Gr[i * 3 + l] * sl_at(l, jj);
+                    Pmx[i * NSL + jj] = q;
+                }
+            for (int i = 0; i < 2; i++)
+                for (int jj = 0; jj < n; jj++) SL.P[(a + i) * NSL + jj] = SL.P[jj * NSL + a + i] = Pmx[i * NSL + jj];
+            for (int i = 0; i < 2; i++)
+                for (int jj = 0; jj < 2; jj++) {
+                    double q = 0;
+                    for (int l = 0; l < 3; l++) q += Pmx[i * NSL + l] * Gr[jj * 3 + l];
+                    double gz = 0;
+                    for (int l = 0; l < 2; l++) gz += Gz[i * 2 + l] * R[l * 2 + l] * Gz[jj * 2 + l];
+                    SL.P[(a + i) * NSL + a + jj] = q + gz;
+                }
+            SL.n = n + 2;
+            SL.first[j] = SL.last[j] = t;
+            continue;
+        }
+        /* an update: H touches the robot and this landmark only */
+        int a = 3 + 2 * s;
+        double ex = SL.x[a] - SL.x[0], ey = SL.x[a + 1] - SL.x[1], q = fmax(ex * ex + ey * ey, 1e-9), sq = sqrt(q);
+        double zh[2] = {sq, wrap_pi(atan2(ey, ex) - SL.x[2])};
+        double Hr[6] = {-ex / sq, -ey / sq, 0, ey / q, -ex / q, -1}, Hm[4] = {ex / sq, ey / sq, -ey / q, ex / q};
+        static double PHt[NSL * 2];
+        for (int i = 0; i < n; i++)
+            for (int m = 0; m < 2; m++) {
+                double acc = 0;
+                for (int l = 0; l < 3; l++) acc += sl_at(i, l) * Hr[m * 3 + l];
+                for (int l = 0; l < 2; l++) acc += sl_at(i, a + l) * Hm[m * 2 + l];
+                PHt[i * 2 + m] = acc;
+            }
+        double S[4], Si[4], nu[2] = {z[0] - zh[0], wrap_pi(z[1] - zh[1])};
+        for (int m = 0; m < 2; m++)
+            for (int mm2 = 0; mm2 < 2; mm2++) {
+                double acc = R[m * 2 + mm2];
+                for (int l = 0; l < 3; l++) acc += Hr[m * 3 + l] * PHt[l * 2 + mm2];
+                for (int l = 0; l < 2; l++) acc += Hm[m * 2 + l] * PHt[(a + l) * 2 + mm2];
+                S[m * 2 + mm2] = acc;
+            }
+        inv(S, Si, 2);
+        double nis = nu[0] * (Si[0] * nu[0] + Si[1] * nu[1]) + nu[1] * (Si[2] * nu[0] + Si[3] * nu[1]);
+        static double K[NSL * 2];
+        for (int i = 0; i < n; i++)
+            for (int m = 0; m < 2; m++) K[i * 2 + m] = PHt[i * 2] * Si[m] + PHt[i * 2 + 1] * Si[2 + m];
+        for (int i = 0; i < n; i++) SL.x[i] += K[i * 2] * nu[0] + K[i * 2 + 1] * nu[1];
+        SL.x[2] = wrap_pi(SL.x[2]);
+        /* P -= K S K' = K (P H')' */
+        for (int i = 0; i < n; i++)
+            for (int jj = 0; jj <= i; jj++) {
+                double d = K[i * 2] * PHt[jj * 2] + K[i * 2 + 1] * PHt[jj * 2 + 1];
+                SL.P[i * NSL + jj] -= d;
+                if (jj != i) SL.P[jj * NSL + i] = SL.P[i * NSL + jj];
+            }
+        ser_add(&A.ser[0], rt_of(t), nis);
+        acc_stats(0, nis, -1);
+        {
+            double L[4], sv[2];
+            chol(S, L, 2);
+            sv[0] = nu[0] / L[0]; sv[1] = (nu[1] - L[2] * sv[0]) / L[3];
+            ring_inn(sv[0], sv[1]);
+            A.inn_m = 2;
+        }
+        if (t - SL.last[j] > 40 && SL.nclose < 8) { SL.t_close[SL.nclose] = t; SL.close_lm[SL.nclose] = j; SL.nclose++; }
+        SL.last[j] = t;
+    }
+    /* scores */
+    double rt = rt_of(t), e = hypot(SL.x[0] - o[0], SL.x[1] - o[1]);
+    ser_add(&A.ser[1], rt, 2 * sqrt(sl_at(0, 0) + sl_at(1, 1)));
+    ser_add(&A.ser[2], rt, e);
+    {
+        double Pr[9], Pi[9], er[3] = {SL.x[0] - o[0], SL.x[1] - o[1], wrap_pi(SL.x[2] - o[4])}, ne = 0;
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) Pr[i * 3 + j] = sl_at(i, j);
+        if (inv(Pr, Pi, 3))
+            for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) ne += er[i] * Pi[i * 3 + j] * er[j];
+        if (k > 4) { SL.nees_r += ne; SL.nnr++; A.acc_nees[0] += ne; A.acc_ne[0]++; }
+    }
+    if (SL.nl) {
+        double sm = 0, sw = 0;
+        for (int s = 0; s < SL.nl; s++) {
+            int a = 3 + 2 * s;
+            double sg = sqrt(sl_at(a, a) + sl_at(a + 1, a + 1));
+            sm += sg / SL.nl; sw = fmax(sw, sg);
+        }
+        ser_add(&A.ser[3], rt, sw);
+        ser_add(&A.ser[4], rt, sm);
+    }
+    if (SL.rn < SLH) { SL.rx[SL.rn][0] = SL.x[0]; SL.rx[SL.rn][1] = SL.x[1]; SL.rx[SL.rn][2] = t; SL.rn++; }
+    SL.t = t;
+    A.finit = 1;
+}
+
+/* the landmarks' NEES at the end of a run (2 dof each) */
+static double sl_map_nees(int *cnt) {
+    double s = 0;
+    *cnt = 0;
+    for (int sl = 0; sl < SL.nl; sl++) {
+        int a = 3 + 2 * sl, j = SL.id[sl];
+        double P2[4] = {sl_at(a, a), sl_at(a, a + 1), sl_at(a + 1, a), sl_at(a + 1, a + 1)}, Pi[4];
+        double e0 = SL.x[a] - SL.mx[j], e1 = SL.x[a + 1] - SL.my[j];
+        if (!inv(P2, Pi, 2)) continue;
+        s += e0 * (Pi[0] * e0 + Pi[1] * e1) + e1 * (Pi[2] * e0 + Pi[3] * e1);
+        (*cnt)++;
+    }
+    return s;
+}
+
 /* ---------------- running an act ---------------- */
 static uint64_t mix64(uint64_t a, uint64_t b) {
     Rng r = {a * 0x9E3779B97F4A7C15ull ^ (b + 0x632BE59BD9B4E019ull)};
@@ -1451,7 +2497,11 @@ static void act_setup(long cyc, int id) {
     case A_UKF: ukf_init(); break;
     case A_IMM: imm_init(); break;
     case A_PF: pf_init(); break;
-    default: mtt_init(); break;
+    case A_MTT: mtt_init(); break;
+    case A_RTS: rts_init(); break;
+    case A_FUSE: fu_init(); break;
+    case A_NUM: nu_init(); break;
+    default: sl_init(); break;
     }
 }
 
@@ -1466,6 +2516,18 @@ static void act_advance(double s) {
             double t = BRG_T * A.nbrg;
             if (t > s) break;
             pf_bearing();
+        } else if (A.id == A_RTS) {
+            if (0.5 + RT.n > s || RT.n >= RK) break;
+            rts_step();
+        } else if (A.id == A_FUSE) {
+            if ((FU.tick + 1) * FU_DT > s) break;
+            fu_tick();
+        } else if (A.id == A_NUM) {
+            if ((NU.k + 1) * NU_DT > s) break;
+            nu_step();
+        } else if (A.id == A_SLAM) {
+            if ((SL.k + 1) * SL_DT > s) break;
+            sl_step();
         } else if (A.id == A_MTT) {
             double t = (A.scan + 1) * A.rd.T;
             if (t > s) break;
@@ -1941,6 +3003,26 @@ static const char *EQS[NACT][6] = {
      "d^2_{ij} = ν^⊤_{ij}S^{−1}_iν_{ij} \\; ≤ \\; γ = 9.21",
      "\\r{min} ∑_{ij}a_{ij}d^2_{ij} ,\\q ∑_ja_{ij} ≤ 1 ,\\; ∑_ia_{ij} ≤ 1",
      "\\r{confirm: 3 hits;  delete: 3 misses in a row}", NULL, NULL},
+    {"C_k = P_{k|k}F^⊤P^{−1}_{k+1|k}",
+     "\\h{x}_{k|N} = \\h{x}_{k|k} + C_k(\\h{x}_{k+1|N} − \\h{x}_{k+1|k})",
+     "P_{k|N} = P_{k|k} + C_k(P_{k+1|N} − P_{k+1|k})C^⊤_k",
+     "\\r{fixed lag:}\\q \\h{x}_{k−L|k} ,\\; L \\r{steps back from} k ,\\; L = 8",
+     "P_{k|N} ⪯ P_{k|k} \\q \\r{(the future only adds information)}", NULL},
+    {"Y = P^{−1} ,\\q y = P^{−1}\\h{x} ,\\q Y_{k|k−1} = (FY^{−1}_{k−1}F^⊤ + Q)^{−1}",
+     "Y_k = Y_{k|k−1} + ∑_sH^⊤_sR^{−1}_sH_s",
+     "y_k = y_{k|k−1} + ∑_sH^⊤_sR^{−1}_s(z_s − h_s(\\h{x}) + H_s\\h{x})",
+     "\\r{bits} = ½\\,\\r{log}_2(\\r{det}\\,Y_k / \\r{det}\\,Y_{k|k−1})",
+     "\\r{CI:}\\q P^{−1} = ωP^{−1}_a + (1−ω)P^{−1}_b ,\\; ω = \\r{arg min det}\\,P", NULL},
+    {"\\r{naive:}\\q P^+ = (I − KH)P",
+     "\\r{Joseph:}\\q P^+ = (I − KH)P(I − KH)^⊤ + KRK^⊤",
+     "\\r{square root:}\\q P = SS^⊤ ,\\q S^− = \\r{tria}(FS ,\\, Q^{1/2})",
+     "\\r{tria}(R^{1/2}\\, HS \\,;\\, 0\\, S) = (S^{1/2}_e\\, 0 \\,;\\, \\h{K}\\, S^+) ,\\q K = \\h{K}S^{−1/2}_e",
+     "P^−/P^+ ≈ 30^2/0.001^2 ≈ 10^9 \\;≫\\; 1/ε_{32} ≈ 1.7·10^7", NULL},
+    {"x = (x_r ,\\, y_r ,\\, θ ,\\, m_1 ,\\, … ,\\, m_L)",
+     "z_i = (‖m_i − p‖ ,\\; \\r{atan2}(Δy, Δx) − θ) + v",
+     "P_{k|k−1} = G_xPG^⊤_x + G_uMG^⊤_u \\q \\r{(the map does not move)}",
+     "m_{\\r{new}} = p + r(\\r{cos}(θ+β), \\r{sin}(θ+β)) ,\\q P_{mm} = G_rP_{rr}G^⊤_r + G_zRG^⊤_z",
+     "H_i \\r{touches only the robot and} m_i \\r{; the gain reaches every landmark}", NULL},
 };
 
 /* ==================================================================== */
@@ -2069,11 +3151,14 @@ static void chart_static(const Rect *r, const Chart *c) {
     float lw = fmaxf(U, 1);
     /* y grid */
     if (c->logy) {
-        for (int e = (int)ceil(log10(c->y0) - 1e-6); e <= (int)floor(log10(c->y1) + 1e-6); e++) {
+        int e0 = (int)ceil(log10(c->y0) - 1e-6), e1 = (int)floor(log10(c->y1) + 1e-6), est = e1 - e0 > 6 ? (e1 - e0 + 5) / 6 : 1;
+        for (int e = e0; e <= e1; e++) {
             float y = chart_y(c, &in, powf(10, (float)e));
-            seg(in.x, y, in.x + in.w, y, lw, gc, 0.8f);
+            seg(in.x, y, in.x + in.w, y, lw, gc, (e - e0) % est ? 0.35f : 0.8f);
+            if ((e - e0) % est) continue;
             char b[16];
-            if (e < 0) snprintf(b, sizeof b, "%.*f", -e, pow(10, e));
+            if (e < -2) snprintf(b, sizeof b, "1e%d", e);
+            else if (e < 0) snprintf(b, sizeof b, "%.*f", -e, pow(10, e));
             else if (e < 4) snprintf(b, sizeof b, "%.0f", pow(10, e));
             else snprintf(b, sizeof b, "%.0fk", pow(10, e - 3));
             text(s_small, in.x - 5 * U, y + cap_h(s_small) * 0.5f, 1, b, dc, 1);
@@ -2170,6 +3255,11 @@ static void chart_dynamic(const Rect *r, const Chart *c, double rt) {
             continue;
         }
         for (int k = 0; k < s->n; k++) {
+            if (s->v[k] != s->v[k]) {   /* NaN: a gap */
+                if (n > 1) poly(P, n, 0, 1.6f * U, col, 0.95f, NULL);
+                n = 0;
+                continue;
+            }
             float x = chart_x(&in, s->t[k]), y = chart_y(c, &in, s->v[k]);
             if (s->style == ST_STEP && n) { P[2 * n] = x; P[2 * n + 1] = P[2 * n - 1]; n++; }
             P[2 * n] = x; P[2 * n + 1] = y; n++;
@@ -2295,7 +3385,10 @@ static void draw_grid(void) {
     seg(bx, by - 4 * U, bx, by + 1, 1.2f * U, pal[C_DIM], 1);
     seg(bx + bl, by - 4 * U, bx + bl, by + 1, 1.2f * U, pal[C_DIM], 1);
     char b[32];
-    if (st >= 1000) snprintf(b, sizeof b, "%g km", st / 1000); else snprintf(b, sizeof b, "%g m", st);
+    if (st >= 1000) snprintf(b, sizeof b, "%g km", st / 1000);
+    else if (st >= 1) snprintf(b, sizeof b, "%g m", st);
+    else if (st >= 0.01) snprintf(b, sizeof b, "%g cm", st * 100);
+    else snprintf(b, sizeof b, "%g mm", st * 1000);
     text(s_small, bx + bl + 6 * U, by + cap_h(s_small) * 0.5f, -1, b, pal[C_DIM], 1);
     /* north */
     float nx = vr.x + vr.w - 22 * U, ny = vr.y + 30 * U;
@@ -2386,6 +3479,25 @@ static void legend_line(float *y, float x, int col, int dot, const char *name) {
     *y += c * 1.9f;
 }
 
+static void np_plot(double s);
+static void flush(void);
+static Rect clip_cur;                   /* the panel being drawn, scissored */
+static void clip_to(const Rect *r) {   /* scissor to r within the panel (NULL: back to the panel) */
+    flush();
+    Rect c = r ? *r : clip_cur;
+    if (r) {
+        float x0 = fmaxf(c.x, clip_cur.x), y0 = fmaxf(c.y, clip_cur.y);
+        float x1 = fminf(c.x + c.w, clip_cur.x + clip_cur.w), y1 = fminf(c.y + c.h, clip_cur.y + clip_cur.h);
+        c = (Rect){x0, y0, fmaxf(x1 - x0, 0), fmaxf(y1 - y0, 0)};
+    }
+    glScissor((int)c.x, H - (int)(c.y + c.h), (int)c.w, (int)c.h);
+}
+static void np_mats(const Rect *r);
+static void np_meas(const Rect *r, double s);
+static void np_table(const Rect *r, double s);
+static void nu_camera(double s);
+static void axes_box(const Rect *in);
+
 static void draw_plot(const Rect *r, double s, double rt) {
     (void)rt;
     vr = *r;
@@ -2403,7 +3515,9 @@ static void draw_plot(const Rect *r, double s, double rt) {
         vcx = (A.view[0] + A.view[2]) / 2; vcy = (A.view[1] + A.view[3]) / 2;
         vk = fminf(vr.w / (A.view[2] - A.view[0]), vr.h / (A.view[3] - A.view[1]));
     }
+    if (A.id == A_NUM) nu_camera(s);
     draw_grid();
+    if (A.id >= A_RTS) { np_plot(s); return; }
     char lab[64];
     if (A.has_radar) draw_radar(1);
     if (A.id == A_KF) {
@@ -2602,7 +3716,8 @@ static void heat(float x, float y, float cs, int nr, int nc, const double *M, in
             else c = v < GATE ? 1 - v / GATE * 0.8 : 0;
             int col = c >= 0 ? C_F1 : C_F2;
             float cx = x + j * cs, cy = y + i * cs;
-            rectf(cx + 1, cy + 1, cs - 2, cs - 2, pal[col], 0.1f + 0.7f * (float)fmin(fabs(c), 1));
+            float ins = cs < 9 * U ? 0 : 1;
+            rectf(cx + ins, cy + ins, cs - 2 * ins, cs - 2 * ins, pal[col], 0.1f + 0.7f * (float)fmin(fabs(c), 1));
             if (numbers) {
                 char b[16];
                 if (mode == 2 && v >= GATE) snprintf(b, sizeof b, "\xc2\xb7");
@@ -2624,6 +3739,10 @@ static const char *const LBLZ[] = {"zx", "zy"}, *const LBLRB[] = {"r", "\xce\xb2
 
 static const char *mats_head(void) {
     switch (A.id) {
+    case A_RTS: return "8 s AGO: FILTERED P  \xc2\xb7  SMOOTHED P  \xc2\xb7  SMOOTHER GAIN C";
+    case A_FUSE: return "INFORMATION Y = P\xe2\x81\xbb\xc2\xb9  \xc2\xb7  COVARIANCE P  (position, velocity, odometer bias)";
+    case A_NUM: return "P AS STORED: NAIVE float32  \xc2\xb7  float64  \xc2\xb7  THE SQUARE ROOT S";
+    case A_SLAM: return "CORRELATION OF THE WHOLE STATE  \xc2\xb7  robot (r) and every landmark";
     case A_PF: return "COVARIANCE P (particles)  \xc2\xb7  RANGE DISTRIBUTION";
     case A_MTT: return "ASSIGNMENT d\xc2\xb2 (track \xc3\x97 detection)  \xc2\xb7  P OF THE LATEST UPDATE";
     case A_IMM: return "COVARIANCE P (combined)  \xc2\xb7  GAIN K (CT model)";
@@ -2633,6 +3752,7 @@ static const char *mats_head(void) {
 
 static void draw_mats(const Rect *r, double s) {
     (void)s;
+    if (A.id >= A_RTS) { np_mats(r); return; }
     Rect in = {r->x + 34 * U, r->y + 46 * U, r->w - 44 * U, r->h - 54 * U};
     double M[36];
     if (A.id == A_MTT) {
@@ -2700,6 +3820,10 @@ static void draw_mats_static(const Rect *r) {
 /* ---- sensor view: measurement space ---- */
 static const char *meas_head(void) {
     switch (A.id) {
+    case A_RTS: return "ERROR AGAINST TIME  \xc2\xb7  filter and smoother, \xc2\xb1" "2\xcf\x83";
+    case A_FUSE: return "INFORMATION ADDS UP  \xc2\xb7  COVARIANCE INTERSECTION";
+    case A_NUM: return "EIGENVALUES OF P  \xc2\xb7  each filter, after the latest update";
+    case A_SLAM: return "THE ROBOT'S VIEW  \xc2\xb7  landmarks relative to it, nose up";
     case A_KF: return "ERROR SPACE  \xc2\xb7  fix \xe2\x88\x92 truth, estimate \xe2\x88\x92 truth (m)";
     case A_UKF: return "SIGMA POINTS  \xc2\xb7  state space (x, y)  \xe2\x86\x92  measurement space (r, \xce\xb2)";
     case A_IMM: return "MODE-CONDITIONED ESTIMATES  \xc2\xb7  close in on the target";
@@ -2717,6 +3841,7 @@ static void axes_box(const Rect *in) {
 static void draw_meas(const Rect *r, double s, double rt) {
     Rect in = {r->x + 40 * U, r->y + 36 * U, r->w - 56 * U, r->h - 60 * U};
     float lw = fmaxf(U, 1);
+    if (A.id >= A_RTS) { np_meas(r, s); return; }
     if (A.id == A_KF) {
         float sz = fminf(in.w, in.h), cx = in.x + in.w / 2, cy = in.y + in.h / 2, k = sz / 2 / 22.0f;
         seg(cx - sz / 2, cy, cx + sz / 2, cy, lw, pal[C_GRID], 1); seg(cx, cy - sz / 2, cx, cy + sz / 2, lw, pal[C_GRID], 1);
@@ -2956,6 +4081,7 @@ static void draw_innov(const Rect *r) {
 
 /* ---- a table of the filters, or of the tracks ---- */
 static void draw_table(const Rect *r, double s) {
+    if (A.id >= A_RTS) { np_table(r, s); return; }
     float x = r->x + 12 * U, y = r->y + 40 * U + cap_h(s_hud), lh = cap_h(s_hud) * 2.0f;
     static const float cx[] = {0, 0.17f, 0.32f, 0.47f, 0.6f, 0.73f, 0.87f};
     float w = r->w - 24 * U;
@@ -3080,6 +4206,890 @@ static void draw_title(const Rect *r) {
     float el = fminf(px * 2.0f, avail / ne);
     y += el * 0.5f + px * 0.6f;
     for (int i = 0; i < ne; i++) eq(x, y + i * el, EQS[A.id][i], pal[C_TEXT], 1, 1);
+}
+
+/* ==================================================================== */
+/* ---- the new acts on screen ---- */
+
+/* the act's name and clock, top left of the plot; returns where the legend goes */
+static void plot_head(double s, float *x, float *y, int lines) {
+    *x = vr.x + 14 * U; *y = vr.y + 14 * U + cap_h(s_hudb);
+    float h = 14 * U + cap_h(s_hudb) * 1.9f + cap_h(s_small) * (2.4f + 1.9f * lines + 1) + 8 * U;
+    rectf(vr.x + 4 * U, vr.y + 4 * U, 470 * U, h, pal[C_BG], 0.72f);
+    textf(s_hudb, *x, *y, -1, pal[C_TEXT], 1, "%d/%d  %s", A.id + 1, NACT, ACT_NAME[A.id]);
+    *y += cap_h(s_hudb) * 1.9f;
+    char tb[32];
+    fmt_mmss(tb, sizeof tb, s);
+    textf(s_small, *x, *y, -1, pal[C_DIM], 1, "T+%s  sim \xc3\x97%g", tb, A.TS);
+    *y += cap_h(s_small) * 2.4f;
+}
+
+/* a 2x2 covariance [a b; b c] as an ellipse around (cx, cy) in a local
+ * frame of k px per unit (y up); kk sigmas */
+static void cov_ell_local(float cx, float cy, const double *P3, double k, double kk, float *pts) {
+    double l1, l2, th, Q[3] = {P3[0], P3[1], P3[2]};
+    cov_axes(Q, &l1, &l2, &th);
+    ellipse_pts(cx, cy, fmaxf((float)(kk * sqrt(l1) * k), 1.0f), fmaxf((float)(kk * sqrt(l2) * k), 1.0f), (float)-th, pts);
+}
+
+/* a band of a world polyline (an outage, a canyon): a wide faint stroke */
+static void path_band(const Path *p, double t0, double t1, const char *label, float a) {
+    if (t1 <= t0) return;
+    float P[2 * 121];
+    for (int i = 0; i <= 120; i++) {
+        double o[6];
+        path_eval(p, t0 + (t1 - t0) * i / 120, o);
+        P[2 * i] = WX(o[0]); P[2 * i + 1] = WY(o[1]);
+    }
+    poly(P, 121, 0, 16 * U, pal[C_WARN], 0.10f * a, NULL);
+    poly_dash(P, 121, 0, fmaxf(U, 1), pal[C_WARN], 0.5f * a, 4 * U, 5 * U);
+    if (label) text(s_small, P[120] + 12 * U, P[121] - 10 * U, -1, label, pal[C_WARN], 0.85f * a);
+}
+
+/* -------- RTS -------- */
+static double rts_ease(double s) {
+    return RT.n ? smooth01((float)((s - RT.t[RT.n - 1]) / A.TS / 0.5)) : 1;
+}
+static void rts_xs(int k, double e, double *x, double *P3) {
+    const double *a = RT.xs[k], *A4 = RT.Ps[k];
+    if (k < RT.n0 && k < RT.n - 1) {
+        const double *b = RT.xs0[k], *B4 = RT.Ps0[k];
+        x[0] = b[0] + (a[0] - b[0]) * e; x[1] = b[1] + (a[1] - b[1]) * e;
+        P3[0] = B4[0] + (A4[0] - B4[0]) * e; P3[1] = B4[1] + (A4[1] - B4[1]) * e; P3[2] = B4[5] + (A4[5] - B4[5]) * e;
+    } else { x[0] = a[0]; x[1] = a[1]; P3[0] = A4[0]; P3[1] = A4[1]; P3[2] = A4[5]; }
+}
+
+static void rts_plot(double s) {
+    double win = 70;
+    draw_truth(&A.tp[0], fmax(0, s - win - 10), s, 0.3f);
+    for (int i = 0; i < 2; i++)
+        if (RT.out[i][0] < s) path_band(&A.tp[0], RT.out[i][0], fmin(RT.out[i][1], s), "GPS OUTAGE", 1);
+    int n = RT.n;
+    if (!n) return;
+    for (int k = 0; k < n; k++) {
+        if (!RT.fix[k] || RT.t[k] < s - win) continue;
+        float a = 1 - (float)((s - RT.t[k]) / win);
+        disk(WX(RT.zx[k]), WY(RT.zy[k]), 2.0f * U, pal[C_MEAS], 0.75f * a);
+    }
+    double e = rts_ease(s);
+    static float Pf[2 * RK], Ps[2 * RK], al[RK];
+    int m = 0, k0 = n - 1;
+    while (k0 > 0 && RT.t[k0 - 1] >= s - win) k0--;
+    float pts[2 * ELN];
+    for (int k = k0; k < n; k++, m++) {
+        double x[2], P3[3];
+        rts_xs(k, e, x, P3);
+        Pf[2 * m] = WX(RT.xf[k][0]); Pf[2 * m + 1] = WY(RT.xf[k][1]);
+        Ps[2 * m] = WX(x[0]); Ps[2 * m + 1] = WY(x[1]);
+        al[m] = smooth01((float)((RT.t[k] - (s - win)) / 12));
+        if ((n - 1 - k) % 3 == 0 && k < n - 1) {
+            double Pf3[3] = {RT.Pf[k][0], RT.Pf[k][1], RT.Pf[k][5]};
+            cov_ellipse(RT.xf[k][0], RT.xf[k][1], Pf3, 1, pts);
+            poly_dash(pts, ELN, 1, fmaxf(U, 1), pal[C_F2], 0.55f * al[m], 3 * U, 3 * U);
+            cov_ellipse(x[0], x[1], P3, 1, pts);
+            fan(pts, ELN, WX(x[0]), WY(x[1]), pal[C_F1], 0.10f * al[m]);
+            poly(pts, ELN, 1, 1.2f * U, pal[C_F1], 0.8f * al[m], NULL);
+        }
+    }
+    poly(Pf, m, 0, 1.1f * U, pal[C_F2], 0.8f, al);
+    poly(Ps, m, 0, 2.0f * U, pal[C_F1], 0.95f, al);
+    if (glow_on) poly_k(Ps, m, 0, 6 * U, pal[C_F1], 0.10f, al, K_SOFT);
+    /* the fixed-lag estimate, eight steps behind */
+    int j = n - 1 - RTS_LAG;
+    if (j >= 0) {
+        double x[4], P3[3];
+        rts_xs(j, e, x, P3);
+        x[2] = RT.xs[j][2]; x[3] = RT.xs[j][3];
+        draw_est(x, P3, C_F3, 1, "LAG 8 s", 0, 0, 0);
+        double o[6];
+        path_eval(&A.tp[0], RT.t[j], o);
+        float h = 3.5f * U;
+        seg(WX(o[0]) - h, WY(o[1]), WX(o[0]) + h, WY(o[1]), fmaxf(U, 1), pal[C_TRUTH], 0.8f);
+        seg(WX(o[0]), WY(o[1]) - h, WX(o[0]), WY(o[1]) + h, fmaxf(U, 1), pal[C_TRUTH], 0.8f);
+    }
+    double x[4], P2[3];
+    fdisp(&A.f[0], s, x, P2);
+    draw_est(x, P2, C_F2, 1, "FILTER", 2, 0, 0);
+    float lx, ly;
+    plot_head(s, &lx, &ly, 7);
+    legend_line(&ly, lx, C_TRUTH, 0, "truth");
+    legend_line(&ly, lx, C_MEAS, 1, "GPS fix");
+    legend_line(&ly, lx, C_F2, 0, "forward filter, 1\xcf\x83 dashed");
+    legend_line(&ly, lx, C_F1, 0, "smoothed with all data so far");
+    legend_line(&ly, lx, C_F3, 0, "fixed-lag smoother, 8 s");
+    ly += cap_h(s_small);
+    double sf = sqrt(RT.Pf[n - 1][0] + RT.Pf[n - 1][5]), sl = j >= 0 ? sqrt(RT.Ps[j][0] + RT.Ps[j][5]) : 0, sfj = j >= 0 ? sqrt(RT.Pf[j][0] + RT.Pf[j][5]) : 0;
+    textf(s_small, lx, ly, -1, pal[C_DIM], 1, "\xcf\x83 now %.1f m;  8 s ago: filtered %.1f m, smoothed %.1f m", sf, sfj, sl);
+}
+
+static void rts_mats(const Rect *r) {
+    Rect in = {r->x + 34 * U, r->y + 52 * U, r->w - 44 * U, r->h - 60 * U};
+    int j = RT.n - 1 - RTS_LAG;
+    if (j < 0) return;
+    float gap = 40 * U, cs = fminf(fminf(in.h / 4.4f, (in.w - 2 * gap) / 12.0f), 48 * U);
+    const double *M[3] = {RT.Pf[j], RT.Ps[j], RT.C[j]};
+    static const char *nm[3] = {"P(k|k)  filtered", "P(k|N)  smoothed", "C(k)  smoother gain"};
+    for (int i = 0; i < 3; i++) {
+        float x = in.x + i * (4 * cs + gap);
+        heat(x, in.y, cs, 4, 4, M[i], i == 2 ? 1 : 0, LBL4, LBL4, NULL);
+        text(s_small, x, in.y - 20 * U, -1, nm[i], pal[i == 0 ? C_F2 : i == 1 ? C_F1 : C_DIM], 1);
+    }
+}
+
+static void rts_meas(const Rect *r, double s) {
+    Rect in = {r->x + 44 * U, r->y + 40 * U, r->w - 60 * U, r->h - 64 * U};
+    float lw = fmaxf(U, 1), gh = 14 * U, hh = (in.h - gh) / 2;
+    double win = 80, e = rts_ease(s);
+    int n = RT.n, k0 = n - 1;
+    if (n < 2) return;
+    while (k0 > 0 && RT.t[k0 - 1] >= s - win) k0--;
+    double sc = 12;
+    for (int k = k0; k < n; k++) sc = fmax(sc, 2.3 * sqrt(fmax(RT.Pf[k][0], RT.Pf[k][5])));
+    sc = fmin(sc, 150);
+    #define TX(t) (in.x + in.w * (float)(1 - (s - (t)) / win))
+    for (int c = 0; c < 2; c++) {
+        Rect b = {in.x, in.y + c * (hh + gh), in.w, hh};
+        axes_box(&b);
+        float cy = b.y + b.h / 2, ky = (float)(b.h / 2 / sc);
+        seg(b.x, cy, b.x + b.w, cy, lw, pal[C_GRID], 1);
+        double st = nice_step(sc, 3);
+        for (double v = st; v < sc; v += st) {
+            seg(b.x, cy - (float)v * ky, b.x + b.w, cy - (float)v * ky, lw, pal[C_GRID], 0.5f);
+            seg(b.x, cy + (float)v * ky, b.x + b.w, cy + (float)v * ky, lw, pal[C_GRID], 0.5f);
+            textf(s_small, b.x - 5 * U, cy - (float)v * ky + cap_h(s_small) / 2, 1, pal[C_DIM], 1, "%g", v);
+        }
+        text(s_small, b.x + 6 * U, b.y + 6 * U + cap_h(s_small), -1, c ? "y error, m" : "x error, m", pal[C_DIM], 1);
+        for (int i = 0; i < 2; i++) {
+            double a0 = fmax(RT.out[i][0], s - win), a1 = fmin(RT.out[i][1], s);
+            if (a1 > a0) rectf(TX(a0), b.y, TX(a1) - TX(a0), b.h, pal[C_WARN], 0.07f);
+        }
+        for (int pass = 0; pass < 2; pass++) {       /* filter, then smoother: +-2 sigma bands */
+            int col = pass ? C_F1 : C_F2;
+            for (int k = k0; k + 1 < n; k++) {
+                double xa[2], Pa[3], xb[2], Pb[3];
+                if (pass) { rts_xs(k, e, xa, Pa); rts_xs(k + 1, e, xb, Pb); }
+                else {
+                    xa[0] = RT.xf[k][0]; xa[1] = RT.xf[k][1]; Pa[0] = RT.Pf[k][0]; Pa[2] = RT.Pf[k][5];
+                    xb[0] = RT.xf[k + 1][0]; xb[1] = RT.xf[k + 1][1]; Pb[0] = RT.Pf[k + 1][0]; Pb[2] = RT.Pf[k + 1][5];
+                }
+                double ea = xa[c] - RT.tr[k][c], eb = xb[c] - RT.tr[k + 1][c], sa = 2 * sqrt(c ? Pa[2] : Pa[0]), sb = 2 * sqrt(c ? Pb[2] : Pb[0]);
+                float x0 = TX(RT.t[k]), x1 = TX(RT.t[k + 1]);
+                float y0a = cy - (float)clampd(ea + sa, -sc, sc) * ky, y0b = cy - (float)clampd(ea - sa, -sc, sc) * ky;
+                float y1a = cy - (float)clampd(eb + sb, -sc, sc) * ky, y1b = cy - (float)clampd(eb - sb, -sc, sc) * ky;
+                float fa = pass ? 0.22f : 0.13f;
+                V(x0, y0a, 0, 0, pal[col], fa, K_FLAT, 0); V(x1, y1a, 0, 0, pal[col], fa, K_FLAT, 0); V(x1, y1b, 0, 0, pal[col], fa, K_FLAT, 0);
+                V(x0, y0a, 0, 0, pal[col], fa, K_FLAT, 0); V(x1, y1b, 0, 0, pal[col], fa, K_FLAT, 0); V(x0, y0b, 0, 0, pal[col], fa, K_FLAT, 0);
+                seg(x0, cy - (float)clampd(ea, -sc, sc) * ky, x1, cy - (float)clampd(eb, -sc, sc) * ky, (pass ? 1.8f : 1.1f) * U, pal[col], 0.95f);
+            }
+        }
+        for (int k = k0; k < n; k++) {
+            if (!RT.fix[k]) continue;
+            double ez = (c ? RT.zy[k] : RT.zx[k]) - RT.tr[k][c];
+            if (fabs(ez) < sc) disk(TX(RT.t[k]), cy - (float)ez * ky, 1.6f * U, pal[C_MEAS], 0.7f);
+        }
+    }
+    #undef TX
+    float y = in.y + in.h + 4 * U + cap_h(s_small);
+    text(s_small, in.x, y, -1, "\xe2\x86\x90 80 s", pal[C_DIM], 1);
+    text(s_small, in.x + in.w, y, 1, "now", pal[C_DIM], 1);
+    float lx = in.x + in.w * 0.3f;
+    lx += text(s_small, lx, y, -1, "\xc2\xb1" "2\xcf\x83: ", pal[C_DIM], 1);
+    lx += text(s_small, lx, y, -1, "filter  ", pal[C_F2], 1);
+    lx += text(s_small, lx, y, -1, "smoother  ", pal[C_F1], 1);
+    text(s_small, lx, y, -1, "GPS", pal[C_MEAS], 1);
+}
+
+/* the table helper: a header row and rows of cells */
+static float table_head(const Rect *r, int nc, const float *cx, const char *const *hd, float *x, float *w) {
+    *x = r->x + 12 * U; *w = r->w - 24 * U;
+    float y = r->y + 40 * U + cap_h(s_hud);
+    for (int c = 0; c < nc; c++) text(s_small, *x + *w * cx[c], y, -1, hd[c], pal[C_DIM], 1);
+    return y + cap_h(s_hud) * 2.0f;
+}
+
+static void rts_table(const Rect *r, double s) {
+    (void)s;
+    static const float cx[] = {0, 0.3f, 0.48f, 0.66f, 0.84f};
+    static const char *hd[] = {"ESTIMATE", "RMS ERR m", "NEES (2)", "\xcf\x83 NOW m", "LATENCY"};
+    float x, w, lh = cap_h(s_hud) * 2.0f, y = table_head(r, 5, cx, hd, &x, &w);
+    static const char *nm[3] = {"forward filter", "fixed lag", "smoothed"};
+    static const char *lat[3] = {"0 s", "8 s", "all data"};
+    static const int col[3] = {C_F2, C_F3, C_F1};
+    int n = RT.n, j = n - 1 - RTS_LAG;
+    for (int k = 0; k < 3; k++) {
+        text(s_hud, x, y, -1, nm[k], pal[col[k]], 1);
+        if (RT.ne[k]) {
+            textf(s_hud, x + w * cx[1], y, -1, pal[C_TEXT], 1, "%.2f", sqrt(RT.se[k] / RT.ne[k]));
+            textf(s_hud, x + w * cx[2], y, -1, pal[C_TEXT], 1, "%.2f", RT.sn[k] / RT.ne[k]);
+        }
+        double sg = k == 0 && n ? sqrt(RT.Pf[n - 1][0] + RT.Pf[n - 1][5]) : j >= 0 ? sqrt(RT.Ps[j][0] + RT.Ps[j][5]) : 0;
+        if (k == 2 && n) sg = sqrt(RT.Ps[n / 2][0] + RT.Ps[n / 2][5]);
+        textf(s_hud, x + w * cx[3], y, -1, pal[C_TEXT], 1, "%.2f", sg);
+        text(s_hud, x + w * cx[4], y, -1, lat[k], pal[C_TEXT], 1);
+        y += lh;
+    }
+    y += lh * 0.5f;
+    int nf = 0;
+    for (int k = 0; k < n; k++) nf += RT.fix[k];
+    textf(s_small, x, y, -1, pal[C_DIM], 1, "%d steps, %d GPS fixes; the smoothed \xcf\x83 is at mid-history", n, nf);
+    y += lh * 0.8f;
+    text(s_small, x, y, -1, "RTS = batch least squares over the whole past (--check)", pal[C_DIM], 1);
+}
+
+/* -------- fusion -------- */
+static void fu_site(double x, double y, const char *label, int square) {
+    float cx = WX(x), cy = WY(y), h = 5.5f * U, lw = 1.4f * U;
+    if (square) {
+        seg(cx - h, cy - h, cx + h, cy - h, lw, pal[C_TEXT], 1); seg(cx + h, cy - h, cx + h, cy + h, lw, pal[C_TEXT], 1);
+        seg(cx + h, cy + h, cx - h, cy + h, lw, pal[C_TEXT], 1); seg(cx - h, cy + h, cx - h, cy - h, lw, pal[C_TEXT], 1);
+    } else {
+        seg(cx, cy - h * 1.2f, cx + h, cy + h * 0.7f, lw, pal[C_TEXT], 1); seg(cx + h, cy + h * 0.7f, cx - h, cy + h * 0.7f, lw, pal[C_TEXT], 1);
+        seg(cx - h, cy + h * 0.7f, cx, cy - h * 1.2f, lw, pal[C_TEXT], 1);
+    }
+    text(s_small, cx + 9 * U, cy + 4 * U, -1, label, pal[C_TEXT], 0.9f);
+}
+
+/* the zoom: mode 0, information adding up in the latest fix; mode 1, CI */
+static void fu_zoom_in(const Rect *b, double s, int mode, int small);
+static void fu_zoom(const Rect *b, double s, int mode, int small) {
+    clip_to(b);
+    fu_zoom_in(b, s, mode, small);
+    clip_to(NULL);
+}
+static void fu_zoom_in(const Rect *b, double s, int mode, int small) {
+    axes_box(b);
+    float cx = b->x + b->w / 2, cy = b->y + b->h / 2, pts[2 * ELN], lw = fmaxf(U, 1);
+    float ty = b->y + 6 * U + cap_h(s_small);
+    if (mode == 0) {
+        /* cycle GPS, beacon 1, beacon 2, two seconds each; crossfade */
+        static const int seq[3] = {SN_GPS, SN_B1, SN_B2};
+        double ph = s / 2.0;
+        int slot = (int)floor(ph) % 3, sn = seq[slot];
+        float a = smooth01((float)((ph - floor(ph)) / 0.25)) * (1 - smooth01((float)((ph - floor(ph) - 0.85) / 0.15)));
+        text(s_small, b->x + 6 * U, ty, -1, "Y\xe2\x81\xba = Y\xe2\x81\xbb + H\xe1\xb5\x80R\xe2\x81\xbb\xc2\xb9H", pal[C_DIM], 1);
+        textf(s_small, b->x + b->w - 6 * U, ty, 1, pal[SN_COL[sn]], a, "%s", SN_NAME[sn]);
+        if (FU.upd_t[sn] < 0 || s - FU.upd_t[sn] > 6) {
+            text(s_small, cx, cy, 0, sn == SN_GPS ? "no GPS fix lately" : "no range lately", pal[C_WARN], a);
+            return;
+        }
+        const double *Pm = FU.upd_Pm[sn], *Pp = FU.upd_Pp[sn], *J = FU.upd_J[sn];
+        double l1, l2, th;
+        cov_axes(Pm, &l1, &l2, &th);
+        double k = fminf(b->w, b->h) / 2 * 0.8 / (2.0 * sqrt(l1));
+        /* the sensor's information as a covariance: its null direction runs off the box */
+        double jl1, jl2, jth;
+        cov_axes(J, &jl1, &jl2, &jth);
+        float big = fmaxf(b->w, b->h);
+        float ax = (float)(jl1 > 0 ? 2 / sqrt(jl1) * k : big), ay = (float)(jl2 > jl1 * 1e-6 ? 2 / sqrt(jl2) * k : big);
+        ellipse_pts(cx, cy, fminf(ax, big), fminf(ay, big), (float)-jth, pts);
+        fan(pts, ELN, cx, cy, pal[SN_COL[sn]], 0.10f * a);
+        poly_dash(pts, ELN, 1, lw, pal[SN_COL[sn]], 0.8f * a, 4 * U, 3 * U);
+        cov_ell_local(cx, cy, Pm, k, 2, pts);
+        poly_dash(pts, ELN, 1, 1.3f * U, pal[C_F1], 0.75f * a, 5 * U, 4 * U);
+        cov_ell_local(cx, cy, Pp, k, 2, pts);
+        fan(pts, ELN, cx, cy, pal[C_F1], 0.22f * a);
+        poly(pts, ELN, 1, 1.8f * U, pal[C_F1], a, NULL);
+        if (!small) {
+            float y = b->y + b->h - 8 * U - cap_h(s_small) * 1.9f * 2;
+            legend_line(&y, b->x + 6 * U, C_F1, 0, "prior, then posterior (2\xcf\x83)");
+            legend_line(&y, b->x + 6 * U, SN_COL[sn], 0, "what the sensor knows (2\xcf\x83 of (H\xe1\xb5\x80R\xe2\x81\xbb\xc2\xb9H)\xe2\x81\xbb\xc2\xb9)");
+        }
+        textf(s_small, b->x + 6 * U, b->y + b->h - 6 * U, -1, pal[C_DIM], 1, "\xc2\xb1%.1f m", b->w / 2 / k);
+    } else {
+        text(s_small, b->x + 6 * U, ty, -1, "COVARIANCE INTERSECTION", pal[C_DIM], 1);
+        if (FU.ci_t < 0) return;
+        textf(s_small, b->x + b->w - 6 * U, ty, 1, pal[C_DIM], 1, "\xcf\x89 %.2f", FU.ci_w);
+        double ext = 0, l1, l2, th;
+        cov_axes(FU.ci_A, &l1, &l2, &th); ext = fmax(ext, 2 * sqrt(l1));
+        cov_axes(FU.ci_B, &l1, &l2, &th); ext = fmax(ext, 2 * sqrt(l1));
+        ext = fmax(ext, fmax(fabs(FU.ci_b[0] - FU.ci_a[0]), fabs(FU.ci_b[1] - FU.ci_a[1])) + 1);
+        double k = fminf(b->w, b->h) / 2 * 0.82 / ext;
+        #define LX(v) (cx + (float)(((v) - FU.ci_a[0]) * k))
+        #define LY(v) (cy - (float)(((v) - FU.ci_a[1]) * k))
+        cov_ell_local(LX(FU.ci_a[0]), LY(FU.ci_a[1]), FU.ci_A, k, 2, pts);
+        poly(pts, ELN, 1, 1.4f * U, pal[C_F1], 0.9f, NULL);
+        cov_ell_local(LX(FU.ci_b[0]), LY(FU.ci_b[1]), FU.ci_B, k, 2, pts);
+        poly(pts, ELN, 1, 1.4f * U, pal[C_F3], 0.9f, NULL);
+        cov_ell_local(LX(FU.ci_n[0]), LY(FU.ci_n[1]), FU.ci_N, k, 2, pts);
+        poly_dash(pts, ELN, 1, 1.4f * U, pal[C_WARN], 0.9f, 3 * U, 3 * U);
+        cov_ell_local(LX(FU.ci_c[0]), LY(FU.ci_c[1]), FU.ci_C, k, 2, pts);
+        fan(pts, ELN, LX(FU.ci_c[0]), LY(FU.ci_c[1]), pal[C_TEXT], 0.08f);
+        poly(pts, ELN, 1, 2.0f * U, pal[C_TEXT], 0.95f, NULL);
+        double o[6];
+        path_eval(&A.tp[0], FU.ci_t, o);
+        float h = 4 * U, X = LX(o[0]), Y = LY(o[1]);
+        seg(X - h, Y, X + h, Y, lw, pal[C_TRUTH], 1); seg(X, Y - h, X, Y + h, lw, pal[C_TRUTH], 1);
+        #undef LX
+        #undef LY
+        if (!small) {
+            float y = b->y + b->h - 8 * U - cap_h(s_small) * 1.9f * 3;
+            legend_line(&y, b->x + 6 * U, C_F1, 0, "ours, fused");
+            legend_line(&y, b->x + 6 * U, C_F3, 0, "the base's (radar + our own reports)");
+            legend_line(&y, b->x + 6 * U, C_WARN, 0, "naive: as if independent");
+            legend_line(&y, b->x + 6 * U, C_TEXT, 0, "CI: safe for any correlation");
+        }
+        textf(s_small, b->x + 6 * U, b->y + b->h - 6 * U, -1, pal[C_DIM], 1, "\xc2\xb1%.1f m, 2\xcf\x83", b->w / 2 / k);
+    }
+}
+
+static void fu_plot(double s) {
+    draw_truth(&A.tp[0], fmax(0, s - 50), s, 0.3f);
+    if (FU.canyon[0] < s) path_band(&A.tp[0], FU.canyon[0], fmin(FU.canyon[1], s), "URBAN CANYON: NO GPS", 1);
+    for (int i = A.dhn - 1; i >= 0 && i >= A.dhn - 30; i--) {
+        const Det *d = &A.dh[i % DH];
+        if (d->t > s) continue;
+        float a = 1 - (float)((s - d->t) / 30), x = WX(d->x), y = WY(d->y);
+        if (a <= 0) continue;
+        if (s - d->t < 2.5) circle(x, y, (float)(FU_GPS * vk), fmaxf(U, 1), pal[C_MEAS], 0.35f * a * (float)(1 - (s - d->t) / 2.5), 0);
+        disk(x, y, 2.2f * U, pal[C_MEAS], a);
+    }
+    double x[4], P2[3];
+    fdisp(&A.f[0], s, x, P2);
+    /* beacons, their latest ranges as arcs, the base station and its bearing */
+    for (int j = 0; j < 2; j++) {
+        fu_site(FU.bx[j], FU.by[j], j ? "B2" : "B1", 0);
+        double age = s - FU.rng_t[j];
+        if (age < 0 || age > 3.5) continue;
+        float a = (1 - smooth01((float)((age - 1.5) / 2))) * smooth01((float)(age / 0.3));
+        double c = atan2(x[1] - FU.by[j], x[0] - FU.bx[j]), span = fmin(60 / fmax(FU.rng_r[j], 1), 0.6);
+        for (int d = -1; d <= 1; d++) {
+            float P[2 * 41];
+            double rr = FU.rng_r[j] + 2 * d * FU_RNG;
+            for (int i = 0; i <= 40; i++) {
+                double b = c - span + 2 * span * i / 40;
+                P[2 * i] = WX(FU.bx[j] + rr * cos(b)); P[2 * i + 1] = WY(FU.by[j] + rr * sin(b));
+            }
+            if (d) poly_dash(P, 41, 0, fmaxf(U, 1), pal[C_F3], 0.5f * a, 3 * U, 3 * U);
+            else poly(P, 41, 0, 1.5f * U, pal[C_F3], 0.85f * a, NULL);
+        }
+    }
+    fu_site(FU.bx[2], FU.by[2], "BASE", 1);
+    {
+        double age = s - FU.brg_t;
+        if (age >= 0 && age < 2.5) {
+            float a = 0.45f * (1 - smooth01((float)((age - 1) / 1.5)));
+            double L = FU.brg_r, c = cos(FU.brg_b), sn = sin(FU.brg_b), h = 3 * FU_BRNG;
+            seg(WX(FU.bx[2]), WY(FU.by[2]), WX(FU.bx[2] + L * c), WY(FU.by[2] + L * sn), 1.1f * U, pal[C_F3], a);
+            seg(WX(FU.bx[2] + L * c - h * sn), WY(FU.by[2] + L * sn + h * c), WX(FU.bx[2] + L * c + h * sn), WY(FU.by[2] + L * sn - h * c), 1.4f * U, pal[C_F3], 2 * a);
+        }
+    }
+    draw_trail(&A.ft[1], C_F2, 0.85f, 1.4f * U);
+    if (A.ft[1].n) {
+        int k = TRAIL_AT(&A.ft[1], A.ft[1].n - 1);
+        float dx = WX(A.ft[1].x[k]), dy = WY(A.ft[1].y[k]);
+        ring(dx, dy, 3.5f * U, pal[C_F2], 1);
+        text(s_small, dx + 7 * U, dy + 12 * U, -1, "DEAD RECKONING", pal[C_F2], 0.9f);
+    }
+    draw_trail(&A.ft[2], C_F3, 0.45f, 1.0f * U);
+    draw_trail(&A.ft[0], C_F1, 0.8f, 1.5f * U);
+    draw_est(x, P2, C_F1, 1, "FUSED", 2, 1, 0);
+    float lx, ly;
+    plot_head(s, &lx, &ly, 6);
+    legend_line(&ly, lx, C_TRUTH, 0, "truth");
+    legend_line(&ly, lx, C_MEAS, 1, "GPS fix (\xcf\x83 4 m)");
+    legend_line(&ly, lx, C_F3, 0, "range to a beacon (\xcf\x83 1 m)");
+    legend_line(&ly, lx, C_F2, 0, "odometry alone (bias \xe2\x89\x88 0.05 m/s)");
+    legend_line(&ly, lx, C_F1, 0, "information filter, all four");
+    legend_line(&ly, lx, C_F3, 0, "base's track: its radar + our reports");
+    /* the zooms, top right, when the plot is wide enough to spare them */
+    if (role == R_FRONT) {
+        float zs = fminf(vr.w, vr.h) * 0.3f;
+        if (zs > 150 * U) zs = 150 * U + (zs - 150 * U) * 0.5f;
+        Rect z0 = {vr.x + vr.w - zs - 46 * U, vr.y + 14 * U, zs, zs}, z1 = {z0.x, z0.y + zs + 10 * U, zs, zs};
+        rectf(z0.x, z0.y, z0.w, z0.h * 2 + 10 * U, pal[C_BG], 0.82f);
+        fu_zoom(&z0, s, 0, 1);
+        fu_zoom(&z1, s, 1, 1);
+    }
+}
+
+static void fu_mats(const Rect *r) {
+    Rect in = {r->x + 34 * U, r->y + 52 * U, r->w - 44 * U, r->h - 60 * U};
+    static const char *const LB[] = {"x", "y", "vx", "vy", "bx", "by"};
+    float gap = 46 * U, cs = fminf(fminf(in.h / 6.4f, (in.w - gap) / 12.0f), 44 * U);
+    heat(in.x, in.y, cs, 6, 6, FU.Y, 0, LB, LB, NULL);
+    text(s_small, in.x, in.y - 20 * U, -1, "Y = P\xe2\x81\xbb\xc2\xb9  information", pal[C_F1], 1);
+    heat(in.x + 6 * cs + gap, in.y, cs, 6, 6, A.f[0].P, 0, LB, LB, NULL);
+    text(s_small, in.x + 6 * cs + gap, in.y - 20 * U, -1, "P  covariance", pal[C_DIM], 1);
+}
+
+static void fu_table(const Rect *r, double s) {
+    (void)s;
+    static const float cx[] = {0, 0.26f, 0.42f, 0.58f, 0.76f};
+    static const char *hd[] = {"SENSOR", "RATE", "\xcf\x83", "UPDATES", "BITS GAINED"};
+    float x, w, lh = cap_h(s_hud) * 2.0f, y = table_head(r, 5, cx, hd, &x, &w);
+    static const char *rate[NSN] = {"1 Hz", "5 Hz", "0.5 Hz", "0.5 Hz"}, *sg[NSN] = {"4 m", "0.06 m/s", "1 m", "1 m"};
+    for (int k = 0; k < NSN; k++) {
+        text(s_hud, x, y, -1, SN_NAME[k], pal[SN_COL[k]], 1);
+        text(s_hud, x + w * cx[1], y, -1, rate[k], pal[C_TEXT], 1);
+        text(s_hud, x + w * cx[2], y, -1, sg[k], pal[C_TEXT], 1);
+        textf(s_hud, x + w * cx[3], y, -1, pal[C_TEXT], 1, "%d", FU.nupd[k]);
+        textf(s_hud, x + w * cx[4], y, -1, pal[C_TEXT], 1, "%.0f", FU.bits[k]);
+        y += lh;
+    }
+    text(s_hud, x, y, -1, "prediction", pal[C_DIM], 1);
+    textf(s_hud, x + w * cx[4], y, -1, pal[C_TEXT], 1, "%.0f", FU.bits_pred);
+    y += lh * 1.4f;
+    if (FU.nci) {
+        textf(s_small, x, y, -1, pal[C_DIM], 1, "mean position NEES (expect 2):  fused %.2f   naive merge %.2f   CI %.2f",
+              FU.nees_a / FU.nci, FU.nees_n / FU.nci, FU.nees_c / FU.nci);
+        y += lh * 0.8f;
+    }
+    textf(s_small, x, y, -1, pal[C_DIM], 1, "odometer bias: true (%+.3f, %+.3f)  estimated (%+.3f, %+.3f) m/s",
+          FU.bias[0], FU.bias[1], A.f[0].x[4], A.f[0].x[5]);
+}
+
+/* -------- numerics -------- */
+static void nu_camera(double s) {
+    /* the window follows 7 sigma of the reference in log space, but at a
+     * limited pace: out at 3 decades a second, in at 1.4, then a light
+     * average to round off the corners; a function of the history only */
+    double c = NAN, last[6];
+    int i0 = NU.hn - 1, nl = 0;
+    while (i0 > 0 && NU.ht[i0 - 1] > s - 8) i0--;
+    for (int i = i0; i < NU.hn && NU.ht[i] <= s; i++) {
+        double tgt = clampd(NU.hs[i] + log10(7.0), log10(0.012), log10(260.0));
+        if (c != c) c = tgt;
+        else c += clampd(tgt - c, -1.4 * NU_DT, 3.0 * NU_DT);
+        last[nl++ % 6] = c;
+    }
+    double w = 300;
+    if (nl) {
+        int m = nl < 6 ? nl : 6;
+        double a = 0;
+        for (int k = 0; k < m; k++) a += last[k];
+        w = pow(10, a / m);
+    }
+    vcx = NU.xt[0]; vcy = NU.xt[1];
+    if (NU.txn) {                       /* the truth at s */
+        int k = (int)clampd(s / NU_DT - 1, 0, NU.txn - 1);
+        vcx = NU.tx[k][0]; vcy = NU.tx[k][1];
+    }
+    vk = fminf(vr.w, vr.h) / (float)w;
+}
+
+static void nu_plot(double s) {
+    float lw = fmaxf(U, 1), pts[2 * ELN];
+    /* the truth's trail */
+    {
+        static float P[2 * 240];
+        int n = 0;
+        for (int i = NU.txn - 1; i >= 0 && n < 240; i -= 1) {
+            if ((i + 1) * NU_DT > s) continue;
+            if ((i + 1) * NU_DT < s - 3) break;
+            P[2 * n] = WX(NU.tx[i][0]); P[2 * n + 1] = WY(NU.tx[i][1]); n++;
+        }
+        poly(P, n, 0, 1.1f * U, pal[C_TRUTH], 0.35f, NULL);
+        float h = 4 * U;
+        seg(vr.x + vr.w / 2 - h, vr.y + vr.h / 2, vr.x + vr.w / 2 + h, vr.y + vr.h / 2, lw, pal[C_TRUTH], 0.9f);
+        seg(vr.x + vr.w / 2, vr.y + vr.h / 2 - h, vr.x + vr.w / 2, vr.y + vr.h / 2 + h, lw, pal[C_TRUTH], 0.9f);
+    }
+    if (!NU.k) return;
+    double since = s - NU.t_cue;
+    /* the reference, then the three float filters */
+    for (int f = NNF; f >= 0; f--) {
+        int col = f == NNF ? C_TRUTH : NF_COL[f];
+        double x0, y0, P3[3];
+        if (f == NNF) { x0 = NU.xr[0]; y0 = NU.xr[1]; P3[0] = NU.Pr[0]; P3[1] = NU.Pr[1]; P3[2] = NU.Pr[5]; }
+        else {
+            x0 = NU.x[f][0]; y0 = NU.x[f][1];
+            double *P = NU.Pd[f];
+            if (since < NU_DT * 1.5) nu_Pd(f, P);
+            P3[0] = P[0]; P3[1] = 0.5 * (P[1] + P[4]); P3[2] = P[5];
+        }
+        float sx = WX(x0), sy = WY(y0), ldy = (float)(f == NNF ? 3 : f) * 15 * U;
+        const char *lab = f == NNF ? "float64" : NF_NAME[f];
+        int indef = f < NNF && (NU.bad[f] || NU.broken[f] || P3[0] <= 0 || P3[2] <= 0 || P3[0] * P3[2] - P3[1] * P3[1] <= 0);
+        if (indef) {
+            float h = 9 * U;
+            seg(sx - h, sy - h, sx + h, sy + h, 2 * U, pal[C_WARN], 1);
+            seg(sx - h, sy + h, sx + h, sy - h, 2 * U, pal[C_WARN], 1);
+            textf(s_hudb, sx - 12 * U, sy + 4 * U, 1, pal[C_WARN], 1, "%s: %s", lab, NU.broken[f] ? "DIVERGED" : "P \xe2\x8a\x81 0");
+            continue;
+        }
+        cov_ellipse(x0, y0, P3, 1, pts);
+        if (f == NF_SQRT) fan(pts, ELN, sx, sy, pal[col], 0.10f);
+        poly(pts, ELN, 1, (f == NNF ? 1.2f : 1.6f) * U, pal[col], 0.9f, NULL);
+        cov_ellipse(x0, y0, P3, 2, pts);
+        poly_dash(pts, ELN, 1, lw, pal[col], 0.5f, 5 * U, 4 * U);
+        ring(sx, sy, 3.4f * U, pal[col], 1);
+        text(s_hudb, sx + 8 * U, sy - 7 * U + ldy, -1, lab, pal[col], 1);
+    }
+    float lx, ly;
+    plot_head(s, &lx, &ly, 7);
+    legend_line(&ly, lx, C_TRUTH, 0, "truth; float64 reference (Joseph)");
+    for (int f = NNF - 1; f >= 0; f--) legend_line(&ly, lx, NF_COL[f], 0, f == NF_SQRT ? "float32 square root" : f == NF_JOSEPH ? "float32 Joseph" : "float32 naive (I \xe2\x88\x92 KH)P");
+    ly += cap_h(s_small);
+    textf(s_small, lx, ly, -1, pal[C_DIM], 1, "cue %d: \xcf\x83 30 m \xe2\x86\x92 laser \xcf\x83 1 mm, %.1f s ago", NU.cyc + 1, fmax(since, 0));
+    ly += cap_h(s_small) * 1.9f;
+    textf(s_small, lx, ly, -1, pal[C_DIM], 1, "naive P lost definiteness after %d of %d cues", NU.nbad[NF_NAIVE] > NU.cyc + 1 ? NU.cyc + 1 : NU.nbad[NF_NAIVE], NU.cyc + 1);
+}
+
+/* compact scientific: 1.2e-6 */
+static void fmt_sci(char *b, size_t n, double v) {
+    if (v == 0) { snprintf(b, n, "0"); return; }
+    if (!isfinite(v)) { snprintf(b, n, "nan"); return; }
+    int e = (int)floor(log10(fabs(v)));
+    double m = v / pow(10, e);
+    if (fabs(m) >= 9.95) { m /= 10; e++; }
+    snprintf(b, n, "%.*f%s%d", fabs(m - round(m)) < 0.05 ? 0 : 1, m, "e", e);
+}
+
+/* a covariance-like matrix with exponents, invalid correlations in warning colour */
+static void heat_sci(float x, float y, float cs, int n, const double *M, const char *const *lb, int lower) {
+    int numbers = cs >= 30 * U, sc = style(F_MONO, fminf(10 * U, cs * 0.24f));
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++) {
+            double v = M[i * n + j], d = M[i * n + i] * M[j * n + j], c = d > 0 ? v / sqrt(d) : 2;
+            if (lower) c = j <= i ? 0.6 : 0;
+            int bad = !lower && (fabs(c) > 1 + 1e-6 || M[i * n + i] <= 0 || (i != j && fabs(v - M[j * n + i]) > 1e-3 * fmax(fabs(v), 1e-30)));
+            int col = bad ? C_WARN : c >= 0 ? C_F1 : C_F2;
+            float cx = x + j * cs, cy = y + i * cs;
+            rectf(cx + 1, cy + 1, cs - 2, cs - 2, pal[col], bad ? 0.75f : 0.1f + 0.7f * (float)fmin(fabs(c), 1));
+            if (numbers && (!lower || j <= i)) {
+                char b[24];
+                fmt_sci(b, sizeof b, v);
+                text(sc, cx + cs / 2, cy + cs / 2 + cap_h(sc) / 2, 0, b, pal[C_TEXT], 0.95f);
+            }
+        }
+    for (int i = 0; lb && i < n; i++) {
+        text(s_small, x - 5 * U, y + i * cs + cs / 2 + cap_h(s_small) / 2, 1, lb[i], pal[C_DIM], 1);
+        text(s_small, x + i * cs + cs / 2, y - 5 * U, 0, lb[i], pal[C_DIM], 1);
+    }
+}
+
+static void nu_mats(const Rect *r) {
+    Rect in = {r->x + 34 * U, r->y + 52 * U, r->w - 44 * U, r->h - 60 * U};
+    if (!NU.k) return;
+    float gap = 40 * U, cs = fminf(fminf(in.h / 4.4f, (in.w - 2 * gap) / 12.0f), 52 * U);
+    double S[16];
+    for (int i = 0; i < 16; i++) S[i] = NU.P[NF_SQRT][i];
+    const double *M[3] = {NU.Pd[NF_NAIVE], NU.Pr, S};
+    static const char *nm[3] = {"naive float32 P", "float64 P", "square root S, P = SS\xe1\xb5\x80"};
+    static const int col[3] = {C_WARN, C_TRUTH, C_F1};
+    for (int i = 0; i < 3; i++) {
+        float x = in.x + i * (4 * cs + gap);
+        heat_sci(x, in.y, cs, 4, M[i], LBL4, i == 2);
+        text(s_small, x, in.y - 20 * U, -1, nm[i], pal[col[i]], 1);
+    }
+}
+
+static void nu_meas(const Rect *r, double s) {
+    (void)s;
+    Rect in = {r->x + 90 * U, r->y + 44 * U, r->w - 110 * U, r->h - 76 * U};
+    float lw = fmaxf(U, 1);
+    double e0 = -14, e1 = 4;
+    #define EX(v) (in.x + in.w * (float)((v - e0) / (e1 - e0)))
+    for (int e = (int)e0; e <= (int)e1; e += 2) {
+        float x = EX(e);
+        seg(x, in.y, x, in.y + in.h, lw, pal[C_GRID], 0.7f);
+        textf(s_small, x, in.y + in.h + 4 * U + cap_h(s_small), 0, pal[C_DIM], 1, "1e%d", e);
+    }
+    float ex = EX(log10(NU_SIG * NU_SIG));
+    seg(ex, in.y, ex, in.y + in.h, 1.4f * U, pal[C_MEAS], 0.6f);
+    text(s_small, ex + 4 * U, in.y + cap_h(s_small) + 2 * U, -1, "R = (1 mm)\xc2\xb2", pal[C_MEAS], 0.9f);
+    float rh = in.h / 4;
+    for (int f = NNF; f >= 0; f--) {
+        int row = NNF - f, col = f == NNF ? C_TRUTH : NF_COL[f];
+        float y = in.y + rh * row + rh * 0.5f;
+        text(s_hud, in.x - 8 * U, y + cap_h(s_hud) / 2, 1, f == NNF ? "float64" : NF_NAME[f], pal[col], 1);
+        seg(in.x, y, in.x + in.w, y, lw, pal[C_GRID], 1);
+        if (!NU.k || (f < NNF && NU.broken[f])) {
+            if (f < NNF && NU.broken[f]) text(s_small, in.x + 6 * U, y - 6 * U, -1, "diverged: S not positive", pal[C_WARN], 1);
+            continue;
+        }
+        const double *ev = NU.eig[f];
+        for (int i = 0; i < 4; i++) {
+            double v = ev[i];
+            float x = EX(clampd(log10(fmax(fabs(v), 1e-30)), e0, e1)), h = rh * 0.28f;
+            if (v > 0) { seg(x, y - h, x, y + h, 2.2f * U, pal[col], 1); }
+            else {
+                seg(x, y - h, x, y + h, 2.2f * U, pal[C_WARN], 1);
+                text(s_hudb, x, y - h - 3 * U, 0, "\xe2\x88\x92", pal[C_WARN], 1);
+            }
+        }
+        if (f < NNF) textf(s_small, in.x + in.w, y + rh * 0.42f, 1, pal[C_DIM], 1, "asymmetry %.0e   \xe2\x80\x96" "\xce\x94P\xe2\x80\x96 %.0e", NU.asym[f], NU.rel[f]);
+    }
+    #undef EX
+    text(s_small, r->x + 12 * U, r->y + r->h - 10 * U, -1, "|\xce\xbb| of P on a log scale; red: negative (P is not a covariance)", pal[C_DIM], 1);
+}
+
+static void nu_table(const Rect *r, double s) {
+    (void)s;
+    static const float cx[] = {0, 0.17f, 0.36f, 0.53f, 0.7f, 0.86f};
+    static const char *hd[] = {"FILTER", "P", "\xce\xbb MIN", "\xe2\x80\x96\xce\x94P\xe2\x80\x96 REL", "ERR mm", "NIS"};
+    float x, w, lh = cap_h(s_hud) * 2.0f, y = table_head(r, 6, cx, hd, &x, &w);
+    for (int f = NNF; f >= 0; f--) {
+        int col = f == NNF ? C_TRUTH : NF_COL[f];
+        char b[24];
+        text(s_hud, x, y, -1, f == NNF ? "float64" : NF_NAME[f], pal[col], 1);
+        if (f == NNF) {
+            text(s_hud, x + w * cx[1], y, -1, "ok", pal[C_TEXT], 1);
+            fmt_sci(b, sizeof b, NU.eig[NNF][0]); text(s_hud, x + w * cx[2], y, -1, b, pal[C_TEXT], 1);
+            text(s_hud, x + w * cx[3], y, -1, "\xe2\x80\x94", pal[C_TEXT], 1);
+        } else {
+            const char *st = NU.broken[f] ? "DIVERGED" : NU.bad[f] ? "\xe2\x8a\x81 0" : "ok";
+            text(s_hud, x + w * cx[1], y, -1, st, pal[NU.broken[f] || NU.bad[f] ? C_WARN : C_TEXT], 1);
+            if (!NU.broken[f]) {
+                fmt_sci(b, sizeof b, NU.lmin[f]); text(s_hud, x + w * cx[2], y, -1, b, pal[NU.lmin[f] <= 0 ? C_WARN : C_TEXT], 1);
+                fmt_sci(b, sizeof b, NU.rel[f]); text(s_hud, x + w * cx[3], y, -1, b, pal[C_TEXT], 1);
+            }
+        }
+        if (f == NNF || !NU.broken[f]) {
+            double err = f == NNF ? hypot(NU.xr[0] - NU.xt[0], NU.xr[1] - NU.xt[1]) * 1000 : NU.err[f];
+            textf(s_hud, x + w * cx[4], y, -1, pal[C_TEXT], 1, err < 100 ? "%.2f" : "%.0f", err);
+            if (f < NNF) textf(s_hud, x + w * cx[5], y, -1, pal[C_TEXT], 1, NU.nis[f] < 1000 ? "%.2f" : "%.0e", NU.nis[f]);
+        }
+        y += lh;
+    }
+    y += lh * 0.5f;
+    text(s_small, x, y, -1, "float32 keeps ~7 digits; one update here asks for 9", pal[C_DIM], 1);
+    y += lh * 0.8f;
+    text(s_small, x, y, -1, "in float64 the square-root and Joseph forms agree to 1e-11 (--check)", pal[C_DIM], 1);
+}
+
+/* -------- SLAM -------- */
+static double sl_e(double s) { return clampd((s - SL.t) / SL_DT, 0, 1); }
+/* the state shown at s: a step behind, between the last two posteriors */
+static double sl_x(int i, double e) {
+    if (i == 2) return SL.x0[2] + wrap_pi(SL.x[2] - SL.x0[2]) * e;
+    double a = SL.x0[i];
+    if (i >= 3 && a == 0 && SL.P0[i * NSL + i] == 0) a = SL.x[i];   /* added this step */
+    return a + (SL.x[i] - a) * e;
+}
+static double sl_p(int i, int j, double e) {
+    double a = SL.P0[i * NSL + j], b = SL.P[i * NSL + j];
+    if (SL.P0[i * NSL + i] == 0 && i >= 3) a = b;
+    if (SL.P0[j * NSL + j] == 0 && j >= 3) a = b;
+    return a + (b - a) * e;
+}
+
+static void sl_plot(double s) {
+    float lw = fmaxf(U, 1), pts[2 * ELN];
+    double e = sl_e(s), sd = fmax(s - SL_DT, 0);
+    for (int j = 0; j < SL.L; j++) {
+        float x = WX(SL.mx[j]), y = WY(SL.my[j]), h = 4 * U;
+        seg(x - h, y, x + h, y, lw, pal[C_TRUTH], 0.8f); seg(x, y - h, x, y + h, lw, pal[C_TRUTH], 0.8f);
+    }
+    draw_truth(&A.tp[0], 0, sd, 0.28f);
+    if (!SL.k) return;
+    double rx = sl_x(0, e), ry = sl_x(1, e), rth = sl_x(2, e);
+    double o[6];
+    path_eval(&A.tp[0], sd, o);
+    circle(WX(rx), WY(ry), (float)(SL_RMAX * vk), lw, pal[C_DIM], 0.4f, 1);
+    /* rays to what the robot can see */
+    for (int j = 0; j < SL.L; j++) {
+        int sl = SL.slot[j];
+        if (sl < 0) continue;
+        double d = hypot(SL.mx[j] - o[0], SL.my[j] - o[1]);
+        float a = smooth01((float)((SL_RMAX - d) / 1.5));
+        if (a <= 0) continue;
+        int i = 3 + 2 * sl;
+        seg(WX(rx), WY(ry), WX(sl_x(i, e)), WY(sl_x(i + 1, e)), 1.1f * U, pal[C_MEAS], 0.4f * a);
+    }
+    /* the robot's estimated path */
+    {
+        static float P[2 * SLH];
+        int n = 0;
+        for (int i = 0; i < SL.rn; i++) { P[2 * n] = WX(SL.rx[i][0]); P[2 * n + 1] = WY(SL.rx[i][1]); n++; }
+        if (n) { P[2 * n - 2] = WX(rx); P[2 * n - 1] = WY(ry); }
+        poly(P, n, 0, 1.4f * U, pal[C_F2], 0.75f, NULL);
+    }
+    /* landmarks: 2 sigma */
+    for (int sl = 0; sl < SL.nl; sl++) {
+        int i = 3 + 2 * sl, j = SL.id[sl];
+        double x = sl_x(i, e), y = sl_x(i + 1, e), P3[3] = {sl_p(i, i, e), sl_p(i, i + 1, e), sl_p(i + 1, i + 1, e)};
+        float a = smooth01((float)((s - SL.first[j]) / A.TS / 0.6));
+        cov_ellipse(x, y, P3, 2, pts);
+        fan(pts, ELN, WX(x), WY(y), pal[C_F1], 0.12f * a);
+        poly(pts, ELN, 1, 1.4f * U, pal[C_F1], 0.9f * a, NULL);
+        disk(WX(x), WY(y), 1.8f * U, pal[C_F1], a);
+        textf(s_small, WX(x) + 7 * U, WY(y) - 6 * U, -1, pal[C_F1], 0.8f * a, "L%02d", j + 1);
+    }
+    /* the robot */
+    {
+        double P3[3] = {sl_p(0, 0, e), sl_p(0, 1, e), sl_p(1, 1, e)};
+        cov_ellipse(rx, ry, P3, 2, pts);
+        fan(pts, ELN, WX(rx), WY(ry), pal[C_F2], 0.12f);
+        poly(pts, ELN, 1, 1.5f * U, pal[C_F2], 0.95f, NULL);
+        float ox = WX(rx), oy = WY(ry), hx = cosf((float)rth), hy = -sinf((float)rth), sz = 9 * U;
+        V(ox + hx * sz, oy + hy * sz, 0, 0, pal[C_F2], 1, K_FLAT, 0);
+        V(ox - hx * sz * 0.6f - hy * sz * 0.5f, oy - hy * sz * 0.6f + hx * sz * 0.5f, 0, 0, pal[C_F2], 1, K_FLAT, 0);
+        V(ox - hx * sz * 0.6f + hy * sz * 0.5f, oy - hy * sz * 0.6f - hx * sz * 0.5f, 0, 0, pal[C_F2], 1, K_FLAT, 0);
+        float tx = WX(o[0]), ty = WY(o[1]), h = 3.5f * U;
+        seg(tx - h, ty - h, tx + h, ty + h, lw, pal[C_TRUTH], 0.9f); seg(tx - h, ty + h, tx + h, ty - h, lw, pal[C_TRUTH], 0.9f);
+    }
+    for (int c = 0; c < SL.nclose; c++) {
+        double age = (s - SL.t_close[c]) / A.TS;
+        if (age < 0 || age > 9) continue;
+        float a = smooth01((float)(age / 0.6)) * (1 - smooth01((float)((age - 6) / 3)));
+        int j = SL.close_lm[c], sl = SL.slot[j];
+        if (sl < 0) continue;
+        int i = 3 + 2 * sl;
+        float x = WX(SL.x[i]), y = WY(SL.x[i + 1]);
+        circle(x, y, 18 * U, 1.4f * U, pal[C_F3], 0.8f * a, 0);
+        int left = x > vr.x + vr.w * 0.6f;
+        text(s_hudb, x + (left ? -22 : 22) * U, y + 26 * U, left ? 1 : -1, "LOOP CLOSURE", pal[C_F3], a);
+    }
+    float lx, ly;
+    plot_head(s, &lx, &ly, 7);
+    legend_line(&ly, lx, C_TRUTH, 0, "truth: path, landmarks +");
+    legend_line(&ly, lx, C_F2, 0, "robot estimate, 2\xcf\x83");
+    legend_line(&ly, lx, C_F1, 0, "landmark estimates, 2\xcf\x83");
+    legend_line(&ly, lx, C_MEAS, 0, "range-bearing sightings");
+    ly += cap_h(s_small);
+    textf(s_small, lx, ly, -1, pal[C_DIM], 1, "%d of %d landmarks mapped; state %d", SL.nl, SL.L, SL.n);
+    ly += cap_h(s_small) * 1.9f;
+    textf(s_small, lx, ly, -1, pal[C_DIM], 1, "odometry \xcf\x83 %.2f m/s, %.1f\xc2\xb0/s; range %.2f m, bearing %.0f\xc2\xb0", SL_SV, SL_SW / DEGR, SL_SR, SL_SB / DEGR);
+}
+
+static void sl_mats(const Rect *r) {
+    Rect in = {r->x + 34 * U, r->y + 44 * U, r->w - 44 * U, r->h - 56 * U};
+    int n = SL.n;
+    if (n < 3) return;
+    float cs = fminf(in.h / n, in.w * 0.62f / n);
+    double C[NSL * NSL];
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++) C[i * n + j] = SL.P[i * NSL + j];
+    heat(in.x, in.y, cs, n, n, C, 0, NULL, NULL, NULL);
+    float lw = fmaxf(U, 1), tot = cs * n;
+    seg(in.x + 3 * cs, in.y, in.x + 3 * cs, in.y + tot, 1.4f * U, pal[C_TEXT], 0.8f);
+    seg(in.x, in.y + 3 * cs, in.x + tot, in.y + 3 * cs, 1.4f * U, pal[C_TEXT], 0.8f);
+    text(s_small, in.x - 5 * U, in.y + 1.5f * cs + cap_h(s_small) / 2, 1, "r", pal[C_DIM], 1);
+    text(s_small, in.x + 1.5f * cs, in.y - 4 * U, 0, "r", pal[C_DIM], 1);
+    for (int sl = 0; sl < SL.nl; sl += (cs < 8 * U ? 2 : 1)) {
+        float c = in.x + (3 + 2 * sl + 1) * cs;
+        textf(s_small, c, in.y - 4 * U, 0, pal[C_DIM], 1, "%d", SL.id[sl] + 1);
+    }
+    (void)lw;
+    /* how much of the map moves with the robot */
+    float x2 = in.x + tot + 30 * U, y = in.y + cap_h(s_small);
+    double mr = 0, mm2 = 0;
+    int cr = 0, cm = 0;
+    for (int a = 0; a < SL.nl; a++) {
+        int i = 3 + 2 * a;
+        mr += fabs(SL.P[0 * NSL + i] / sqrt(SL.P[0] * SL.P[i * NSL + i] + 1e-30)); cr++;
+        for (int b = a + 1; b < SL.nl; b++) {
+            int j = 3 + 2 * b;
+            mm2 += fabs(SL.P[i * NSL + j] / sqrt(SL.P[i * NSL + i] * SL.P[j * NSL + j] + 1e-30)); cm++;
+        }
+    }
+    if (x2 < r->x + r->w - 60 * U) {
+        textf(s_small, x2, y, -1, pal[C_DIM], 1, "correlation \xcf\x81\xe1\xb5\xa2\xe2\x82\x97");
+        y += cap_h(s_small) * 2;
+        textf(s_small, x2, y, -1, pal[C_TEXT], 1, "robot\xe2\x80\x93map  |\xcf\x81| %.2f", cr ? mr / cr : 0);
+        y += cap_h(s_small) * 1.8f;
+        textf(s_small, x2, y, -1, pal[C_TEXT], 1, "map\xe2\x80\x93map    |\xcf\x81| %.2f", cm ? mm2 / cm : 0);
+        y += cap_h(s_small) * 1.8f;
+        textf(s_small, x2, y, -1, pal[C_DIM], 1, "%d \xc3\x97 %d", n, n);
+    }
+}
+
+static void sl_meas(const Rect *r, double s) {
+    Rect in = {r->x + 30 * U, r->y + 40 * U, r->w - 60 * U, r->h - 64 * U};
+    float lw = fmaxf(U, 1), pts[2 * ELN];
+    axes_box(&in);
+    float sz = fminf(in.w, in.h), cx = in.x + in.w / 2, cy = in.y + in.h * 0.62f, k = sz / 2 / (float)(SL_RMAX * 1.25);
+    if (!SL.k) return;
+    double e = sl_e(s), rx = sl_x(0, e), ry = sl_x(1, e), th = sl_x(2, e);
+    circle(cx, cy, (float)(SL_RMAX * k), lw, pal[C_DIM], 0.6f, 1);
+    for (int m = 5; m < SL_RMAX; m += 5) circle(cx, cy, (float)(m * k), lw, pal[C_GRID], 0.8f, 0);
+    seg(cx, cy - (float)(SL_RMAX * k), cx, cy + (float)(SL_RMAX * k), lw, pal[C_GRID], 1);
+    seg(cx - (float)(SL_RMAX * k), cy, cx + (float)(SL_RMAX * k), cy, lw, pal[C_GRID], 1);
+    /* the robot, nose up */
+    float hs = 9 * U;
+    V(cx, cy - hs, 0, 0, pal[C_F2], 1, K_FLAT, 0); V(cx - hs * 0.55f, cy + hs * 0.6f, 0, 0, pal[C_F2], 1, K_FLAT, 0); V(cx + hs * 0.55f, cy + hs * 0.6f, 0, 0, pal[C_F2], 1, K_FLAT, 0);
+    double c = cos(th), sn = sin(th);
+    for (int sl = 0; sl < SL.nl; sl++) {
+        int i = 3 + 2 * sl;
+        double dx = sl_x(i, e) - rx, dy = sl_x(i + 1, e) - ry;
+        double fx = c * dx + sn * dy, fy = -sn * dx + c * dy;      /* forward, left */
+        if (hypot(fx, fy) > SL_RMAX * 1.25) continue;
+        /* the relative position's covariance: J P J' with J = d(rel)/d(robot, landmark) */
+        double Jr[2][5] = {{-c, -sn, -sn * dx + c * dy, c, sn}, {sn, -c, -c * dx - sn * dy, -sn, c}};
+        int idx[5] = {0, 1, 2, i, i + 1};
+        double Pr[3] = {0, 0, 0};
+        for (int a = 0; a < 5; a++)
+            for (int b = 0; b < 5; b++) {
+                double p = sl_p(idx[a], idx[b], e);
+                Pr[0] += Jr[0][a] * p * Jr[0][b]; Pr[1] += Jr[0][a] * p * Jr[1][b]; Pr[2] += Jr[1][a] * p * Jr[1][b];
+            }
+        /* screen: forward up, left to the left */
+        double Ps[3] = {Pr[2], -Pr[1], Pr[0]};
+        float sx = cx - (float)(fy * k), sy = cy - (float)(fx * k);
+        int vis = SL.seen[SL.id[sl]];
+        cov_ell_local(sx, sy, Ps, k, 2, pts);
+        poly(pts, ELN, 1, 1.4f * U, pal[C_F1], vis ? 0.95f : 0.4f, NULL);
+        if (vis) fan(pts, ELN, sx, sy, pal[C_F1], 0.12f);
+        textf(s_small, sx + 6 * U, sy - 5 * U, -1, pal[C_F1], vis ? 0.9f : 0.45f, "L%02d", SL.id[sl] + 1);
+    }
+    float y = in.y + 6 * U + cap_h(s_small);
+    legend_line(&y, in.x + 6 * U, C_F1, 0, "landmark relative to the robot, 2\xcf\x83 of J P J\xe1\xb5\x80");
+    textf(s_small, in.x + 6 * U, in.y + in.h - 6 * U, -1, pal[C_DIM], 1, "rings 5 m, reach %.0f m; dim: mapped, out of sight", SL_RMAX);
+}
+
+static void sl_table(const Rect *r, double s) {
+    (void)s;
+    static const float cx[] = {0, 0.16f, 0.34f, 0.52f, 0.72f};
+    static const char *hd[] = {"LMK", "\xcf\x83 m", "ERROR m", "\xcf\x81 ROBOT x", "FIRST SEEN"};
+    float x, w, lh = cap_h(s_hud) * 1.8f, y = table_head(r, 5, cx, hd, &x, &w);
+    int maxr = (int)((r->y + r->h - y - lh) / lh);
+    for (int sl = 0; sl < SL.nl && sl < maxr; sl++) {
+        int i = 3 + 2 * sl, j = SL.id[sl];
+        double sg = sqrt(SL.P[i * NSL + i] + SL.P[(i + 1) * NSL + i + 1]);
+        textf(s_hud, x, y, -1, pal[SL.seen[j] ? C_F1 : C_DIM], 1, "L%02d", j + 1);
+        textf(s_hud, x + w * cx[1], y, -1, pal[C_TEXT], 1, "%.2f", sg);
+        textf(s_hud, x + w * cx[2], y, -1, pal[C_TEXT], 1, "%.2f", hypot(SL.x[i] - SL.mx[j], SL.x[i + 1] - SL.my[j]));
+        textf(s_hud, x + w * cx[3], y, -1, pal[C_TEXT], 1, "%+.2f", SL.P[i] / sqrt(SL.P[0] * SL.P[i * NSL + i] + 1e-30));
+        char tb[16];
+        fmt_mmss(tb, sizeof tb, SL.first[j]);
+        text(s_hud, x + w * cx[4], y, -1, tb, pal[C_TEXT], 1);
+        y += lh;
+    }
+}
+
+/* -------- dispatch -------- */
+static void np_plot(double s) {
+    switch (A.id) {
+    case A_RTS: rts_plot(s); break;
+    case A_FUSE: fu_plot(s); break;
+    case A_NUM: nu_plot(s); break;
+    default: sl_plot(s); break;
+    }
+}
+static void np_mats(const Rect *r) {
+    switch (A.id) {
+    case A_RTS: rts_mats(r); break;
+    case A_FUSE: fu_mats(r); break;
+    case A_NUM: nu_mats(r); break;
+    default: sl_mats(r); break;
+    }
+}
+static void np_meas(const Rect *r, double s) {
+    switch (A.id) {
+    case A_RTS: rts_meas(r, s); break;
+    case A_FUSE: {
+        Rect in = {r->x + 16 * U, r->y + 36 * U, r->w - 32 * U, r->h - 52 * U};
+        float g = 14 * U, w = (in.w - g) / 2, h = fminf(in.h, w);
+        Rect a = {in.x, in.y + (in.h - h) / 2, w, h}, b = {in.x + w + g, a.y, w, h};
+        if (in.h > in.w * 1.2f) {         /* portrait: stacked */
+            h = fminf((in.h - g) / 2, in.w);
+            a = (Rect){in.x + (in.w - h) / 2, in.y, h, h}; b = (Rect){a.x, in.y + h + g, h, h};
+        }
+        fu_zoom(&a, s, 0, 0);
+        fu_zoom(&b, s, 1, 0);
+        break;
+    }
+    case A_NUM: nu_meas(r, s); break;
+    default: sl_meas(r, s); break;
+    }
+}
+static void np_table(const Rect *r, double s) {
+    switch (A.id) {
+    case A_RTS: rts_table(r, s); break;
+    case A_FUSE: fu_table(r, s); break;
+    case A_NUM: nu_table(r, s); break;
+    default: sl_table(r, s); break;
+    }
 }
 
 /* ==================================================================== */
@@ -3236,7 +5246,7 @@ static void build_static(void) {
         case P_MEAS: frame(r, meas_head()); break;
         case P_INNOV: frame(r, A.inn_m == 1 || A.id == A_PF ? "WHITENED INNOVATIONS  \xc2\xb7  (\xce\xb2 \xe2\x88\x92 \xce\xb2\xcc\x82)/\xe2\x88\x9aS vs N(0,1)"
                                                          : "WHITENED INNOVATIONS  \xc2\xb7  L\xe2\x81\xbb\xc2\xb9\xce\xbd, S = LL\xe1\xb5\x80"); break;
-        case P_TABLE: frame(r, A.id == A_MTT ? "TRACK TABLE" : "FILTERS"); break;
+        case P_TABLE: frame(r, A.id == A_MTT ? "TRACK TABLE" : A.id == A_RTS ? "ESTIMATES" : A.id == A_FUSE ? "SENSORS" : A.id == A_SLAM ? "THE MAP" : "FILTERS"); break;
         case P_CLOCK: if (!(role == R_FRONT && spanned)) frame(r, NULL); break;
         }
     }
@@ -3272,6 +5282,7 @@ static void render(double s, double rt, double wt, GLuint target) {
             flush();
             glEnable(GL_SCISSOR_TEST);
             glScissor((int)r->x, H - (int)(r->y + r->h), (int)r->w, (int)r->h);
+            clip_cur = *r;
             draw_plot(r, s, rt);
             if (role == R_FRONT) draw_card(r, rt);
             flush();
@@ -3285,6 +5296,7 @@ static void render(double s, double rt, double wt, GLuint target) {
             flush();
             glEnable(GL_SCISSOR_TEST);
             glScissor((int)r->x, H - (int)(r->y + r->h), (int)r->w, (int)r->h);
+            clip_cur = *r;
             draw_meas(r, s, rt);
             flush();
             glDisable(GL_SCISSOR_TEST);
@@ -3363,6 +5375,292 @@ static void check_linear(int model, double q) {
            in_n, K, lo_n, hi_n, mn, glo_n, ghi_n, mn >= glo_n && mn <= ghi_n ? "OK" : "OUTSIDE");
 }
 
+/* dense inverse of any size (Gauss-Jordan, partial pivoting) */
+static int inv_big(const double *A0, double *Ai, int n) {
+    double *M = malloc(sizeof(double) * n * 2 * n);
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < 2 * n; j++) M[i * 2 * n + j] = j < n ? A0[i * n + j] : (j - n == i);
+    int ok = 1;
+    for (int c = 0; c < n && ok; c++) {
+        int p = c;
+        for (int r = c + 1; r < n; r++) if (fabs(M[r * 2 * n + c]) > fabs(M[p * 2 * n + c])) p = r;
+        if (fabs(M[p * 2 * n + c]) < 1e-300) { ok = 0; break; }
+        if (p != c)
+            for (int j = 0; j < 2 * n; j++) { double t = M[c * 2 * n + j]; M[c * 2 * n + j] = M[p * 2 * n + j]; M[p * 2 * n + j] = t; }
+        double d = 1 / M[c * 2 * n + c];
+        for (int j = 0; j < 2 * n; j++) M[c * 2 * n + j] *= d;
+        for (int r = 0; r < n; r++) {
+            if (r == c) continue;
+            double f = M[r * 2 * n + c];
+            if (f != 0) for (int j = 0; j < 2 * n; j++) M[r * 2 * n + j] -= f * M[c * 2 * n + j];
+        }
+    }
+    for (int i = 0; i < n && ok; i++)
+        for (int j = 0; j < n; j++) Ai[i * n + j] = M[i * 2 * n + n + j];
+    free(M);
+    return ok;
+}
+
+/* RTS against batch least squares: the smoothed means and covariances are
+ * the solution of the normal equations over the whole trajectory, and the
+ * fixed-lag estimate is that solution over the data so far */
+static void check_rts(void) {
+    enum { N = 40 };
+    int D = 4 * N;
+    double F[16], Q[16], Qi[16], LQ[16], P0[16] = {0}, P0i[16], m0[4] = {0, 0, 8, -3}, Rv = 25;
+    model_F(M_CV, NULL, 1.0, F);
+    model_Q(M_CV, 1.0, 2.0, 0, Q);
+    inv(Q, Qi, 4); chol(Q, LQ, 4);
+    P0[0] = P0[5] = 100; P0[10] = P0[15] = 16;
+    inv(P0, P0i, 4);
+    double wx = 0, wP = 0, wl = 0, wlP = 0;
+    double *Lam = malloc(sizeof(double) * D * D), *Li = malloc(sizeof(double) * D * D), *eta = malloc(sizeof(double) * D), *xb = malloc(sizeof(double) * D);
+    for (int trial = 0; trial < 6; trial++) {
+        Rng r = {4242 + (uint64_t)trial};
+        double x[4], tr[N][4], z[N][2];
+        int has[N];
+        for (int i = 0; i < 4; i++) x[i] = m0[i] + sqrt(P0[i * 5]) * rn_n(&r);
+        for (int k = 0; k < N; k++) {
+            if (k) {
+                double y[4], w[4] = {rn_n(&r), rn_n(&r), rn_n(&r), rn_n(&r)};
+                mm(F, x, y, 4, 4, 1);
+                for (int i = 0; i < 4; i++) { x[i] = y[i]; for (int j = 0; j <= i; j++) x[i] += LQ[i * 4 + j] * w[j]; }
+            }
+            memcpy(tr[k], x, sizeof x);
+            has[k] = !(k >= 12 && k < 20) && rn_u(&r) < 0.9;
+            z[k][0] = x[0] + 5 * rn_n(&r); z[k][1] = x[1] + 5 * rn_n(&r);
+        }
+        /* forward filter + RTS */
+        static double xf[N][4], Pf[N][16], xp[N][4], Pp[N][16], xs[N][4], Ps[N][16], C[N][16];
+        int lagk = 30, L = 8;
+        double xlag[4], Plag[16];
+        for (int k = 0; k < N; k++) {
+            Filt f;
+            f_init(&f, M_CV, 2.0, 0);
+            if (k == 0) { memcpy(f.x, m0, sizeof m0); memcpy(f.P, P0, sizeof P0); f.t = 0; }
+            else { memcpy(f.x, xf[k - 1], sizeof xf[0]); memcpy(f.P, Pf[k - 1], sizeof Pf[0]); f.t = k - 1; f_predict(&f, k); }
+            memcpy(xp[k], f.x, sizeof xp[0]); memcpy(Pp[k], f.P, sizeof Pp[0]);
+            double R[4] = {Rv, 0, 0, Rv};
+            if (has[k]) f_update_pos(&f, z[k], R);
+            memcpy(xf[k], f.x, sizeof xf[0]); memcpy(Pf[k], f.P, sizeof Pf[0]);
+            if (k == lagk) {            /* the fixed-lag smoother's view at step k */
+                rts_smooth(k + 1, xf, Pf, xp, Pp, xs, Ps, C, F);
+                memcpy(xlag, xs[k - L], sizeof xlag); memcpy(Plag, Ps[k - L], sizeof Plag);
+            }
+        }
+        rts_smooth(N, xf, Pf, xp, Pp, xs, Ps, C, F);
+        /* batch: the information matrix of the whole trajectory */
+        for (int pass = 0; pass < 2; pass++) {
+            int n = pass ? lagk + 1 : N, Dn = 4 * n;
+            memset(Lam, 0, sizeof(double) * D * D); memset(eta, 0, sizeof(double) * D);
+            #define LA(i, j) Lam[(i) * Dn + (j)]
+            for (int i = 0; i < 4; i++) {
+                for (int j = 0; j < 4; j++) LA(i, j) += P0i[i * 4 + j];
+                for (int j = 0; j < 4; j++) eta[i] += P0i[i * 4 + j] * m0[j];
+            }
+            for (int k = 1; k < n; k++) {
+                /* (x_k - F x_{k-1})' Qi (x_k - F x_{k-1}) */
+                double FtQi[16], FtQiF[16];
+                for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {
+                    double s = 0; for (int l = 0; l < 4; l++) s += F[l * 4 + i] * Qi[l * 4 + j];
+                    FtQi[i * 4 + j] = s; }
+                mm(FtQi, F, FtQiF, 4, 4, 4);
+                int a = 4 * (k - 1), b = 4 * k;
+                for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {
+                    LA(a + i, a + j) += FtQiF[i * 4 + j];
+                    LA(b + i, b + j) += Qi[i * 4 + j];
+                    LA(a + i, b + j) -= FtQi[i * 4 + j];
+                    LA(b + j, a + i) -= FtQi[i * 4 + j];
+                }
+            }
+            for (int k = 0; k < n; k++)
+                if (has[k])
+                    for (int i = 0; i < 2; i++) { LA(4 * k + i, 4 * k + i) += 1 / Rv; eta[4 * k + i] += z[k][i] / Rv; }
+            #undef LA
+            inv_big(Lam, Li, Dn);
+            for (int i = 0; i < Dn; i++) { double s = 0; for (int j = 0; j < Dn; j++) s += Li[i * Dn + j] * eta[j]; xb[i] = s; }
+            if (pass == 0) {
+                for (int k = 0; k < N; k++)
+                    for (int i = 0; i < 4; i++) {
+                        wx = fmax(wx, fabs(xs[k][i] - xb[4 * k + i]));
+                        for (int j = 0; j < 4; j++)
+                            wP = fmax(wP, fabs(Ps[k][i * 4 + j] - Li[(4 * k + i) * Dn + 4 * k + j]) / sqrt(Ps[k][i * 5] * Ps[k][j * 5]));
+                    }
+            } else {
+                int k = lagk - L;
+                for (int i = 0; i < 4; i++) {
+                    wl = fmax(wl, fabs(xlag[i] - xb[4 * k + i]));
+                    for (int j = 0; j < 4; j++)
+                        wlP = fmax(wlP, fabs(Plag[i * 4 + j] - Li[(4 * k + i) * Dn + 4 * k + j]) / sqrt(Plag[i * 5] * Plag[j * 5]));
+                }
+            }
+        }
+    }
+    free(Lam); free(Li); free(eta); free(xb);
+    printf("  RTS vs batch least squares (6 runs x %d steps, CV, GPS with an outage):\n", N);
+    printf("    smoothed mean max |x_RTS - x_batch| = %.2e m;  covariance max |dP|/sqrt(PiiPjj) = %.2e  %s\n", wx, wP,
+           wx < 1e-6 && wP < 1e-6 ? "OK" : "MISMATCH");
+    printf("    fixed lag 8 at step 30 vs batch on steps 0..30: |dx| = %.2e m, |dP| = %.2e  %s\n", wl, wlP,
+           wl < 1e-6 && wlP < 1e-6 ? "OK" : "MISMATCH");
+}
+
+/* the information filter against the covariance filter, over the fusion act */
+static void check_fusion(void) {
+    double wsum = 0, wx = 0, wP = 0, nf = 0, nn = 0, nc = 0, rf = 0, rdr = 0, rg = 0, nees_f = 0;
+    int cnt = 0, nupd = 0, nne = 0, runs = 24;
+    double rmin = 1e9, rmax = 0;
+    for (uint32_t sd = 1; sd <= (uint32_t)runs; sd++) {
+        opt_seed = sd;
+        act_setup(0, A_FUSE);
+        for (long i = 0; (i + 1) * FU_DT <= A.len_s; i++) {
+            fu_tick();
+            double mp = 0;
+            for (int k = 0; k < FN * FN; k++) mp = fmax(mp, fabs(FU.kf.P[k]));
+            for (int k = 0; k < FN; k++) wx = fmax(wx, fabs(A.f[0].x[k] - FU.kf.x[k]));
+            for (int k = 0; k < FN * FN; k++) wP = fmax(wP, fabs(A.f[0].P[k] - FU.kf.P[k]) / mp);
+        }
+        rmin = fmin(rmin, FU.nees_a / FU.nci); rmax = fmax(rmax, FU.nees_a / FU.nci);
+        wsum += FU.wsum; nf += FU.nees_a; nn += FU.nees_n; nc += FU.nees_c; cnt += FU.nci;
+        rf += FU.se_f / FU.nse; rdr += FU.se_dr / FU.nse; rg += FU.nseg ? FU.se_g / FU.nseg : 0;
+        nees_f += A.acc_nees[0]; nne += A.acc_ne[0];
+        for (int s = 0; s < NSN; s++) nupd += FU.nupd[s];
+    }
+    printf("  information filter vs covariance (Joseph) filter, same data, %d fusion acts (%d updates):\n", runs, nupd);
+    printf("    max |x_IF - x_KF| = %.2e m;  max |P_IF - P_KF| / max|P| = %.2e  %s\n", wx, wP, wx < 1e-6 && wP < 1e-6 ? "OK" : "MISMATCH");
+    printf("    RMS position error: GPS %.2f m, dead reckoning %.2f m, fused %.2f m\n", sqrt(rg / runs), sqrt(rdr / runs), sqrt(rf / runs));
+    double lo = chi2inv(0.025, 2 * cnt) / cnt, hi = chi2inv(0.975, 2 * cnt) / cnt;
+    printf("    position NEES (dof 2, 95%% band of the mean [%.2f, %.2f]): fused %.2f; fused with the base's track\n"
+           "      naively (as if independent) %.2f, by covariance intersection %.2f  (%d fusions, mean \xcf\x89 %.2f;\n      per-run fused NEES %.2f to %.2f)\n", lo, hi, nf / cnt, nn / cnt, nc / cnt, cnt, wsum / cnt, rmin, rmax);
+    /* CI is consistent whatever the cross-correlation: P_CI - (true error covariance) >= 0 */
+    Rng r = {99};
+    int bad_ci = 0, bad_naive = 0, M = 20000;
+    double worst = 1e9;
+    for (int t = 0; t < M; t++) {
+        double G[16], J[16];
+        for (int i = 0; i < 16; i++) G[i] = rn_n(&r) * (i < 8 ? 1 : 2);
+        mmT(G, G, J, 4, 4, 4);                  /* a joint covariance of the two errors */
+        double A2[4] = {J[0], J[1], J[4], J[5]}, B2[4] = {J[10], J[11], J[14], J[15]}, X[4] = {J[2], J[3], J[6], J[7]};
+        double Ai[4], Bi[4], xn[2], Pn[4], xc[2], Pc[4], zero[2] = {0, 0};
+        inv(A2, Ai, 2); inv(B2, Bi, 2);
+        double w = ci_omega(Ai, Bi);
+        ci_fuse(zero, A2, zero, B2, w, xn, Pn, xc, Pc);
+        for (int pass = 0; pass < 2; pass++) {
+            double wa = pass ? w : 1, wb = pass ? 1 - w : 1, *P = pass ? Pc : Pn, Wa[4], Wb[4], T1[4], T2[4], E[4] = {0};
+            double sA[4], sB[4];
+            for (int i = 0; i < 4; i++) { sA[i] = wa * Ai[i]; sB[i] = wb * Bi[i]; }
+            mm(P, sA, Wa, 2, 2, 2); mm(P, sB, Wb, 2, 2, 2);
+            /* true covariance of Wa ea + Wb eb */
+            mm(Wa, A2, T1, 2, 2, 2); mmT(T1, Wa, T2, 2, 2, 2); for (int i = 0; i < 4; i++) E[i] += T2[i];
+            mm(Wb, B2, T1, 2, 2, 2); mmT(T1, Wb, T2, 2, 2, 2); for (int i = 0; i < 4; i++) E[i] += T2[i];
+            mm(Wa, X, T1, 2, 2, 2); mmT(T1, Wb, T2, 2, 2, 2);
+            for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) E[i * 2 + j] += T2[i * 2 + j] + T2[j * 2 + i];
+            double D2[4] = {P[0] - E[0], P[1] - E[1], P[2] - E[2], P[3] - E[3]};
+            double tr = (D2[0] + D2[3]) / 2, dd = sqrt(fmax((D2[0] - D2[3]) * (D2[0] - D2[3]) / 4 + D2[1] * D2[1], 0));
+            double lmin = (tr - dd) / (P[0] + P[3]);
+            if (pass) { if (lmin < -1e-9) bad_ci++; worst = fmin(worst, lmin); } else if (lmin < -1e-9) bad_naive++;
+        }
+    }
+    printf("    random joint covariances (%d): P_CI - E[ee'] indefinite in %d (worst min eigenvalue %.1e of trace)  %s;\n"
+           "      the naive P is too small in %d (%.0f%%)\n", M, bad_ci, worst, bad_ci ? "FAIL" : "OK", bad_naive, 100.0 * bad_naive / M);
+}
+
+/* the square-root filter and the Joseph form agree in double precision;
+ * in float32 the naive form does not */
+static void check_sqrt(void) {
+    double F[16], Q[16], Lq[16];
+    nu_FQ(F, Q, Lq);
+    double worst = 0, wx = 0;
+    Rng r = {31337};
+    for (int trial = 0; trial < 20; trial++) {
+        double Aq[16], P[16], S[16], x1[4] = {0}, x2[4] = {0}, xt[4] = {0};
+        static const double sc[4] = {30, 30, 2, 2};
+        for (int i = 0; i < 16; i++) Aq[i] = sc[i / 4] * rn_n(&r);
+        mmT(Aq, Aq, P, 4, 4, 4);
+        chol(P, S, 4);
+        for (int k = 0; k < 200; k++) {
+            double z[2] = {xt[0] + NU_SIG * rn_n(&r), xt[1] + NU_SIG * rn_n(&r)}, n1, n2;
+            predx_d(x1, F); predP_d(P, F, Q); upd_joseph_d(x1, P, z, NU_SIG * NU_SIG, &n1);
+            predx_d(x2, F); predS_d(S, F, Lq); upd_sqrt_d(x2, S, z, NU_SIG * NU_SIG, &n2);
+            double SS[16], mp = 0, d = 0;
+            mmT(S, S, SS, 4, 4, 4);
+            for (int i = 0; i < 16; i++) { mp = fmax(mp, fabs(P[i])); d = fmax(d, fabs(SS[i] - P[i])); }
+            worst = fmax(worst, d / mp);
+            for (int i = 0; i < 4; i++) wx = fmax(wx, fabs(x1[i] - x2[i]));
+        }
+    }
+    /* and the naive form in float64: does it hold where float32 failed? */
+    int nlost = 0;
+    {
+        Rng r2 = {31337};
+        for (int trial = 0; trial < 20; trial++) {
+            double Aq[16], P[16], x1[4] = {0}, xt[4] = {0};
+            static const double sc[4] = {30, 30, 2, 2};
+            for (int i = 0; i < 16; i++) Aq[i] = sc[i / 4] * rn_n(&r2);
+            mmT(Aq, Aq, P, 4, 4, 4);
+            int lost = 0;
+            for (int k = 0; k < 200; k++) {
+                double z[2] = {xt[0] + NU_SIG * rn_n(&r2), xt[1] + NU_SIG * rn_n(&r2)}, n1, Ps[16], ev[4];
+                predx_d(x1, F); predP_d(P, F, Q);
+                if (!upd_naive_d(x1, P, z, NU_SIG * NU_SIG, &n1)) { lost = 1; break; }
+                for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) Ps[i * 4 + j] = 0.5 * (P[i * 4 + j] + P[j * 4 + i]);
+                eig4(Ps, ev);
+                lost |= ev[0] <= 0;
+            }
+            nlost += lost;
+        }
+    }
+    printf("  square root (array form) vs Joseph, both float64, 20 cues x 200 laser updates:\n");
+    printf("    max |SS' - P_Joseph| / max|P| = %.2e;  max |x_sqrt - x_Joseph| = %.2e m  %s\n", worst, wx,
+           worst < 1e-6 && wx < 1e-9 ? "OK" : "MISMATCH");
+    printf("    the naive form in float64 lost positive definiteness after %d of 20 cues\n", nlost);
+    /* the act, in float32 */
+    int cues = 0, lost[NNF] = {0}, broken[NNF] = {0};
+    double maxrel[NNF] = {0}, se[NNF + 1] = {0};
+    long nse = 0;
+    for (uint32_t sd = 1; sd <= 8; sd++) {
+        opt_seed = sd;
+        act_setup(0, A_NUM);
+        int cyc = -1, was[NNF] = {0}, wasb[NNF] = {0};
+        for (long i = 0; (i + 1) * NU_DT <= A.len_s; i++) {
+            nu_step();
+            if (NU.cyc != cyc) { cyc = NU.cyc; cues++; memset(was, 0, sizeof was); memset(wasb, 0, sizeof wasb); }
+            for (int f = 0; f < NNF; f++) {
+                if ((NU.bad[f] || NU.broken[f]) && !was[f]) { lost[f]++; was[f] = 1; }
+                if (NU.broken[f] && !wasb[f]) { broken[f]++; wasb[f] = 1; }
+                if (!NU.broken[f]) maxrel[f] = fmax(maxrel[f], NU.rel[f]);
+            }
+        }
+        for (int f = 0; f <= NNF; f++) se[f] += NU.se[f];
+        nse += NU.nse;
+    }
+    printf("  float32 over 8 acts (%d cues, \xcf\x83 30 m -> 1 mm):\n", cues);
+    for (int f = 0; f < NNF; f++)
+        printf("    %-7s P lost positive definiteness after %2d of %d cues (diverged, S not positive: %d); worst |P - P_ref|/|P_ref| %.1e;\n"
+               "            RMS error %.3g mm once settled\n", NF_NAME[f], lost[f], cues, broken[f], maxrel[f], sqrt(se[f] / nse));
+    printf("    float64 reference RMS error %.3g mm (laser \xcf\x83 %.1f mm)\n", sqrt(se[NNF] / nse), NU_SIG * 1000);
+}
+
+/* EKF-SLAM: robot pose NEES over time and the map's NEES at the end */
+static void check_slam(void) {
+    double nr = 0, nm = 0, nis = 0;
+    int cr = 0, cm = 0, cn = 0, closes = 0, runs = 16;
+    for (uint32_t sd = 1; sd <= (uint32_t)runs; sd++) {
+        opt_seed = sd;
+        act_setup(0, A_SLAM);
+        act_advance(A.len_s);
+        nr += SL.nees_r; cr += SL.nnr;
+        int c;
+        nm += sl_map_nees(&c); cm += c;
+        nis += A.acc_nis[0]; cn += A.acc_nn[0];
+        closes += SL.nclose > 0;
+    }
+    printf("  EKF-SLAM, %d runs (one loop and most of a second, %d landmarks seen in all):\n", runs, cm);
+    printf("    mean NIS %.2f (dof 2, %d sightings, band [%.2f, %.2f])\n", nis / cn, cn, chi2inv(0.025, 2 * cn) / cn, chi2inv(0.975, 2 * cn) / cn);
+    printf("    robot pose NEES %.2f (dof 3, %d steps; time-correlated, so the band is loose)\n", nr / cr, cr);
+    printf("    map NEES at the end %.2f per landmark (dof 2, band of the mean [%.2f, %.2f]); loop closed in %d of %d runs\n",
+           nm / cm, chi2inv(0.025, 2 * cm) / cm, chi2inv(0.975, 2 * cm) / cm, closes, runs);
+}
+
 static void run_check(void) {
     printf("kalman --check\n");
     printf("chi2 quantiles: chi2(2) 95%% [%.4f, %.3f] (exact 0.0506, 7.378); chi2(4) [%.3f, %.2f] (exact 0.484, 11.14)\n",
@@ -3371,8 +5669,8 @@ static void run_check(void) {
     check_linear(M_CV, 1.5);
     check_linear(M_CA, 1.0);
     printf("2. the acts as shown (manoeuvring truth the filters don't model; time-averaged, 8 seeds each)\n");
-    static const char *dofs[NACT] = {"2", "2", "2", "1", "2"};
-    for (int id = 0; id < NACT; id++) {
+    static const char *dofs[NACT] = {"2", "2", "2", "1", "2", "2", "1-2", "2", "2"};
+    for (int id = 0; id < A_RTS; id++) {
         double nis[3] = {0}, ne[3] = {0};
         int nn[3] = {0}, nne[3] = {0}, swaps = 0, ids = 0, maxres = 0;
         double t0 = now();
@@ -3392,6 +5690,24 @@ static void run_check(void) {
         if (id == A_MTT) printf("      %d track IDs issued over 8 acts (8 x 8 targets), %d swaps flagged\n", ids, swaps);
         if (id == A_PF) printf("      up to %d resamplings in an act\n", maxres);
     }
+    printf("3. the new acts\n");
+    {
+        double sf[3] = {0}, nf[3] = {0};
+        int cf[3] = {0};
+        for (uint32_t sd = 1; sd <= 8; sd++) {
+            opt_seed = sd;
+            act_setup(0, A_RTS);
+            act_advance(A.len_s);
+            for (int k = 0; k < 3; k++) { sf[k] += RT.se[k]; nf[k] += RT.sn[k]; cf[k] += RT.ne[k]; }
+        }
+        static const char *nm[3] = {"filter", "fixed lag 8 s", "smoothed"};
+        printf("  RTS act, 8 runs: RMS position error and mean position NEES (dof 2):\n");
+        for (int k = 0; k < 3; k++) printf("    %-14s %6.2f m   NEES %5.2f  (%d steps)\n", nm[k], sqrt(sf[k] / cf[k]), nf[k] / cf[k], cf[k]);
+    }
+    check_rts();
+    check_fusion();
+    check_sqrt();
+    check_slam();
 }
 
 /* ---- --layer: a native Wayland wallpaper (wlr-layer-shell + EGL) ---- */
@@ -3481,7 +5797,7 @@ static int wl_poll(void) {
 static void usage(void) {
     fprintf(stderr,
         "usage: kalman [--window | --root | --layer] [--seed N] [--fps N] [--palette tactical|night|paper|mono]\n"
-        "              [--act 1-5] [--act-len SECONDS] [--font FAMILY] [--math-font FAMILY]\n"
+        "              [--act 1-9] [--act-len SECONDS] [--font FAMILY] [--math-font FAMILY]\n"
         "              [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
         "              [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--check] [--resize-test N]\n");
     exit(1);
