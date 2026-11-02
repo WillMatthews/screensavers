@@ -6,8 +6,9 @@
  *
  *   I    BRIDGES UNDER MOVING LOADS  a Warren or Pratt truss, a tied arch, a
  *        cable-stayed or a suspension bridge (the cables tension-only),
- *        built of 2D frame and truss elements under their own dead load.
- *        Trains cross, their axle loads moving along the deck; the response
+ *        built of 2D frame and truss elements under their own dead load
+ *        (stays and hangers pretensioned to carry the deck). Trains cross,
+ *        their axle loads moving along the deck; the response
  *        is integrated in time (Newmark-beta, average acceleration, with
  *        Rayleigh damping) so the deck rings after a train has gone. Members
  *        are coloured by axial stress (tension blue, compression red), the
@@ -22,20 +23,31 @@
  *   III  TOPOLOGY OPTIMISATION  SIMP with a sensitivity filter and the
  *        optimality-criteria update (the classic 88-line code, ported): the
  *        MBB beam or a deck-bridge domain growing from grey mush into an
- *        organic truss.
+ *        organic truss, then coloured by strain energy.
  *
- * Every stiffness matrix is assembled sparse (CSR) and solved by Jacobi-
- * preconditioned conjugate gradients, warm-started from the last solution.
- * The solver runs at a lower rate than the display (the bridge every 10 ms
- * of model time, the optimiser a few iterations a second, time-sliced) and
- * frames interpolate between solutions.
+ * Every stiffness matrix is assembled sparse (CSR) and solved by
+ * preconditioned conjugate gradients, warm-started from the last solution:
+ * Jacobi for the bridges and the continuum, a geometric multigrid V-cycle
+ * for the optimiser (MGCG: 15-25 iterations a solve instead of ~600). The
+ * solver runs at a lower rate than the display (the bridge every 10 ms of
+ * model time, the optimiser 1.6 iterations a second of display, worked
+ * ahead in slices of at most --budget ms a frame) and frames interpolate
+ * between solutions. Everything follows from the seed and the time since
+ * --epoch, so instances that can't talk still agree.
  *
- * --check runs the verification cases and prints them: a cantilever's tip
- * deflection against PL^3/3EI, the Kirsch Kt, a pin-jointed truss against
- * the method of joints, and the 88-line MBB result.
+ * --check runs the verification cases and prints them: a pin-jointed truss
+ * against the method of sections, a cantilever's tip deflection against
+ * PL^3/3EI (and Timoshenko), the plate's Kt against Kirsch and Heywood, the
+ * stress along the ligament, and the 88-line MBB (60 x 20) compliance.
  *
- * Palettes: cae (dark, turbo), blueprint, paper (a light drawing office),
- * mono. The lock info sits in the drawing's title block: the time, how long
+ * The programme: a bridge (96 s), the three continuum sheets (36 s each),
+ * an optimisation (92 s), round again with the next bridge. --act N keeps
+ * to one act; --model NAME to one sheet (warren pratt arch stayed
+ * suspension plate cantilever bracket mbb deck).
+ *
+ * Palettes (--palette, else by seed, mostly the dark ones): cae (dark,
+ * turbo), blueprint, paper (a light drawing office, viridis), mono. 4x MSAA
+ * (--msaa 0|2|4) over analytically anti-aliased lines. The lock info sits in the drawing's title block: the time, how long
  * the screen has been locked (swaylock's start time, from /proc), and the
  * hostname as the PROJECT.
  *
@@ -51,7 +63,9 @@
  * Same plumbing as gauges: Xlib + GLX for --window / --root, a native
  * wlr-layer-shell surface over EGL for --layer (swaylock-plugin), and
  * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen.
- * --bench N times N frames offscreen at --size.
+ * --bench N times N frames offscreen at --size from --at: GPU time from
+ * timer queries, process CPU a frame, and the solver's share of a core
+ * over the whole scene.
  *
  * Keys (window mode): q / Escape quit.
  */
@@ -1657,11 +1671,11 @@ static void br_loads(const Br *B, double t, double *f) {
     }
 }
 
-/* rounded up to a tidy scale value: 1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8 x 10^k */
+/* rounded up to a tidy scale value: 1, 1.2, 1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 8 x 10^k */
 static double nice_up(double v) {
-    static const double c[] = {1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10};
+    static const double c[] = {1, 1.2, 1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 8, 10};
     double e = pow(10, floor(log10(v))), m = v / e;
-    for (int i = 0; i < 11; i++) if (c[i] >= m - 1e-9) return c[i] * e;
+    for (int i = 0; i < 12; i++) if (c[i] >= m - 1e-9) return c[i] * e;
     return 10 * e;
 }
 
@@ -2016,7 +2030,7 @@ static void run_check(void) {
         int n = nearest_node(&c, c.a, 0);
         printf("  sigma_yy at the side of the hole (theta = 0): FE %.3f, Kirsch -1\n", c.sn[0][n * 3 + 1]);
         printf("  along the ligament, sigma_xx / sigma_inf (FE vs Kirsch 1 + a^2/2y^2 + 3a^4/2y^4):\n   ");
-        for (double y = 10; y <= 40.1; y += 5) {
+        for (double y = c.a; y <= 4.01 * c.a; y += 0.5 * c.a) {
             int k = nearest_node(&c, 0, y);
             double yy = c.xy[k * 2 + 1], r = c.a / yy;
             printf(" y=%.1f %.3f/%.3f", yy, c.sn[0][k * 3], 1 + 0.5 * r * r + 1.5 * r * r * r * r);
@@ -3210,7 +3224,7 @@ static void draw_cont(void) {
     double mx = ct.bx1 - ct.bx0, my = ct.by1 - ct.by0;
     /* room around for the loads, supports and dimensions */
     if (ct.kind == C_PLATE) fit(ct.bx0 - 0.17 * mx, ct.by0 - 0.32 * my, ct.bx1 + 0.17 * mx, ct.by1 + 0.25 * my, 0);
-    else if (ct.kind == C_CANTI) fit(ct.bx0 - 0.08 * mx, ct.by0 - 1.5 * my, ct.bx1 + 0.08 * mx, ct.by1 + 1.4 * my, 0);
+    else if (ct.kind == C_CANTI) { double v = span_me >= 0 ? 0.6 : 1; fit(ct.bx0 - 0.08 * mx, ct.by0 - 1.5 * v * my, ct.bx1 + 0.08 * mx, ct.by1 + 1.4 * v * my, 0); }
     else fit(ct.bx0 - 0.25 * mx, ct.by0 - 0.12 * my, ct.bx1 + 0.3 * mx, ct.by1 + 0.3 * my, 0);
     static Cont *fm_for;
     static uint64_t fm_id;
@@ -3501,7 +3515,8 @@ static void draw_top(void) {
     const Top *T = &top;
     int nx = T->nelx, ny = T->nely, full = 2 * nx;
     float u = U;
-    fit(-0.05 * full, -0.30 * ny, full * 1.05, ny * 1.30, 0);
+    double vm = span_me >= 0 ? 0.75 : 1;
+    fit(-0.05 * full, -0.30 * vm * ny, full * 1.05, ny * (1 + 0.30 * vm), 0);
     /* the design on display, between two iterations; mirrored about the left edge */
     if (topo_w != full || topo_h != ny) {
         free(topo_px);
