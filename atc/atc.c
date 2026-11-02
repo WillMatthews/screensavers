@@ -89,6 +89,9 @@
 #include <sys/wait.h>
 #include "proto-layer-shell.h"
 
+/* fields are fixed width on the scope and the strips: cutting a long name short is meant */
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+
 extern char **environ;
 
 #define PI 3.14159265f
@@ -1013,7 +1016,6 @@ static void cache_init(void) {
 /* ---- ingesting a feed document ---- */
 static double ingest_wall;             /* wall-clock time of this load */
 static double ingest_skew;             /* feed clock - our clock */
-static int ingest_live;
 
 static int is_goodyear(const Rec *r, const char **name) {
     uint32_t id = (uint32_t)strtoul(r->hex, NULL, 16);
@@ -1034,7 +1036,7 @@ static void trim(char *s) {
 }
 
 static void on_rec(const Rec *r, double tnow) {
-    if (r->have_pos != 3 || r->hex[0] == '~' && !r->flight[0]) return;    /* no position; a TIS-B blip with no name */
+    if (r->have_pos != 3 || (r->hex[0] == '~' && !r->flight[0])) return;    /* no position; a TIS-B blip with no name */
     double age = r->seen_pos >= 0 ? r->seen_pos : r->seen >= 0 ? r->seen : 0;
     if (age > 60) return;
     double x, y;
@@ -1380,7 +1382,7 @@ static void sim_name(Sim *s, Rng *r, int ga) {
         s->cat = 0xA1;
         return;
     }
-    int n = rnd(r) < 0.5f ? 1 + rndi(r, 99) : 100 + rndi(r, 2900);
+    int n = rnd(r) < 0.15f ? 1 + rndi(r, 99) : 100 + rndi(r, 8900);
     if (rnd(r) < 0.25f) {
         static const char *A = "ABCDEFGHJKLMNPRSTUVWXYZ";
         snprintf(s->cs, sizeof s->cs, "%s%d%c", AIRLINE[rndi(r, NAIRLINE)], n % 1000, A[rndi(r, 23)]);
@@ -1415,7 +1417,8 @@ static int sim_spawn(Sim *s, const Stream *st, uint32_t key, double t0) {
         uint32_t ah = hash32((uint32_t)st->ai * 7717u + 99u);
         float c0 = (float)(ah % 360);
         if (st->kind == KD_ARR) {
-            float b = c0 + 90 * rndi(&r, 4) + rndr(&r, -12, 12);
+            int corridor = rndi(&r, 4);
+            float b = c0 + 90 * corridor + rndr(&r, -12, 12);
             float d0 = rndr(&r, 52, 64);
             float ex = A->x + sinf(b * DEG) * d0, ey = A->y + cosf(b * DEG) * d0;
             s->x = s->sx0 = ex; s->y = s->sy0 = ey;
@@ -1429,7 +1432,9 @@ static int sim_spawn(Sim *s, const Stream *st, uint32_t key, double t0) {
             float fin = rndr(&r, 9.5f, 12.5f);
             float bx = tx - ux * (fin + 3) + px * 6, by = ty - uy * (fin + 3) + py * 6;
             float ix = tx - ux * fin, iy = ty - uy * fin;
-            float fx = A->x + sinf(b * DEG) * 24, fy = A->y + cosf(b * DEG) * 24;
+            /* the corridor's holding fix */
+            float fb = (c0 + 90 * corridor) * DEG;
+            float fx = A->x + sinf(fb) * 24, fy = A->y + cosf(fb) * 24;
             /* don't fly the feeder fix if it's behind the base point */
             float fdx = fx - bx, fdy = fy - by;
             if (fdx * fdx + fdy * fdy > 36) sim_wp(s, fx, fy, 10000 + s->elev, 250);
@@ -1542,7 +1547,7 @@ static void sim_step(Sim *s, float h) {
         /* turn early onto the next leg (not onto the runway) */
         float lead = v * 3600 * (1 / (s->turn * 60)) * 0.9f;  /* ~ turn radius */
         int last = s->wi == s->nwp - 1;
-        if (along > len - (last || s->kind == KD_ARR && s->wi >= s->nwp - 2 ? 0.05f : lead)) { s->wi++; }
+        if (along > len - (last || (s->kind == KD_ARR && s->wi >= s->nwp - 2) ? 0.05f : lead)) { s->wi++; }
         float ox = tx - s->x, oy = ty - s->y;
         if (ox * ox + oy * oy > 1e-6f) want = wrap360(atan2f(ox, oy) / DEG);
     } else if (s->kind != KD_SHIP) {
@@ -2107,7 +2112,7 @@ static void draw_traffic(const View *v, double wt, float sel_pulse) {
         if (a->ship) {
             float s = a->goodyear ? 1.25f : 1.05f;
             glow(px, py, 26 * s, C4(0.98f, 0.79f, 0.32f, -0.10f));
-            draw_airship(px, py, scr, s * lbl_lh / 14, c, lw * 1.1f);
+            draw_airship(px, py, scr, s * fmaxf(lbl_lh / 11, 1.2f), c, lw * 1.2f);
         } else {
             ring(px, py, 3.6f, lw * 1.1f, c);
             disc(px, py, 1.1f, c);
@@ -2154,11 +2159,58 @@ static void draw_traffic(const View *v, double wt, float sel_pulse) {
 }
 
 /* ---- the map under it all ---- */
-static float nice_step(float range) {
-    float s = range / 4;
-    float p = powf(10, floorf(log10f(s)));
-    float m = s / p;
-    return (m < 1.5f ? 1 : m < 3.5f ? 2.5f : m < 7.5f ? 5 : 10) * p;
+/* the simulation's holding stacks, one on each arrival corridor */
+static void stack_name(char *b, uint32_t h) {
+    static const char *C = "BDGKLMNPRSTVW", *V = "AEIOU";
+    for (int i = 0; i < 5; i++) { h = hash32(h + 0x51u); b[i] = i % 2 ? V[h % 5] : C[h % 13]; }
+    b[5] = 0;
+}
+static void draw_stacks(const View *v) {
+    if (src != SRC_SIM && src != SRC_PROBE) return;
+    for (int si = 0; si < nstream; si++) {
+        if (stream[si].kind != KD_ARR) continue;
+        const Apt *A = &apt[stream[si].ai];
+        if (A->d->rank > 1) continue;
+        float c0 = (float)(hash32((uint32_t)stream[si].ai * 7717u + 99u) % 360);
+        for (int k = 0; k < 4; k++) {
+            float b = (c0 + 90 * k) * DEG;
+            float fx = A->x + sinf(b) * 24, fy = A->y + cosf(b) * 24;
+            int near = 0;
+            for (int j = 0; j < napt && apt[j].dist < 120; j++)
+                if (&apt[j] != A && apt[j].d->rank <= 2 && hypotf(apt[j].x - fx, apt[j].y - fy) < 12) near = 1;
+            if (near) continue;
+            float sx, sy;
+            vp(v, fx, fy, &sx, &sy);
+            if (sx < v->x0 - 100 || sx > v->x1 + 100 || sy < v->y0 - 100 || sy > v->y1 + 100) continue;
+            /* a racetrack outbound of the fix, turning right */
+            float ux = -sinf(b), uy = -cosf(b);              /* inbound, toward the airport */
+            float rx = -uy, ry = ux;                         /* its right */
+            float L = 4, R = 1.3f;
+            const float *hc = ca(COL_MAP, 0.22f);
+            float px = 0, py = 0;
+            for (int i = 0; i <= 48; i++) {
+                float t = (float)i / 48, qx, qy;
+                if (t < 0.25f) { float f = t / 0.25f; qx = fx - ux * L * f; qy = fy - uy * L * f; }
+                else if (t < 0.5f) { float a = (t - 0.25f) / 0.25f * PI; qx = fx - ux * L + rx * R * (1 - cosf(a)) - ux * R * sinf(a); qy = fy - uy * L + ry * R * (1 - cosf(a)) - uy * R * sinf(a); }
+                else if (t < 0.75f) { float f = (t - 0.5f) / 0.25f; qx = fx - ux * L * (1 - f) + rx * 2 * R; qy = fy - uy * L * (1 - f) + ry * 2 * R; }
+                else { float a = (t - 0.75f) / 0.25f * PI; qx = fx + rx * R * (1 + cosf(a)) + ux * R * sinf(a); qy = fy + ry * R * (1 + cosf(a)) + uy * R * sinf(a); }
+                float qsx, qsy;
+                vp(v, qx, qy, &qsx, &qsy);
+                if (i) line_d(px, py, qsx, qsy, 1, hc, 0, 0);
+                px = qsx; py = qsy;
+            }
+            /* the fix: a triangle and its name */
+            float tr = 4.5f;
+            const float *fc = ca(COL_MAP, 0.55f);
+            for (int e = 0; e < 3; e++) {
+                float a0 = -PI / 2 + e * 2 * PI / 3, a1 = a0 + 2 * PI / 3;
+                line(sx + cosf(a0) * tr, sy + sinf(a0) * tr, sx + cosf(a1) * tr, sy + sinf(a1) * tr, 1.1f, fc);
+            }
+            char nm[8];
+            stack_name(nm, hash32((uint32_t)stream[si].ai * 131u + (uint32_t)k));
+            text_t(st_tiny, sx + 8, sy - 6, -1, nm, ca(COL_MAP, 0.45f), 1);
+        }
+    }
 }
 
 static void draw_map(const View *v, int active_only) {
@@ -2672,7 +2724,7 @@ static void draw_board(float x0, float y0, float x1, float y1, double wt, float 
     float colw = (x1 - x0 - m * (strip_cols + 1)) / strip_cols;
     float lab_h = styles[st_dymo].px * 2.3f;
     float gap = strip_h * 0.13f;
-    int col_of[NBAY], cnt[NBAY] = {0}, want[NBAY] = {0};
+    int col_of[NBAY], want[NBAY] = {0};
     for (int i = 0; i < MAXAC; i++) {
         Ac *a = &ac[i];
         if (!a->used || a->gone || a->fade < 0.2f || a->kind == KD_NONE) continue;
@@ -3287,6 +3339,7 @@ static void scope_pass(View *v, double wt, float dt) {
     draw_bg(v, step, step_a, wt);
     float clip[4] = {v->x0, v->y0, v->x1, v->y1};
     draw_map(v, 0);
+    draw_stacks(v);
     draw_ring_labels(v, step, step_a);
     flush(clip);
     arrange_labels(v, wt, shot_mode);
