@@ -637,7 +637,7 @@ static void synth(long k) {
     pr[PR_ICMP_UNR] = hrand(16, k) < (idle ? 0.02f : 0.12f) ? 1 : 0;
     float loss = idle ? 0.0008f : powf(10, -3.5f + 1.1f * episode(17, k, 37, 10) + 0.5f * vnoise(18, x / 11));
     pr[PR_RETX] = pr[PR_TCP_OUT] * loss;
-    if (idle) pr[PR_RETX] = hrand(19, k) < 0.03f ? 1 : 0;
+    if (idle) pr[PR_RETX] = hrand(19, k) < 0.008f ? 1 : 0;
     pr[PR_AOPEN] = idle ? (hrand(25, k) < 0.08f ? 1 : 0) : 0.4f + 6 * vnoise(26, x / 4) * (0.3f + build);
     pr[PR_POPEN] = idle ? 0 : 0.6f * vnoise(27, x / 6) + (hrand(28, k) < 0.2f ? 1 : 0);
     pr[PR_TIMEOUT] = pr[PR_RETX] * 0.08f;
@@ -863,7 +863,8 @@ static long cw_tick = LONG_MIN;
 static float cw_p;                     /* smoothed loss fraction */
 
 static void step_cwnd(double t, float dt) {
-    float p = pd[PR_TCP_OUT] > 1 ? pd[PR_RETX] / pd[PR_TCP_OUT] : 0;
+    /* a trickle of segments makes the ratio noise: count at least 50 a second */
+    float p = pd[PR_RETX] / fmaxf(pd[PR_TCP_OUT], 50);
     cw_p += (p - cw_p) * (1 - expf(-dt / 2.0f));
     /* Mathis: W ~ 1.22 / sqrt(p) segments */
     float wt = clampf(1.22f / sqrtf(fmaxf(cw_p, 1.2e-4f)), 6, 100);
@@ -873,7 +874,10 @@ static void step_cwnd(double t, float dt) {
     if (cw >= cw_target) { cw *= 0.5f; loss = 1; cw_target = wt * (0.88f + 0.24f * frand()); }
     if (cw_target > wt * 1.15f) cw_target = wt * (0.9f + 0.2f * frand());
     long tick = (long)floor(t * 10);
-    if (cw_tick == LONG_MIN) cw_tick = tick - 1;
+    if (cw_tick == LONG_MIN) {
+        cw_tick = tick - 1;
+        for (int i = 0; i < CWN; i++) cwh[i] = -1;
+    }
     static int pending_loss;
     pending_loss |= loss;
     while (cw_tick < tick) {
@@ -1919,6 +1923,7 @@ static void draw_states(int dyn) {
         long tk = tick - i;
         int j = (int)(((tk % CWN) + CWN) % CWN);
         float x = g.x + g.w - 3 * u - (g.w - 6 * u) * i / (float)(CWN - 2);
+        if (cwh[j] < 0) break;
         float yy = g.y + g.h - 3 * u - (g.h - 8 * u) * clampf(cwh[j] / top, 0, 1);
         if (i) {
             seg(x, yy, px, py, 1.6f * u, c_proto[0], 0.95f, 4 * u, 0.3f);
@@ -1988,7 +1993,7 @@ static void draw_counters(int dyn) {
                 float x = sx1 - (sx1 - sx0) * (s + (float)(T_now - floor(T_now))) / 60.0f;
                 float yy = yb - sh * log1pf(vv) / log1pf(mx);
                 if (x < sx0) break;
-                if (s) seg(x, yy, px, py, 1.2f * u, bad && vv > 0 ? c_red : col, 0.85f, 3 * u, 0.2f);
+                if (s) seg(x, yy, px, py, 1.2f * u, bad && vv > 0.05f ? c_red : col, 0.85f, 3 * u, 0.2f);
                 px = x; py = yy;
             }
         }
@@ -2152,7 +2157,7 @@ static const char *FS_BLIT = "#version 330 core\n" GLSL(
 
 static GLuint prog_bg, prog_prim, prog_text, prog_blit, vao, vao_prim, vbo_prim, vao_text, vbo_text, tex_atlas,
     tex_static, fbo_static;
-static int static_w, static_h;
+static int static_w, static_h, frame_prims, frame_glyphs;
 
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
@@ -2287,6 +2292,7 @@ static void render(GLuint target) {
     glDrawArrays(GL_TRIANGLES, 0, 3);
     pn = 0; tvn = 0;
     draw_all(1);
+    frame_prims = pn; frame_glyphs = tvn / 48;
     flush();
 }
 
@@ -2611,8 +2617,8 @@ int main(int argc, char **argv) {
         }
         double cpu = (double)(clock() - c0) / CLOCKS_PER_SEC * 1000 / opt_bench;
         printf("netflow: %dx%d, %d frames: avg %.3f ms wall, worst %.3f ms; GPU %.3f ms/frame; CPU %.3f ms/frame; "
-               "static layer built in %.1f ms; %d particles, %d shapes\n",
-               W, H, opt_bench, sum / opt_bench, worst, gsum / opt_bench, cpu, tb * 1000, np, pcap);
+               "static layer built in %.1f ms; %d particles, %d shapes, %d glyphs\n",
+               W, H, opt_bench, sum / opt_bench, worst, gsum / opt_bench, cpu, tb * 1000, np, frame_prims, frame_glyphs);
         printf("netflow: GL renderer: %s\n", (const char *)glGetString(GL_RENDERER));
         return 0;
     }
