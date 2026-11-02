@@ -94,7 +94,7 @@ static int opt_root, opt_layer, opt_bench, opt_check, opt_poynting;
 static float opt_fps = 60;
 static float opt_speed = 1;            /* wave periods per second, times the act's own */
 static float opt_act_secs = 48;
-static int opt_cells = 420000;         /* the cell budget for the domain */
+static int opt_cells = 360000;         /* the cell budget for the domain */
 static uint32_t opt_seed;
 static const char *opt_shot, *opt_palette, *opt_act;
 static double opt_at = 30;             /* --shot: the frame this many seconds into the act */
@@ -665,16 +665,8 @@ static void act_build(void) {
         float g = 1.5f / nl, th = 1.2f / nl;
         /* tuned in 2D (--check): strips infinite in z resonate differently
          * from wires, so the reflector is long and the directors short */
-        float X[6] = {-0.15f, 0, 0.2f, 0.4f, 0.6f, 0.8f};
-        float L[6] = {0.62f, 0.47f, 0.26f, 0.25f, 0.24f, 0.23f};
-        const char *ov = getenv("FDTD_YAGI");
-        if (ov) {
-            float rl, rs, dl, ds;
-            if (sscanf(ov, "%f %f %f %f", &rl, &rs, &dl, &ds) == 4) {
-                L[0] = rl; X[0] = -rs;
-                for (int i = 2; i < 6; i++) { L[i] = dl - 0.01f * (i - 2); X[i] = ds * (i - 1); }
-            }
-        }
+        static const float X[6] = {-0.15f, 0, 0.2f, 0.4f, 0.6f, 0.8f};
+        static const float L[6] = {0.62f, 0.47f, 0.26f, 0.25f, 0.24f, 0.23f};
         for (int i = 0; i < 6; i++) {
             if (i == 1) {
                 add_seg(X[i], g, X[i], L[i] / 2, th, M_PEC);
@@ -1513,6 +1505,7 @@ static void paint_materials(void) {
     float *eps = malloc(n * 3 * sizeof *eps), *mu = malloc(n * 3 * sizeof *mu);
     float *sig = calloc(n * 3, sizeof *sig);
     unsigned char *pec = calloc(n * 3, 1);
+    float *pecv = calloc(n, sizeof *pecv);       /* conductor coverage, for the eye */
     for (size_t i = 0; i < n * 3; i++) eps[i] = mu[i] = 1;
     static const float off[3][2] = {{0, 0}, {0, 0.5f}, {0.5f, 0}};   /* Fz, Fx, Fy sites */
     for (int k = 0; k < nsh; k++) {
@@ -1536,10 +1529,14 @@ static void paint_materials(void) {
                     float cv = clampf(0.5f - dc, 0, 1);
                     size_t q = ((size_t)j * NX + i) * 3 + st;
                     switch (s->mat) {
-                    case M_PEC: if (dc < 0) pec[q] = 1; break;
+                    case M_PEC:
+                        if (dc < 0) pec[q] = 1;
+                        if (st == 0) pecv[q / 3] = fmaxf(pecv[q / 3], cv);
+                        break;
                     case M_AIR:
                         eps[q] += (1 - eps[q]) * cv; mu[q] += (1 - mu[q]) * cv; sig[q] -= sig[q] * cv;
                         if (cv > 0.5f) pec[q] = 0;
+                        if (st == 0) pecv[q / 3] *= 1 - cv;
                         break;
                     case M_LUNE: {
                         float r = hypotf(lx - s->p[0], ly - s->p[1]) / s->p[2];
@@ -1570,9 +1567,9 @@ static void paint_materials(void) {
         mt[c * 4] = co[1][0]; mt[c * 4 + 1] = co[1][1]; mt[c * 4 + 2] = co[2][0]; mt[c * 4 + 3] = co[2][1];
         /* for the eye: dielectric strength, conductor, loss, dielectric presence */
         float e = te ? (eps[c * 3 + 1] + eps[c * 3 + 2]) / 2 : eps[c * 3];
-        int p = pec[c * 3] || pec[c * 3 + 1] || pec[c * 3 + 2];
+        float p = pecv[c];
         mv[c * 4] = (unsigned char)(clampf((e - 1) / 1.25f, 0, 1) * 255);
-        mv[c * 4 + 1] = p ? 255 : 0;
+        mv[c * 4 + 1] = (unsigned char)(clampf(p, 0, 1) * 255);
         mv[c * 4 + 2] = (unsigned char)(clampf(sig[c * 3 + (te ? 1 : 0)] * 12, 0, 1) * 255);
         mv[c * 4 + 3] = (unsigned char)(clampf((e - 1) * 8, 0, 1) * 255);
     }
@@ -1583,7 +1580,7 @@ static void paint_materials(void) {
     glBindTexture(GL_TEXTURE_2D, tMatV);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, NX, NY, GL_RGBA, GL_UNSIGNED_BYTE, mv);
-    free(eps); free(mu); free(sig); free(pec); free(mz); free(mt); free(mv);
+    free(eps); free(mu); free(sig); free(pec); free(pecv); free(mz); free(mt); free(mv);
 }
 
 /* the NTFF box: points a cell apart round it, outward normals */
@@ -1758,22 +1755,29 @@ static void sim_step(void) {
 /* ---- the show: which act when ---- */
 static int cur_k = -1, need_restart;
 
+/* the acts in a shuffled order, a fresh shuffle each time round */
+static void shuffle(int cyc, int *perm) {
+    uint32_t r = hash32(opt_seed * 2654435761u + (uint32_t)cyc * 40503u + 17);
+    for (int i = 0; i < NACT; i++) perm[i] = i;
+    for (int i = NACT - 1; i > 0; i--) {
+        r = hash32(r + (uint32_t)i);
+        int j = (int)(r % (uint32_t)(i + 1));
+        int t = perm[i]; perm[i] = perm[j]; perm[j] = t;
+    }
+}
+
 static int act_for(int k) {
     if (opt_act) {
         for (int a = 0; a < NACT; a++) if (!strcmp(opt_act, act_names[a])) return a;
         return 0;
     }
     int cyc = k / NACT, slot = k % NACT;
-    int perm[NACT];
-    for (int c = 0;; c++) {
-        uint32_t r = hash32(opt_seed * 2654435761u + (uint32_t)(cyc - c) * 40503u + 17);
-        for (int i = 0; i < NACT; i++) perm[i] = i;
-        for (int i = NACT - 1; i > 0; i--) {
-            r = hash32(r + (uint32_t)i);
-            int j = (int)(r % (uint32_t)(i + 1));
-            int t = perm[i]; perm[i] = perm[j]; perm[j] = t;
-        }
-        break;
+    int perm[NACT], prev[NACT];
+    shuffle(cyc, perm);
+    /* no act twice running across the seam between two shuffles */
+    if (cyc > 0) {
+        shuffle(cyc - 1, prev);
+        if (perm[0] == prev[NACT - 1]) { int t = perm[0]; perm[0] = perm[1]; perm[1] = t; }
     }
     return perm[slot];
 }
@@ -1913,8 +1917,8 @@ static void build_text(double ta) {
     if (act == A_ARRAY)
         snprintf(sub, sizeof sub, "Δφ = %.0f° between elements  →  sin θ = Δφ λ / 2πd,  θ = %.1f°", dphi / DEG, steer / DEG);
     if (act == A_CAVITY) {
-        if (q_est > 0) snprintf(sub, sizeof sub, "TM₃₂ at %.3f f₀ rings down through an iris  ·  Q ≈ %.0f", cav_f, q_est);
-        else snprintf(sub, sizeof sub, "TM₃₂ at %.3f f₀ rings down through an iris", cav_f);
+        if (q_est > 0) snprintf(sub, sizeof sub, "a burst rings TM₃₂, which leaks out through an iris  ·  Q ≈ %.0f", q_est);
+        else snprintf(sub, sizeof sub, "a burst rings TM₃₂, which leaks out through an iris");
     }
     wmax = fmaxf(wmax, text(ss, x0, y, -1, sub, cdim, 0.1f));
     /* the curl equations */
@@ -2352,8 +2356,8 @@ static void check_cavity(void) {
             /* with the Yee grid's dispersion */
             float kx = m * PI / (A * nl), ky = nn * PI / (B * nl);
             float fn = asinf(S_COURANT * sqrtf(sinf(kx / 2) * sinf(kx / 2) + sinf(ky / 2) * sinf(ky / 2))) / PI * spp;
-            float best = 0, bf = 0;
-            for (float f = fa * 0.97f; f < fa * 1.03f; f += 0.00005f) {
+            float best = 0, bf = 0, lo = fa * 0.985f, hi = fa * 1.015f;
+            for (float f = lo; f < hi; f += 0.00005f) {
                 double re = 0, im = 0, w = 2 * PI * f / spp;
                 for (int s = 0; s < N; s++) {
                     double h = 0.5 - 0.5 * cos(2 * PI * s / (N - 1));
@@ -2361,6 +2365,10 @@ static void check_cavity(void) {
                 }
                 float pw = (float)(re * re + im * im);
                 if (pw > best) { best = pw; bf = f; }
+            }
+            if (bf < lo + 0.0002f || bf > hi - 0.0002f) {
+                printf("    TM%d%d: analytic %.4f f0, Yee-dispersion %.4f f0, no clear peak within 1.5%%\n", m, nn, fa, fn);
+                continue;
             }
             printf("    TM%d%d: analytic %.4f f0, Yee-dispersion %.4f f0, measured peak %.4f f0 (%+.2f%% / %+.2f%%)\n",
                    m, nn, fa, fn, bf, (bf / fa - 1) * 100, (bf / fn - 1) * 100);
@@ -2381,7 +2389,6 @@ static void check_q(void) {
 }
 
 static void run_checks(void) {
-    if (getenv("FDTD_YAGI")) { check_yagi(); return; }
     printf("fdtd: checks (%s)\n", (const char *)glGetString(GL_RENDERER));
     check_pml();
     check_dipole();
@@ -2615,19 +2622,6 @@ int main(int argc, char **argv) {
             double ta = show_advance(t, 1 << 30);
             render(fbo, ta, 1.0f / 60);
             glFinish();
-            if (getenv("FDTD_DEBUG")) {
-                float e;
-                glBindFramebuffer(GL_FRAMEBUFFER, fExp[ce]);
-                glReadPixels(0, 0, 1, 1, GL_RED, GL_FLOAT, &e);
-                float *z = malloc((size_t)NX * NY * 16);
-                glBindFramebuffer(GL_FRAMEBUFFER, fAcc[ca]);
-                glReadPixels(0, 0, NX, NY, GL_RGBA, GL_FLOAT, z);
-                double su = 0, mz = 0;
-                for (long i = 0; i < (long)NX * NY; i++) { su += z[i * 4]; mz = fmax(mz, fabs(z[i * 4 + 3])); }
-                fprintf(stderr, "exp %g mean u %g max|Fz| %g\n", e, su / NX / NY, mz);
-                free(z);
-                glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-            }
             save_ppm(opt_shot);
             printf("fdtd: %s, %s, grid %dx%d (%.0fk cells), %.1f cells/λ, %.1f px/cell, %ld steps\n",
                    act_names[act], palettes[pal].name, NX, NY, NX * NY / 1e3, nl, cp * W / view[2], step_n);
