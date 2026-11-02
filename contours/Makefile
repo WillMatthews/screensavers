@@ -1,4 +1,4 @@
-CFLAGS ?= -O2 -Wall -Wextra
+CFLAGS ?= -O2 -fno-math-errno -Wall -Wextra
 FT = $(shell pkg-config --cflags --libs fontconfig freetype2)
 
 # Wayland protocol glue (generated): wlr-layer-shell for --layer, and the

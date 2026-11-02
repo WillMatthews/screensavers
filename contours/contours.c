@@ -3,13 +3,13 @@
  * procedural mountain country, drawn like a fine cartographic sheet, drifting
  * slowly past under a moving sun.
  *
- * The ground is flightsim's (domain-warped fbm hills, ridged mountain ranges
- * where a broad mask allows) gentled for a map: gradient noise with its
- * octaves turned (value noise shows its lattice in contour lines), fewer fine
- * octaves, larger forms. Rivers cut valleys through the lower ground along
- * the level sets of a linear function of a gently warped position, so they
- * wind but never close into loops, and run from lake to lake; the water is
- * everything below datum. The ground is baked on the GPU into a float height
+ * The ground is carved by its own drainage (see "the ground"): a hierarchy
+ * of valleys, rivers to gills, each falling to the one below it, the land
+ * the lowest of them all, so water runs off everywhere to the rivers and
+ * lakes; mountain ranges with arêtes, corries and tarns, U-shaped dales with
+ * flat floors, rolling hills and low lake country, by province. The water is
+ * everything below datum, and the tarns, each at its own level. The ground
+ * is baked on the GPU into a float height
  * texture one screen pixel per texel, addressed toroidally: as the view
  * drifts only the strips of new ground that slide into view are baked, so a
  * frame costs one cheap shading pass however heavy the terrain is.
@@ -26,12 +26,13 @@
  *     hypsometric tint from the palette's paper, woodland and highlight;
  *   - water below datum (which rises and falls a few metres, so the shores
  *     breathe), with engraved waterlines following the shore outwards;
- *   - rivers along their valleys, widening downstream; woodland stipple,
+ *   - woodland stipple,
  *     with a tree symbol here and there; wedge hachures on crags;
  *   - a coastal vignette and engraved hatching inside every shore;
  *   - a faint kilometre grid; and paper grain over it all.
  * And a map's furniture, invented but consistent (see "cartography"):
- * streams traced downhill to the lakes and rivers, villages joined by roads
+ * rivers and becks traced down their valleys from the heads of the
+ * drainage network to the lakes, villages joined by roads
  * routed through the valleys and over the passes (tracks and footpaths where
  * they must climb), and place names: villages upright, water in italic,
  * hills in small italic, districts in spaced capitals.
@@ -65,7 +66,9 @@
  * wlr-layer-shell surface over EGL for --layer (swaylock-plugin), and
  * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen;
  * --bench N times N offscreen frames at --size (with --shot, it saves the
- * last of them: the incrementally baked frame).
+ * last of them: the incrementally baked frame). CONTOURS_VERIFY=1 in the
+ * environment compares a sample of the first full bake with the CPU's
+ * terrain() (they should agree to a centimetre or so).
  *
  * Keys (window mode): q / Escape quit.
  */
@@ -119,12 +122,14 @@ static double now(void) {
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
-/* ---- noise and terrain (flightsim's, ported 1:1 to GLSL below) ---- */
+/* ---- noise (flightsim's, ported 1:1 to GLSL below) ---- */
 static uint32_t hash2(int32_t x, int32_t z, uint32_t salt) {
     uint32_t h = (uint32_t)x * 0x8da6b343u ^ (uint32_t)z * 0xd8163841u ^ salt * 0xcb1ab31fu;
     h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
     return h;
 }
+/* floor, exact, without a call into libm (it is hot) */
+static inline float ifloor(float x) { float t = (float)(int)x; return t > x ? t - 1 : t; }
 static float smooth(float t) { return t * t * (3 - 2 * t); }
 static float smoothstep(float a, float b, float x) {
     float t = (x - a) / (b - a);
@@ -137,7 +142,7 @@ static float grad_dot(int32_t ix, int32_t iz, uint32_t salt, float dx, float dz)
     return ((h & 0xffff) / 32768.0f - 1) * dx + ((h >> 16) / 32768.0f - 1) * dz;
 }
 static float vnoise(float x, float z, uint32_t salt) {
-    float fx = floorf(x), fz = floorf(z);
+    float fx = ifloor(x), fz = ifloor(z);
     int32_t ix = (int32_t)fx, iz = (int32_t)fz;
     float rx = x - fx, rz = z - fz;
     float tx = rx * rx * rx * (rx * (rx * 6 - 15) + 10), tz = rz * rz * rz * (rz * (rz * 6 - 15) + 10);
@@ -155,44 +160,415 @@ static float fbm(float x, float z, int oct, uint32_t salt) {
     }
     return s / norm;
 }
-static float ridged(float x, float z, int oct, uint32_t salt) {
-    float s = 0, amp = 0.5f, norm = 0;
-    for (int i = 0; i < oct; i++) {
-        float n = fmaxf(0, 1 - fabsf(vnoise(x, z, salt + i) * 2 - 1));
-        s += n * n * amp;
-        norm += amp; amp *= 0.42f; ROT(x, z, 2.07f);
+/* a min-heap, for the flood and the routes */
+typedef struct { float f; int i; } Hn;
+static void hpush(Hn *hp, int *n, Hn v) {
+    int i = (*n)++;
+    while (i && hp[(i - 1) / 2].f > v.f) { hp[i] = hp[(i - 1) / 2]; i = (i - 1) / 2; }
+    hp[i] = v;
+}
+static Hn hpop(Hn *hp, int *n) {
+    Hn top = hp[0], v = hp[--*n];
+    int i = 0;
+    for (;;) {
+        int c = 2 * i + 1;
+        if (c >= *n) break;
+        if (c + 1 < *n && hp[c + 1].f < hp[c].f) c++;
+        if (hp[c].f >= v.f) break;
+        hp[i] = hp[c]; i = c;
     }
-    return s / norm;
+    hp[i] = v;
+    return top;
+}
+/* ---- the ground: a drainage network, and the valleys it cuts ----
+ * The country is built the way water would have built it. A hierarchy of
+ * jittered grids, cells LS[k] across (7.2 km, 2.4 km, 800 m, 267 m), each
+ * with a node joined to where its water goes:
+ *   level 0, the rivers: each node to the neighbour lowest on a broad
+ *     control surface (ctrl(): the lie of the land, low in the lake
+ *     country, high in the mountains), or, lowest of its neighbours, to
+ *     nothing: a sink, made a lake;
+ *   levels 1 to 3, the becks, gills and gullies: each node partway up the
+ *     valley side it stands on (lambda_at(): shallow in the hills and the
+ *     finer levels, deep in the mountains), joined straight down to the
+ *     floor of the valley below it (or, if that's far, to the next node of
+ *     its own level on the way there), bending through a point off its
+ *     middle;
+ *   high in the mountains, where the ground rises well behind it, a valley
+ *     head may be a corrie (corrie()): a scoop with a floor and a cliffed
+ *     headwall, holding a tarn at the level it would spill at (tarn_level()).
+ * Every segment is a valley whose floor falls along it, flat for a width
+ * w (falling gently to a meandering line where the river runs), then
+ * rising at the slope R, a U rounded over LC[k] that opens out down the
+ * valley and steepens towards the crest, scree-steep under it; the ground is
+ * the lowest of all of them (softened where they meet high up, so crests
+ * round over in the hills and stay sharp in the mountains). Since every
+ * floor falls to a lower one, and the lowest of valleys only bottoms out
+ * at a sink, water runs off everywhere to the rivers and lakes: no hollows
+ * but the lakes, branching valleys, spurs and arêtes between, flat valley
+ * floors. A province field (province(), drawn out along a strike, so the
+ * mountains run in ranges) sets the relief: steep, high and sharp in the
+ * mountains, rolling hills, low lake country. The whole network is laid
+ * out in a gently warped space (warp()), so no valley runs straight.
+ * Nodes are a pure function of their cell and are cached (node_get());
+ * the GPU bake reads them from a texture filled from the same cache, so
+ * the two agree exactly about the network. Keep env() and terrain() in
+ * step with FS_BAKE. */
+#define NL 4
+static const float LS[NL] = {7200, 2400, 800, 267};         /* cell sizes, m */
+static const float LC[NL] = {800, 420, 110, 40};            /* valley-bottom rounding, m (mountains) */
+/* a node, its valley bending through (mx, my) on its way to (tx, ty) */
+/* and perhaps a corrie: a scoop up behind the node, centred (cx, cy), cr
+ * in radius, its floor cq below the node */
+typedef struct { float x, y, h, w, mx, my, tx, ty, th, riv, cq, cr, cx, cy, b0x, b0y, b1x, b1y; } Node;
+
+/* the provinces: 0 the low lake country, through the hills, to 1 the
+ * mountains */
+static float province(float x, float y) {
+    /* ranges, not blobs: the field is drawn out ~2.5 : 1 along a strike */
+    return smoothstep(0.3f, 0.7f, fbm((0.8f * x - 0.6f * y) / 60000, (0.6f * x + 0.8f * y) / 24000, 3, 23));
+}
+/* the lie of the land, for the rivers' floors */
+static float ctrl(float x, float y) {
+    float u = province(x, y);
+    return 30 + 400 * smoothstep(0.12f, 0.92f, u) + 220 * (fbm(x / 15000 + 7.1f, y / 15000 - 2.3f, 2, 31) - 0.5f);
+}
+/* the slope of valley sides, the softening of crests, valley floors' flat
+ * half width, and how far up its valley side a tributary rises */
+static float slope_at(float x, float y, float u) {
+    return (0.08f + 0.56f * u * u) * (0.7f + 0.6f * fbm(x / 4000, y / 4000, 2, 29));
+}
+static float soft_at(float u) { return 150 - 125 * u; }
+static float flat_at(int k, float u) { return k == 0 ? 330 - 250 * u : k == 1 ? 80 - 50 * u : k == 2 ? 10 : 0; }
+/* a tributary's head is this far (0 .. 1) up the valley side from where it
+ * joins: high (shallow valleys) in the hills and the finer levels, and near
+ * the water, so the shores don't fray */
+static float lambda_at(int k, float u, float jh) {
+    static const float hill[NL] = {0, 0.45f, 0.65f, 0.85f}, mtn[NL] = {0, 0.32f, 0.5f, 0.7f};
+    float l = hill[k] + (mtn[k] - hill[k]) * u;
+    return k < 2 ? l : l + (1 - l) * 0.75f * (1 - smoothstep(4, 70, jh));
 }
 
-/* The ground at (x, z) metres: out = height (m, 0 = datum), river field
- * (rivers run along its zero set), woodland, and how far below the river
- * sources this is. Keep in step with terrain() in FS_BAKE. */
-static void terrain(float x, float z, float out[4]) {
-    float wx = fbm(x / 6000, z / 6000, 3, 71) - 0.5f;
-    float wz = fbm(x / 6000 + 5.2f, z / 6000 + 1.3f, 3, 72) - 0.5f;
-    float X = x + wx * 2000, Z = z + wz * 2000;
-    float base = fbm(X / 2800, Z / 2800, 3, 11) * 260;
-    float mask = smoothstep(0.42f, 0.66f, fbm(x / 9000, z / 9000, 3, 23));
-    float mtn = mask > 0 ? powf(ridged(X / 2600, Z / 2600, 3, 37), 1.4f) * 1000 * mask : 0;
-    float h = base + mtn - 110;
-    float qx = X + (fbm(X / 4200 + 3.1f, Z / 4200 - 7.7f, 3, 91) - 0.5f) * 2600;
-    float qz = Z + (fbm(X / 4200 - 1.9f, Z / 4200 + 4.4f, 3, 92) - 0.5f) * 2600;
-    float rv = 0.5f * sinf(3.14159265f * (0.6f * qx + 0.8f * qz) / 6000);
-    float ron = (1 - smoothstep(120, 380, h)) * smoothstep(0.38f, 0.5f, fbm(x / 7000 - 4.4f, z / 7000 + 2.9f, 2, 93));
-    float carve = (1 - smoothstep(0, 1, fabsf(rv) / 0.05f)) * ron;
-    float floor_ = fminf(h, h * 0.6f - 6);
-    h = h + (floor_ - h) * carve;
-    out[0] = h;
-    out[1] = rv;
-    out[2] = fbm(x / 1400 + 11.5f, z / 1400 - 3.3f, 3, 55);
-    out[3] = ron;
+/* warped space: the network is laid out in it */
+static void warp(float x, float y, float *qx, float *qy) {
+    *qx = x + (fbm(x / 9000, y / 9000, 3, 71) - 0.5f) * 1800 + (fbm(x / 1700, y / 1700, 2, 73) - 0.5f) * 260;
+    *qy = y + (fbm(x / 9000 + 5.2f, y / 9000 + 1.3f, 3, 72) - 0.5f) * 1800 + (fbm(x / 1700 + 3.7f, y / 1700 - 8.1f, 2, 74) - 0.5f) * 260;
 }
+
+static float smin(float a, float b, float k) {
+    if (k <= 0) return fminf(a, b);
+    float h = fmaxf(k - fabsf(a - b), 0) / k;
+    return fminf(a, b) - h * h * k * 0.25f;
+}
+
+/* the node of level k in cell (i, j), with the pieces cached */
+#define NC 256
+typedef struct { int i, j, st, tst; float x, y, c, tl, tr; int down; Node n; } Slot;
+static Slot *ncache[NL];
+static Slot *slot(int k, int i, int j) {
+    if (!ncache[k]) ncache[k] = calloc(NC * NC, sizeof(Slot));
+    Slot *s = &ncache[k][(j & (NC - 1)) * NC + (i & (NC - 1))];
+    if (s->st && s->i == i && s->j == j) return s;
+    s->i = i; s->j = j; s->st = 1; s->tst = 0;
+    uint32_t h = hash2(i, j, 600 + k);
+    s->x = (i + 0.15f + 0.7f * (h & 0xffff) / 65536.0f) * LS[k];
+    s->y = (j + 0.15f + 0.7f * (h >> 16) / 65536.0f) * LS[k];
+    s->c = k == 0 ? ctrl(s->x, s->y) : 0;
+    s->down = -1;
+    return s;
+}
+static const int NB[8][2] = {{1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1}};
+/* level 0: where the water goes, 8 for nowhere (a sink) */
+static int down0(int i, int j) {
+    Slot *s = slot(0, i, j);
+    if (s->down >= 0) return s->down;
+    float best = s->c, c;
+    int d = 8;
+    for (int k = 0; k < 8; k++)
+        if ((c = slot(0, i + NB[k][0], j + NB[k][1])->c) < best) { best = c; d = k; }
+    return slot(0, i, j)->down = d;
+}
+/* the floor at a level-0 node: a sink is a lake, if it's anywhere low */
+static float floor0(int i, int j) {
+    float c = slot(0, i, j)->c;
+    if (down0(i, j) < 8) return c;
+    return c < 90 ? fminf(c, 0) - 30 : c - 12;
+}
+/* nodes (up to depth steps) upstream of a level-0 node, itself included */
+static int upstream0(int i, int j, int depth) {
+    int n = 1;
+    if (depth > 0)
+        for (int k = 0; k < 8; k++)
+            if (down0(i + NB[k][0], j + NB[k][1]) == ((k + 4) & 7)) n += upstream0(i + NB[k][0], j + NB[k][1], depth - 1);
+    return n;
+}
+
+typedef struct { float e, ab, best, jx, jy, jh, rd, rs; int ri, rj; } Env;
+static const Node *node_get(int k, int i, int j);
+/* one stretch of valley, (ax, ay, ah) to (bx, by, bh), into the envelope */
+static void valley(Env *o, float qx, float qy, float ax, float ay, float ah, float bx, float by, float bh,
+                   float w, float lc, float R, float ks, float t0) {
+    float vx = bx - ax, vy = by - ay, l2 = vx * vx + vy * vy;
+    float t = l2 > 0 ? ((qx - ax) * vx + (qy - ay) * vy) / l2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    float px = ax + vx * t, py = ay + vy * t, dx = qx - px, dy = qy - py;
+    float d = sqrtf(dx * dx + dy * dy), fl = ah + (bh - ah) * t;
+    /* a U, steepening as it rises: gentle low on the valley side, scree-steep
+     * under the crest */
+    /* the U opens out down the valley: its head is a steep headwall */
+    lc *= 0.25f + 0.75f * smoothstep(0, 0.55f, t0 + 0.5f * t);
+    /* a flat floor falls gently to a line meandering from side to side of it,
+     * where the river runs */
+    float dm = d;
+    if (w > 40 && d < 2 * w && t > 0 && t < 1) {
+        float l = sqrtf(l2), nw = fmaxf(1, floorf(l / (5 * w))), st = sinf(3.14159265f * t);
+        float cr = ((qx - ax) * vy - (qy - ay) * vx) / l, m = 0.55f * w * st * sinf(3.14159265f * t * nw);
+        dm = fabsf(cr - m);
+    }
+    float z = fmaxf(d - w, 0), a = R * z * z / (z + lc) * fminf(0.55f + z * (1 / 1300.0f), 1.1f) + 0.012f * fminf(dm, w), V = fl + a;
+    float kk = ks * smoothstep(0, 2 * ks, fminf(o->ab, a));
+    o->e = smin(o->e, V, kk);
+    o->ab = fminf(o->ab, a);
+    if (V < o->best) { o->best = V; o->jx = px; o->jy = py; o->jh = fl; }
+    o->rd = d;                                          /* (for the caller) */
+}
+/* a corrie into the envelope: a floor rising gently, then the headwall
+ * round it, steepening to crags at its rim (r^3), and on at that slope */
+/* how far out from a corrie's middle, in its radii: it's wider than it's
+ * deep, and opens out towards its lip */
+static float corrie_r(const Node *n, float qx, float qy) {
+    float ax = n->cx - n->x, ay = n->cy - n->y, al = sqrtf(ax * ax + ay * ay);
+    ax /= al; ay /= al;
+    float dx = qx - n->cx, dy = qy - n->cy, along = dx * ax + dy * ay, across = dy * ax - dx * ay;
+    along /= along < 0 ? 1.6f : 1.0f;
+    return sqrtf(along * along + across * across * 0.7f) / n->cr;
+}
+static void corrie(Env *o, float qx, float qy, const Node *n, float ks) {
+    float r = corrie_r(n, qx, qy), fb = n->h - n->cq, hw = 0.5f * n->cr;
+    float a = (r < 1 ? r * r * r : 1 + 3 * (r - 1)) * hw, V = fb + a;
+    float kk = ks * smoothstep(0, 2 * ks, fminf(o->ab, a));
+    o->e = smin(o->e, V, kk);
+    o->ab = fminf(o->ab, a);
+    if (V < o->best) { o->best = V; o->jx = n->cx; o->jy = n->cy; o->jh = fb; }
+}
+static const int ORD[5] = {0, 1, -1, 2, -2};
+/* the envelope of the valleys of levels below kn at (qx, qy) in warped
+ * space; ks the crests' softening, R the valley sides' slope */
+static void env(float qx, float qy, int kn, float u, float R, Env *o) {
+    float rd = 1e9f, ks = soft_at(u);
+    o->e = o->ab = o->best = 1e9f; o->rs = 0; o->ri = o->rj = 0; o->jx = qx; o->jy = qy; o->jh = 0;
+    for (int k = kn - 1; k >= 0; k--) {                /* (finest first: the CPU skips more) */
+        /* level 0's segments reach two cells; the others' a cell and a half,
+         * so the four cells nearest will do */
+        float fx = qx / LS[k], fy = qy / LS[k];
+        int ci = (int)ifloor(fx), cj = (int)ifloor(fy), sx = fx - ci < 0.5f ? -1 : 1, sy = fy - cj < 0.5f ? -1 : 1;
+        int nw = k ? 4 : 5;
+        float lc = LC[k] * (0.6f + 0.6f * u);
+        /* the cell it's in first, then outwards, the nearer side first */
+        for (int mj = 0; mj < nw; mj++)
+            for (int mi = 0; mi < nw; mi++) {
+                int di = ORD[mi] * sx, dj = ORD[mj] * sy;
+                const Node *n = node_get(k, ci + di, cj + dj);
+                if (n->cq <= 0) {
+                    /* (on the CPU, skip what can't reach the envelope: its
+                     * lowest floor at its nearest stays a crest's softening
+                     * above it; the GPU's sum is the same without it) */
+                    float bx = fmaxf(fmaxf(n->b0x - qx, qx - n->b1x), 0), by = fmaxf(fmaxf(n->b0y - qy, qy - n->b1y), 0);
+                    float dm = sqrtf(bx * bx + by * by), z = fmaxf(dm - n->w, 0);
+                    float a = R * z * z / (z + lc) * fminf(0.55f + z * (1 / 1300.0f), 1.1f);
+                    if (fminf(n->h, n->th) + a >= o->e + ks && a >= o->ab) {
+                        if (k == 0 && n->riv > 0 && dm < rd) {        /* (but a river's distance counts) */
+                            Env t = *o;
+                            float hm = 0.5f * (n->h + n->th);
+                            valley(&t, qx, qy, n->x, n->y, n->h, n->mx, n->my, hm, n->w, lc, R, ks, 0);
+                            float d = t.rd;
+                            valley(&t, qx, qy, n->mx, n->my, hm, n->tx, n->ty, n->th, n->w, lc, R, ks, 0.5f);
+                            d = fminf(d, t.rd);
+                            if (d < rd) { rd = d; o->rs = n->riv; o->ri = ci + di; o->rj = cj + dj; }
+                        }
+                        continue;
+                    }
+                }
+                float hm = 0.5f * (n->h + n->th);
+                valley(o, qx, qy, n->x, n->y, n->h, n->mx, n->my, hm, n->w, lc, R, ks, 0);
+                float d = o->rd;
+                valley(o, qx, qy, n->mx, n->my, hm, n->tx, n->ty, n->th, n->w, lc, R, ks, 0.5f);
+                d = fminf(d, o->rd);
+                if (n->cq > 0) corrie(o, qx, qy, n, ks);
+                if (k == 0 && n->riv > 0 && d < rd) { rd = d; o->rs = n->riv; o->ri = ci + di; o->rj = cj + dj; }
+            }
+    }
+    o->rd = rd;
+}
+
+static const Node *node_get(int k, int i, int j) {
+    Slot *s = slot(k, i, j);
+    if (s->st == 2) return &s->n;
+    Node n;
+    float x = s->x, y = s->y, u = province(x, y), R = slope_at(x, y, u);
+    n.x = x; n.y = y;
+    n.w = flat_at(k, u);
+    n.riv = 0;
+    if (k == 0) {
+        int d = down0(i, j);
+        n.h = floor0(i, j);
+        if (d < 8) {
+            Slot *t = slot(0, i + NB[d][0], j + NB[d][1]);
+            n.tx = t->x; n.ty = t->y; n.th = floor0(i + NB[d][0], j + NB[d][1]);
+        } else { n.tx = x; n.ty = y; n.th = n.h; }
+        int up = upstream0(i, j, 5);
+        n.riv = smoothstep(1.5f, 5, (float)up) * (1 - smoothstep(260, 420, n.h));
+    } else {
+        Env e;
+        env(x, y, k, u, R, &e);
+        float dj = hypotf(e.jx - x, e.jy - y), lam = lambda_at(k, u, e.jh);
+        if (dj <= 1.5f * LS[k]) {
+            n.tx = e.jx; n.ty = e.jy; n.th = e.jh;
+            n.h = fmaxf(e.jh + lam * (e.e - e.jh), e.jh + 1);
+        } else {
+            /* far from the valley below: on to the neighbour lowest on it */
+            float best = e.e;
+            int bi = -1;
+            for (int m = 0; m < 8; m++) {
+                Slot *t = slot(k, i + NB[m][0], j + NB[m][1]);
+                Env f;
+                float tu = province(t->x, t->y);
+                env(t->x, t->y, k, tu, slope_at(t->x, t->y, tu), &f);
+                if (f.e < best) { best = f.e; bi = m; }
+            }
+            if (bi >= 0) {
+                Node t = *node_get(k, i + NB[bi][0], j + NB[bi][1]);
+                n.tx = t.x; n.ty = t.y; n.th = t.h;
+                n.h = t.h + fmaxf(lam * (e.e - best), 0.5f * lam * R * hypotf(t.x - x, t.y - y));
+            } else { n.tx = x; n.ty = y; n.h = n.th = e.e; }
+        }
+    }
+    /* high in the mountains, a valley's head may be a corrie */
+    n.cq = n.cr = 0;
+    if (k == 1 || k == 2) {
+        uint32_t hc = hash2(i, j, 670 + k);
+        float p = (hc & 0xffff) / 65536.0f, q = (hc >> 16) / 65536.0f;
+        if (p < (k == 1 ? 0.36f : 0.1f) * smoothstep(0.5f, 0.75f, u) * smoothstep(350, 550, n.h)) {
+            /* only where the ground rises well behind the valley's head:
+             * there the scoop leaves a headwall */
+            float vx = n.x - n.mx, vy = n.y - n.my, l = fmaxf(sqrtf(vx * vx + vy * vy), 1), cr = (k == 1 ? 430 : 250) * (0.8f + 0.4f * q);
+            float bx = n.x + vx / l * 1.3f * cr, by = n.y + vy / l * 1.3f * cr;
+            Env b;
+            float bu = province(bx, by);
+            env(bx, by, k, bu, slope_at(bx, by, bu), &b);
+            if (b.e - n.h > 0.45f * cr) {
+                n.cq = 12 + 20 * q;
+                n.cr = cr;
+                n.cx = n.x + vx / l * 0.8f * cr; n.cy = n.y + vy / l * 0.8f * cr;
+            }
+        }
+    }
+    /* the valley bends: through a point off its middle */
+    float vx = n.tx - n.x, vy = n.ty - n.y, b = ((hash2(i, j, 650 + k) & 0xffff) / 65536.0f - 0.5f) * 0.6f;
+    n.mx = n.x + 0.5f * vx - b * vy; n.my = n.y + 0.5f * vy + b * vx;
+    n.b0x = fminf(fminf(n.x, n.mx), n.tx); n.b1x = fmaxf(fmaxf(n.x, n.mx), n.tx);
+    n.b0y = fminf(fminf(n.y, n.my), n.ty); n.b1y = fmaxf(fmaxf(n.y, n.my), n.ty);
+    s = slot(k, i, j);                                  /* (the recursion may have moved it) */
+    s->n = n; s->st = 2;
+    return &s->n;
+}
+
+/* a corrie's tarn: the level the water stands at (where it would spill,
+ * found by flooding a grid over the corrie from its edges inwards), and how
+ * far out (in corrie_r()) the water reaches; level -1000 if it holds none */
+static float tarn_level(int k, int i, int j, float *reach) {
+    const Node *n = node_get(k, i, j);
+    *reach = 0;
+    if (n->cq <= 0) return -1000;
+    Slot *s = slot(k, i, j);
+    if (s->tst) { *reach = s->tr; return s->tl; }
+    Node c = *n;
+    enum { G = 27 };
+    static float hh[G * G], fl[G * G];
+    static unsigned char done[G * G];
+    static Hn hp[G * G * 8];
+    float sp = 3.6f * c.cr / (G - 1);
+    for (int y = 0; y < G; y++)
+        for (int x = 0; x < G; x++) {
+            float qx = c.cx + (x - G / 2) * sp, qy = c.cy + (y - G / 2) * sp, u = province(qx, qy);
+            Env e;
+            env(qx, qy, NL, u, slope_at(qx, qy, u), &e);
+            hh[y * G + x] = e.e;
+        }
+    /* priority flood: fl = the level water would stand at over each cell */
+    int nh = 0;
+    memset(done, 0, sizeof done);
+    for (int q = 0; q < G * G; q++) {
+        int x = q % G, y = q / G;
+        if (x == 0 || y == 0 || x == G - 1 || y == G - 1) { fl[q] = hh[q]; done[q] = 1; hpush(hp, &nh, (Hn){hh[q], q}); }
+    }
+    while (nh) {
+        Hn v = hpop(hp, &nh);
+        int x = v.i % G, y = v.i / G;
+        for (int d = 0; d < 8; d++) {
+            int X = x + NB[d][0], Y = y + NB[d][1], q = Y * G + X;
+            if (X < 0 || Y < 0 || X >= G || Y >= G || done[q]) continue;
+            done[q] = 1;
+            fl[q] = fmaxf(hh[q], v.f);
+            hpush(hp, &nh, (Hn){fl[q], q});
+        }
+    }
+    /* the deepest flooded cell near the middle holds the tarn */
+    int best = -1;
+    float depth = 2;
+    for (int q = 0; q < G * G; q++) {
+        int x = q % G - G / 2, y = q / G - G / 2;
+        if (x * x + y * y < (G / 4) * (G / 4) && fl[q] - hh[q] > depth) { depth = fl[q] - hh[q]; best = q; }
+    }
+    float tl = -1000, tr = 0;
+    if (best >= 0) {
+        tl = fl[best] - 0.6f;
+        for (int q = 0; q < G * G; q++)
+            if (fl[q] - 0.01f > hh[q] && fabsf(fl[q] - fl[best]) < 0.01f) {
+                float r = corrie_r(&c, c.cx + (q % G - G / 2) * sp, c.cy + (q / G - G / 2) * sp);
+                if (r > tr) tr = r;
+            }
+        tr += sp / c.cr;
+    }
+    s = slot(k, i, j);
+    s->tl = tl; s->tr = tr; s->tst = 1;
+    *reach = tr;
+    return tl;
+}
+
+/* The ground at (x, z) metres: out = height (m, 0 = datum), distance to
+ * the nearest river (km; rivers run along its zero set), woodland, and the
+ * river's size (0 none .. 1). Keep in step with terrain() in FS_BAKE. */
+static void terrain_(float x, float z, float out[5], int aux) {
+    float qx, qy;
+    warp(x, z, &qx, &qy);
+    float u = province(qx, qy);
+    Env e;
+    env(qx, qy, NL, u, slope_at(qx, qy, u), &e);
+    out[0] = e.e;
+    if (!aux) return;
+    out[1] = e.rd / 1000;
+    out[2] = fbm(x / 1400 + 11.5f, z / 1400 - 3.3f, 3, 55);
+    out[3] = e.rs;
+    /* the tarns' level, if one is near */
+    out[4] = -1000;
+    for (int k = 1; k <= 2; k++) {
+        int ci = (int)ifloor(qx / LS[k]), cj = (int)ifloor(qy / LS[k]);
+        for (int dj = -2; dj <= 2; dj++)
+            for (int di = -2; di <= 2; di++) {
+                const Node *n = node_get(k, ci + di, cj + dj);
+                if (n->cq <= 0) continue;
+                float reach, tl = tarn_level(k, ci + di, cj + dj, &reach);
+                if (corrie_r(n, qx, qy) < reach) out[4] = fmaxf(out[4], tl);
+            }
+    }
+}
+static void terrain(float x, float z, float out[5]) { terrain_(x, z, out, 1); }
 
 /* height at world pixel (x, y) */
 static float T(double x, double y) {
-    float o[4];
-    terrain((float)(x * MPP) + seed_x, (float)(y * MPP) + seed_z, o);
+    float o[5];
+    terrain_((float)(x * MPP) + seed_x, (float)(y * MPP) + seed_z, o, 0);
     return o[0];
 }
 static void grad(double x, double y, double *gx, double *gy) {
@@ -553,9 +929,9 @@ static void cell_build(Cell *c, int cx, int cy) {
             if (opt_interval / hl < 3.0 * S) straight = 0;
         }
         if (!straight) continue;
-        float ground[4];
+        float ground[5];
         terrain((float)(x * MPP) + seed_x, (float)(y * MPP) + seed_z, ground);
-        if (fabsf(ground[1]) < 0.03f && ground[3] > 0.05f) continue;   /* in a river */
+        if ((ground[1] < 0.03f && ground[3] > 0.05f) || L < ground[4] + 2) continue;   /* in a river or a tarn */
         if (c->spot && hypot(x - c->sx, y - c->sy) < 60 * S) continue;
         float a = (float)atan2(ty, tx);
         if (a > (float)M_PI / 2) a -= (float)M_PI;
@@ -711,34 +1087,112 @@ static const char *VS = "#version 330 core\n" GLSL(
         }                                                                                  \
         return sum / norm;                                                                 \
     }                                                                                      \
-    float ridged(vec2 p, int oct, uint s) {                                                \
-        float sum = 0.0, amp = 0.5, norm = 0.0;                                            \
-        for (int i = 0; i < oct; i++) {                                                    \
-            float n = max(0.0, 1.0 - abs(vnoise(p, s + uint(i)) * 2.0 - 1.0));            \
-            sum += n * n * amp;                                                            \
-            norm += amp; amp *= 0.42; p = rot(p, 2.07);                                     \
-        }                                                                                  \
-        return sum / norm;                                                                 \
-    }                                                                                      \
-    vec4 terrain(vec2 p) {                                                                 \
-        vec2 w = vec2(fbm(p / 6000.0, 3, 71u), fbm(p / 6000.0 + vec2(5.2, 1.3), 3, 72u)) - 0.5; \
-        vec2 P = p + w * 2000.0;                                                           \
-        float base = fbm(P / 2800.0, 3, 11u) * 260.0;                                      \
-        float mask = smoothstep(0.42, 0.66, fbm(p / 9000.0, 3, 23u));                      \
-        float mtn = mask > 0.0 ? pow(ridged(P / 2600.0, 3, 37u), 1.4) * 1000.0 * mask : 0.0; \
-        float h = base + mtn - 110.0;                                                      \
-        vec2 q = P + (vec2(fbm(P / 4200.0 + vec2(3.1, -7.7), 3, 91u), fbm(P / 4200.0 + vec2(-1.9, 4.4), 3, 92u)) - 0.5) * 2600.0; \
-        float rv = 0.5 * sin(3.14159265 * dot(q, vec2(0.6, 0.8)) / 6000.0);                        \
-        float ron = (1.0 - smoothstep(120.0, 380.0, h)) * smoothstep(0.38, 0.5, fbm(p / 7000.0 + vec2(-4.4, 2.9), 2, 93u));                                     \
-        float carve = (1.0 - smoothstep(0.0, 1.0, abs(rv) / 0.05)) * ron;                  \
-        h = mix(h, min(h, h * 0.6 - 6.0), carve);                                          \
-        float forest = fbm(p / 1400.0 + vec2(11.5, -3.3), 3, 55u);                         \
-        return vec4(h, rv, forest, ron);                                                   \
+    )
+
+/* the ground, ported from env(), corrie() and terrain_() above: the nodes
+ * come from the CPU's cache in uNodes, four texels each (x, y, h, w), (mx,
+ * my, tx, ty), (th, riv, cq, cr), (cx, cy, tarn level, tarn reach), for
+ * cells uNB[k] .. uNB[k] + NT - 1 of level k */
+#define TERRAIN_GLSL GLSL( \
+    uniform sampler2D uNodes; \
+    uniform ivec2 uNB[4]; \
+    uniform int uNT; \
+    const float LS[4] = float[4](7200.0, 2400.0, 800.0, 267.0); \
+    const float LC[4] = float[4](800.0, 420.0, 110.0, 40.0); \
+    const int ORD[5] = int[5](0, 1, -1, 2, -2); \
+    float province(vec2 p) { \
+        return smoothstep(0.3, 0.7, fbm(vec2((0.8 * p.x - 0.6 * p.y) / 60000.0, (0.6 * p.x + 0.8 * p.y) / 24000.0), 3, 23u)); \
+    } \
+    float slope_at(vec2 p, float u) { return (0.08 + 0.56 * u * u) * (0.7 + 0.6 * fbm(p / 4000.0, 2, 29u)); } \
+    float soft_at(float u) { return 150.0 - 125.0 * u; } \
+    vec2 warp(vec2 p) { \
+        return p + vec2((fbm(p / 9000.0, 3, 71u) - 0.5) * 1800.0 + (fbm(p / 1700.0, 2, 73u) - 0.5) * 260.0, \
+                        (fbm(p / 9000.0 + vec2(5.2, 1.3), 3, 72u) - 0.5) * 1800.0 + (fbm(p / 1700.0 + vec2(3.7, -8.1), 2, 74u) - 0.5) * 260.0); \
+    } \
+    float smin(float a, float b, float k) { \
+        if (k <= 0.0) return min(a, b); \
+        float h = max(k - abs(a - b), 0.0) / k; \
+        return min(a, b) - h * h * k * 0.25; \
+    } \
+    vec4 nd(int k, ivec2 c, int m) { \
+        ivec2 t = c - uNB[k]; \
+        return texelFetch(uNodes, ivec2(t.x * 4 + m, k * uNT + t.y), 0); \
+    } \
+    float valley(inout float e, inout float ab, vec2 q, vec2 a, float ah, vec2 b, float bh, float w, float lc, float R, float ks, float t0) { \
+        vec2 v = b - a; \
+        float l2 = v.x * v.x + v.y * v.y; \
+        float t = l2 > 0.0 ? ((q.x - a.x) * v.x + (q.y - a.y) * v.y) / l2 : 0.0; \
+        t = clamp(t, 0.0, 1.0); \
+        vec2 dd = q - (a + v * t); \
+        float d = sqrt(dd.x * dd.x + dd.y * dd.y), fl = ah + (bh - ah) * t; \
+        lc *= 0.25 + 0.75 * smoothstep(0.0, 0.55, t0 + 0.5 * t); \
+        float dm = d; \
+        if (w > 40.0 && d < 2.0 * w && t > 0.0 && t < 1.0) { \
+            float l = sqrt(l2), nw = max(1.0, floor(l / (5.0 * w))), st = sin(3.14159265 * t); \
+            float cr = ((q.x - a.x) * v.y - (q.y - a.y) * v.x) / l, m = 0.55 * w * st * sin(3.14159265 * t * nw); \
+            dm = abs(cr - m); \
+        } \
+        float z = max(d - w, 0.0), aa = R * z * z / (z + lc) * min(0.55 + z * (1.0 / 1300.0), 1.1) + 0.012 * min(dm, w), V = fl + aa; \
+        float kk = ks * smoothstep(0.0, 2.0 * ks, min(ab, aa)); \
+        e = smin(e, V, kk); \
+        ab = min(ab, aa); \
+        return d; \
+    } \
+    float corrie_r(vec4 A, vec4 D, float cr, vec2 q) { \
+        vec2 ax = D.xy - A.xy; \
+        ax /= sqrt(ax.x * ax.x + ax.y * ax.y); \
+        vec2 dd = q - D.xy; \
+        float along = dd.x * ax.x + dd.y * ax.y, across = dd.y * ax.x - dd.x * ax.y; \
+        along /= along < 0.0 ? 1.6 : 1.0; \
+        return sqrt(along * along + across * across * 0.7) / cr; \
+    } \
+    /* height, distance to a river (km), woodland, river size; tarn level */ \
+    vec4 terrain(vec2 p, out float tarn) { \
+        vec2 q = warp(p); \
+        float u = province(q), R = slope_at(q, u), ks = soft_at(u); \
+        float e = 1e9, ab = 1e9, rd = 1e9, rs = 0.0; \
+        for (int k = 3; k >= 0; k--) { \
+            vec2 f = q / LS[k]; \
+            ivec2 c = ivec2(floor(f)); \
+            ivec2 sg = ivec2(f.x - float(c.x) < 0.5 ? -1 : 1, f.y - float(c.y) < 0.5 ? -1 : 1); \
+            int nw = k > 0 ? 4 : 5; \
+            float lc = LC[k] * (0.6 + 0.6 * u); \
+            for (int mj = 0; mj < nw; mj++) \
+                for (int mi = 0; mi < nw; mi++) { \
+                    ivec2 cc = c + ivec2(ORD[mi], ORD[mj]) * sg; \
+                    vec4 A = nd(k, cc, 0), B = nd(k, cc, 1), C = nd(k, cc, 2); \
+                    float hm = 0.5 * (A.z + C.x); \
+                    float d = valley(e, ab, q, A.xy, A.z, B.xy, hm, A.w, lc, R, ks, 0.0); \
+                    d = min(d, valley(e, ab, q, B.xy, hm, B.zw, C.x, A.w, lc, R, ks, 0.5)); \
+                    if (C.z > 0.0) { \
+                        vec4 D = nd(k, cc, 3); \
+                        float r = corrie_r(A, D, C.w, q), hw = 0.5 * C.w; \
+                        float aa = (r < 1.0 ? r * r * r : 1.0 + 3.0 * (r - 1.0)) * hw, V = A.z - C.z + aa; \
+                        float kk = ks * smoothstep(0.0, 2.0 * ks, min(ab, aa)); \
+                        e = smin(e, V, kk); \
+                        ab = min(ab, aa); \
+                    } \
+                    if (k == 0 && C.y > 0.0 && d < rd) { rd = d; rs = C.y; } \
+                } \
+        } \
+        tarn = -1000.0; \
+        for (int k = 1; k <= 2; k++) { \
+            ivec2 c = ivec2(floor(q / LS[k])); \
+            for (int dj = -2; dj <= 2; dj++) \
+                for (int di = -2; di <= 2; di++) { \
+                    ivec2 cc = c + ivec2(di, dj); \
+                    vec4 C = nd(k, cc, 2); \
+                    if (C.z <= 0.0) continue; \
+                    vec4 A = nd(k, cc, 0), D = nd(k, cc, 3); \
+                    if (corrie_r(A, D, C.w, q) < D.w) tarn = max(tarn, D.z); \
+                } \
+        } \
+        return vec4(e, rd / 1000.0, fbm(p / 1400.0 + vec2(11.5, -3.3), 3, 55u), rs); \
     })
 
 /* bake: texel t of the toroidal height texture holds world pixel
  * uB0 + ((t - uB0) mod N) */
-static const char *FS_BAKE = "#version 330 core\n" NOISE_GLSL GLSL(
+static const char *FS_BAKE = "#version 330 core\n" NOISE_GLSL TERRAIN_GLSL GLSL(
     uniform ivec2 uB0, uB0m, uN;
     uniform vec2 uSeed;
     uniform float uMpp;
@@ -747,9 +1201,10 @@ static const char *FS_BAKE = "#version 330 core\n" NOISE_GLSL GLSL(
     void main() {
         ivec2 t = ivec2(gl_FragCoord.xy);
         ivec2 i = uB0 + (t - uB0m + uN) % uN;
-        vec4 g = terrain(vec2(i) * uMpp + uSeed);
+        float tarn;
+        vec4 g = terrain(vec2(i) * uMpp + uSeed, tarn);
         oH = g.x;
-        oAux = vec4(g.yzw, 1.0);
+        oAux = vec4(g.yzw, tarn);
     });
 
 static const char *FS_MAP = "#version 330 core\n" GLSL(
@@ -858,7 +1313,7 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
             float R = uS * (i == 0 ? 6.0 : i == 1 ? 13.0 : 26.0);
             vec2 c = p0 + dn * R;
             float hc = Hh(c);
-            if (hc < uWater + 1.0 || hc > L - 0.5) continue;   /* a lake's basin, or not lower */
+            if (hc < max(uWater, Ax(c).w) + 1.0 || hc > L - 0.5) continue;   /* a lake's basin, or not lower */
             bool found = true;
             for (int j = 0; j < 9 && found; j++) {
                 float a = 0.6981317 * float(j);               /* the far side first */
@@ -902,14 +1357,15 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
         float grn = grain(ws);
 
         /* water: below datum, a soft shore */
-        float dsh = (h - uWater) / gl;                      /* px from the shore, + on land */
+        float wlv = max(uWater, ax.w);                      /* the sea's level, or a tarn's */
+        float dsh = (h - wlv) / gl;                      /* px from the shore, + on land */
         float wet = clamp(0.5 - dsh, 0.0, 1.0);
         col = mix(col, cWater, wet);
-        col = mix(col, cLo, wet * smoothstep(0.0, 60.0, uWater - h) * kLo * 0.6);   /* deeper, darker */
+        col = mix(col, cLo, wet * smoothstep(0.0, 60.0, wlv - h) * kLo * 0.6);   /* deeper, darker */
 
         /* woodland stipple */
         float slope = gl / uMpp;
-        float dens = smoothstep(0.56, 0.7, ax.z) * (1.0 - smoothstep(550.0, 800.0, h)) *
+        float dens = smoothstep(0.56, 0.7, ax.y) * (1.0 - smoothstep(550.0, 800.0, h)) *
                      smoothstep(4.0, 12.0, dsh) * (1.0 - smoothstep(0.5, 1.0, slope));
         if (dens > 0.0) {
             float cs = 5.0 * uS;
@@ -941,7 +1397,7 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
 
         /* waterlines: depths D (k / 1)^(4/3) out from the shore, fading */
         if (wet > 0.0) {
-            float depth = max(uWater - h, 1e-3), D1 = 9.0;
+            float depth = max(wlv - h, 1e-3), D1 = 9.0;
             float q = pow(depth / D1, 0.75);
             float gq = 0.75 * pow(depth / D1, -0.25) / D1 * gl;
             float k = floor(q + 0.5);
@@ -954,8 +1410,8 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
          * shore and fading as they go, and glints twinkling out on the open
          * water where a slow band of breeze catches the sun */
         if (wet > 0.0) {
-            float q = pow(max(uWater - h, 1e-3) / 9.0, 0.75);
-            float gq = max(0.75 * pow(max(uWater - h, 1e-3) / 9.0, -0.25) / 9.0 * gl, 1e-5);
+            float q = pow(max(wlv - h, 1e-3) / 9.0, 0.75);
+            float gq = max(0.75 * pow(max(wlv - h, 1e-3) / 9.0, -0.25) / 9.0 * gl, 1e-5);
             float var = 0.5 * sin(6.2832 * (gm.x / 2000.0 + gm.y / 1000.0)) + 0.5 * sin(6.2832 * gm.y / 2000.0);
             float sw = 0.0;
             for (int k = 0; k < 2; k++) {
@@ -1044,15 +1500,6 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
                 float hach = cov(ac, wid) * (1.0 - smoothstep(len - 0.5, len + 0.5, abs(al)));
                 col = mix(col, cSpot, hach * 0.6 * k * (1.0 - knock));
             }
-        }
-
-        /* rivers: along their valleys, widening as they come down */
-        if (abs(ax.x) < 0.06 && ax.w > 0.45) {
-            vec2 gr = 0.5 * vec2(Ax(w + ex).x - Ax(w - ex).x, Ax(w + ey).x - Ax(w - ey).x);
-            float dr = abs(ax.x) / max(length(gr), 1e-7);
-            float rw = uS * mix(0.6, 2.0, smoothstep(200.0, 10.0, h));
-            float ra = cov(dr, rw) * smoothstep(0.45, 0.75, ax.w) * (1.0 - wet) * (1.0 - knock);
-            col = mix(col, cRiver, ra * 0.8);
         }
 
         /* streams (G), roads (B: 0.25 the gap, 0.5 the casing, 1 the fill)
@@ -1287,9 +1734,51 @@ static void bake_span(int horiz, int a, int b) {
     }
 }
 
+/* the network's nodes for the bake, from the CPU's cache: NT x NT cells of
+ * each level, recentred when the ground to bake strays off them (every few
+ * km of drift); the warp moves the ground at most ~1.1 km */
+#define NT 96
+static GLuint tex_nodes;
+static int nb_ok, nb_x[NL], nb_y[NL];
+static void nodes_cover(int nx, int ny) {
+    float x0 = nx * MPP + seed_x - 1200, y0 = ny * MPP + seed_z - 1200;
+    float x1 = (nx + TN) * MPP + seed_x + 1200, y1 = (ny + TM) * MPP + seed_z + 1200;
+    int ok = nb_ok, nk[NL];
+    for (int k = 0; k < NL; k++) nk[k] = (int)fminf(NT, 25600 / LS[k] + 6);    /* cells each level needs */
+    for (int k = 0; k < NL && ok; k++)
+        ok = (int)floorf(x0 / LS[k]) - 2 >= nb_x[k] && (int)floorf(x1 / LS[k]) + 2 < nb_x[k] + nk[k] &&
+             (int)floorf(y0 / LS[k]) - 2 >= nb_y[k] && (int)floorf(y1 / LS[k]) + 2 < nb_y[k] + nk[k];
+    if (ok) return;
+    static float buf[NT * NL * NT * 4 * 4];
+    for (int k = 0; k < NL; k++) {
+        nb_x[k] = (int)floorf(0.5f * (x0 + x1) / LS[k]) - nk[k] / 2;
+        nb_y[k] = (int)floorf(0.5f * (y0 + y1) / LS[k]) - nk[k] / 2;
+        for (int j = 0; j < nk[k]; j++)
+            for (int i = 0; i < nk[k]; i++) {
+                int ci = nb_x[k] + i, cj = nb_y[k] + j;
+                Node n = *node_get(k, ci, cj);
+                float reach = 0, tl = n.cq > 0 ? tarn_level(k, ci, cj, &reach) : -1000;
+                float v[16] = {n.x, n.y, n.h, n.w, n.mx, n.my, n.tx, n.ty, n.th, n.riv, n.cq, n.cr, n.cx, n.cy, tl, reach};
+                memcpy(buf + ((size_t)(k * NT + j) * NT * 4 + i * 4) * 4, v, sizeof v);
+            }
+    }
+    glActiveTexture(GL_TEXTURE5);
+    if (!tex_nodes) tex_nodes = mk_tex(GL_RGBA32F, NT * 4, NT * NL, GL_RGBA, GL_FLOAT, buf, GL_NEAREST, GL_CLAMP_TO_EDGE);
+    else { glBindTexture(GL_TEXTURE_2D, tex_nodes); glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, NT * 4, NT * NL, GL_RGBA, GL_FLOAT, buf); }
+    glActiveTexture(GL_TEXTURE0);
+    glUseProgram(prog_bake);
+    glUniform1i(U(prog_bake, "uNodes"), 5);
+    glUniform1i(U(prog_bake, "uNT"), NT);
+    GLint nb[2 * NL];
+    for (int k = 0; k < NL; k++) { nb[2 * k] = nb_x[k]; nb[2 * k + 1] = nb_y[k]; }
+    glUniform2iv(U(prog_bake, "uNB"), NL, nb);
+    nb_ok = 1;
+}
+
 /* make the height texture cover world px [nx, nx + TN) x [ny, ny + TM) */
 static void bake(int nx, int ny) {
     if (baked && nx == bake_x && ny == bake_y) return;
+    nodes_cover(nx, ny);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_h);
     glViewport(0, 0, TN, TM);
     glUseProgram(prog_bake);
@@ -1301,6 +1790,34 @@ static void bake(int nx, int ny) {
     if (!baked || abs(nx - bake_x) >= TN || abs(ny - bake_y) >= TM) {
         glScissor(0, 0, TN, TM);
         glDrawArrays(GL_TRIANGLES, 0, 3);
+        if (getenv("CONTOURS_VERIFY")) {                /* the GPU's ground against the CPU's */
+            float *hb = malloc(sizeof(float) * TN * TM), *ab = malloc(sizeof(float) * 4 * TN * TM);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glReadPixels(0, 0, TN, TM, GL_RED, GL_FLOAT, hb);
+            glReadBuffer(GL_COLOR_ATTACHMENT1);
+            glReadPixels(0, 0, TN, TM, GL_RGBA, GL_FLOAT, ab);
+            int mx = posmod(nx, TN), my = posmod(ny, TM);
+            double worst = 0, sum = 0, wa[4] = {0};
+            int n = 0, big = 0;
+            for (int k = 0; k < 40000; k++) {
+                int tx = (int)(hash2(k, 1, 9) % TN), ty = (int)(hash2(k, 2, 9) % TM);
+                int wx = nx + posmod(tx - mx, TN), wy = ny + posmod(ty - my, TM);
+                float o[5];
+                terrain(wx * MPP + seed_x, wy * MPP + seed_z, o);
+                double d = fabs(o[0] - hb[ty * TN + tx]);
+                if (d > worst) worst = d;
+                if (d > 0.05) big++;
+                sum += d; n++;
+                for (int c = 0; c < 4; c++) {
+                    double g = ab[4 * (ty * TN + tx) + c], cc = c < 3 ? o[c + 1] : o[4];
+                    if (c == 0 && cc > 0.5) continue;   /* far from rivers: half floats */
+                    if (fabs(g - cc) > wa[c]) wa[c] = fabs(g - cc);
+                }
+            }
+            fprintf(stderr, "verify: height max |gpu-cpu| %.4f m, mean %.5f, >5cm %d/%d; aux max %.4f %.4f %.4f %.4f\n",
+                    worst, sum / n, big, n, wa[0], wa[1], wa[2], wa[3]);
+            free(hb); free(ab);
+        }
     } else {
         if (nx > bake_x) bake_span(1, bake_x + TN, nx + TN);
         if (nx < bake_x) bake_span(1, nx, bake_x);
@@ -1320,26 +1837,28 @@ typedef struct { float x, y, r; } Disc;
 /* ---- cartography: streams, settlements, roads and paths, place names ----
  * All of it hangs off world cells (CELL, cached apart from the labels'),
  * each a pure function of its cell, so nothing changes as the map drifts.
- *   - streams: from a source in each cell, traced downhill until they reach
- *     water, a river or a hollow, widening as they go;
+ *   - rivers and becks: from the head of each valley of the drainage
+ *     network, traced downhill until they reach water, a tarn, a river or
+ *     another beck (see "the becks");
  *   - settlements on low, dry, gentle ground, a few blocks round a centre;
  *   - ways: neighbouring settlements (a relative neighbourhood graph) joined
  *     by the cheapest route over the ground on a coarse grid (A*, climbing
  *     dear, height a little dear, water barred), which finds the valleys and
  *     the passes; a route that has to go high becomes a track or a footpath;
  *   - names, invented: settlements upright, water in italic (lakes, and
- *     rivers by which level set they are), hills in small italic, regions in
+ *     rivers by the lake they run to), hills in small italic, regions in
  *     spaced capitals; lakes named (up to four) per 7x7 cells,
  *     a district per 4x4.
  * Streams, roads and paths go into the mask's G, B and A channels (R stays
  * the labels' knock-out; a road's B has three levels, gap, casing and fill)
- * and FS_MAP inks them, so where they overlap they merge. Live, cells are built a few ms a frame,
+ * and FS_MAP inks them, so where they overlap they merge. Live, cells and
+ * becks are built a few ms a frame (a long river a slice at a time),
  * nearest first; offscreen, all at once. */
 typedef struct { float x, y, w; } Pt;                  /* world px; half width or alpha */
 typedef struct { int kind, n; Pt *p; } Way;
 enum { W_MAIN, W_ROAD, W_TRACK, W_PATH };
 typedef struct { int cx, cy, ok, has, size; double x, y; } Settle;
-typedef struct { int cx, cy, ok, nst, nw, river; Pt *st; Way w[8]; double rx, ry; float ra; char rname[32]; } Carto;
+typedef struct { int cx, cy, ok, nw, river; Way w[8]; double rx, ry; float ra; char rname[32]; } Carto;
 typedef struct { int rx, ry, ok, lake; double lx[4], ly[4]; char lname[4][32]; } Tract;
 #define SK 64
 #define CCK 32
@@ -1452,27 +1971,8 @@ static int simplify(Pt *p, int n, float tol) {
 }
 
 /* the cheapest route from a to b over the ground on a grid; 0 if none */
-typedef struct { float f; int i; } Hn;
-static void hpush(Hn *hp, int *n, Hn v) {
-    int i = (*n)++;
-    while (i && hp[(i - 1) / 2].f > v.f) { hp[i] = hp[(i - 1) / 2]; i = (i - 1) / 2; }
-    hp[i] = v;
-}
-static Hn hpop(Hn *hp, int *n) {
-    Hn top = hp[0], v = hp[--*n];
-    int i = 0;
-    for (;;) {
-        int c = 2 * i + 1;
-        if (c >= *n) break;
-        if (c + 1 < *n && hp[c + 1].f < hp[c].f) c++;
-        if (hp[c].f >= v.f) break;
-        hp[i] = hp[c]; i = c;
-    }
-    hp[i] = v;
-    return top;
-}
 static int route(double ax, double ay, double bx, double by, Way *out, float *maxh) {
-    double G = 9 * S, L = hypot(bx - ax, by - ay), pad = fmax(0.35 * L, 60 * S);
+    double G = 12 * S, L = hypot(bx - ax, by - ay), pad = fmax(0.35 * L, 60 * S);
     double x0 = fmin(ax, bx) - pad, y0 = fmin(ay, by) - pad;
     int nx = (int)((fabs(bx - ax) + 2 * pad) / G) + 2, ny = (int)((fabs(by - ay) + 2 * pad) / G) + 2, N = nx * ny;
     float *ht = malloc(sizeof(float) * N * 2), *gs = ht + N;
@@ -1558,69 +2058,154 @@ static int route(double ax, double ay, double bx, double by, Way *out, float *ma
     return found;
 }
 
-/* a stream from (x, y) downhill: points with w = half width; returns count */
-static int trace_stream(double x, double y, Pt **out) {
-    int cap = 256, n = 0;
-    Pt *p = malloc(sizeof(Pt) * (size_t)cap);
-    double step = 2.5 * S, len = 0, dx = 0, dy = 0;
-    float h = T(x, y), lowest = h;
-    int flat = 0, end = 0, spill = 0, stall = 0;
-    double lowlen = 0;
-    for (int i = 0; i < 420 && !end; i++) {
-        double gx, gy;
-        grad(x, y, &gx, &gy);
-        double gl = sqrt(gx * gx + gy * gy);
-        if (spill) {                                   /* across a hollow: straight on */
-            if (++spill > 50) { end = 2; break; }
-        } else if (gl > 1e-3) {
-            double ex = -gx / gl, ey = -gy / gl;
-            if (i) { ex += 0.6 * dx; ey += 0.6 * dy; }
-            double el = hypot(ex, ey);
-            if (el < 1e-6) break;
-            dx = ex / el; dy = ey / el;
-            flat = 0;
-        } else if (++flat > 24 || !i) { end = 2; break; }
-        x += dx * step; y += dy * step; len += step;
-        h = T(x, y);
-        if (h > lowest + 12) { end = 2; break; }      /* a hollow it can't spill from */
-        if (h < lowest - 0.3f) { lowest = h; lowlen = len; spill = stall = 0; }
-        else if (!spill && (h > lowest + 1.5f || ++stall > 24)) spill = 1;
-        if (h < -2) end = 1;                           /* into the water */
-        else if (!(i & 3)) {
-            float g[4];
-            terrain((float)(x * MPP) + seed_x, (float)(y * MPP) + seed_z, g);
-            if (fabsf(g[1]) < 0.012f && g[3] > 0.5f) end = 1;   /* into a river */
-        }
-        if ((i & 1) || end) {
-            if (n == cap) p = realloc(p, sizeof(Pt) * (size_t)(cap *= 2));
-            p[n++] = (Pt){(float)x, (float)y, (float)len};
-        }
+/* ---- the becks: the drainage network's rivers and becks, drawn ----
+ * Each node of levels 0 (the rivers, wider the more runs into them), 1 and
+ * 2 is the head of a beck: from a little way down its valley it's traced
+ * downhill over the ground itself (not along the network's segment: a
+ * tributary alongside may run a few metres lower and take the water, and
+ * the line should be where the water is), until it reaches a lake, a tarn,
+ * a river or a beck already traced. Points with w = half width, -w where it
+ * rises (drawn fainter). Tracing stops where another beck has run, so the
+ * work is the length of the network in view, not of every beck to the sea;
+ * it goes a slice at a time when live. */
+/* a beck being traced: ok 1 under way, 2 done */
+typedef struct {
+    int i, j, ok, n, cap, it, end, spill, stall, flat, id;
+    double x, y, dx, dy, len, lowlen;
+    float h, lowest, riv;
+    Pt *p;
+} Beck;
+#define BK 64
+static Beck becks[3][BK * BK];
+
+/* warped space back to the map: Newton on warp() */
+static void unwarp(float qx, float qy, float *px, float *py) {
+    float x = qx, y = qy;
+    for (int it = 0; it < 6; it++) {
+        float wx, wy, ax, ay, bx, by;
+        warp(x, y, &wx, &wy);
+        float rx = wx - qx, ry = wy - qy;
+        if (rx * rx + ry * ry < 0.01f) break;
+        warp(x + 1, y, &ax, &ay); warp(x, y + 1, &bx, &by);
+        float j11 = ax - wx, j21 = ay - wy, j12 = bx - wx, j22 = by - wy, det = j11 * j22 - j12 * j21;
+        if (fabsf(det) < 1e-6f) break;
+        x -= (j22 * rx - j12 * ry) / det; y -= (j11 * ry - j21 * rx) / det;
     }
-    /* drawn from a little way below the source; lost in a hollow, only down
-     * to its lowest point, and only if it's run far by then */
-    if (end != 1) {
-        while (n && p[n - 1].w > lowlen) n--;
-        if (lowlen < 170 * S) n = 0;
-    }
-    if (len < 110 * S) n = 0;
-    for (int i = 0; i < n; i++) {
-        float l = p[i].w;
-        p[i].w = S * (0.35f + 0.7f * smoothstep(0, 520 * S, l)) * (l < 30 * S ? -1 : 1);
-    }
-    n = simplify(p, n, 0.25f);
-    *out = p;
-    return n;
+    *px = x; *py = y;
 }
 
-/* a point on a river in the cell, if one runs through it, the way it runs
- * and its name (by which level set it is) */
+/* where becks have run, so the next to get there can stop: 6 px cells */
+#define OCC 65536
+static struct { int x, y, id; } occ[OCC];
+static int occ_at(int x, int y, int id, int mark) {
+    uint32_t h = hash2(x, y, 31) & (OCC - 1);
+    if (occ[h].id && occ[h].x == x && occ[h].y == y) return occ[h].id;
+    if (mark) { occ[h].x = x; occ[h].y = y; occ[h].id = id; }
+    return id;
+}
+
+/* the beck of node (k, i, j): NULL if it isn't traced and !build; build
+ * traces it on by up to `steps` steps (0: to the end), and it's drawn once
+ * it's done (ok == 2) */
+static Beck *beck_get(int k, int i, int j, int build, int steps) {
+    Beck *b = &becks[k][posmod(j, BK) * BK + posmod(i, BK)];
+    int mine = b->ok && b->i == i && b->j == j;
+    if (mine && b->ok == 2) return b;
+    if (!build) return NULL;
+    static const float w0[3] = {0.8f, 0.55f, 0.35f}, w1[3] = {1.05f, 0.85f, 0.6f};
+    double step = (k ? 5 : 7) * S;
+    if (!mine) {
+        free(b->p);
+        memset(b, 0, sizeof *b);
+        b->ok = 1; b->i = i; b->j = j;
+        Node n = *node_get(k, i, j);
+        b->riv = n.riv;
+        b->id = (int)(hash2(i, j, k) | 1);
+        /* from the valley's head, a little way down it, downhill over the
+         * ground itself (a tributary alongside may run lower and take the
+         * water: it goes where the water goes) */
+        float px, py, hx = n.x + 0.12f * (n.mx - n.x), hy = n.y + 0.12f * (n.my - n.y);
+        unwarp(hx, hy, &px, &py);
+        b->x = (px - seed_x) / MPP; b->y = (py - seed_z) / MPP;
+        b->h = b->lowest = T(b->x, b->y);
+        if (b->h < WATER_MAX) { b->ok = 2; return b; }
+        b->cap = 128;
+        b->p = malloc(sizeof(Pt) * (size_t)b->cap);
+        b->p[b->n++] = (Pt){(float)b->x, (float)b->y, 0.01f};
+    }
+    int lim = k ? 240 : 900;
+    for (int s_ = 0; b->it < lim && !b->end && (!steps || s_ < steps); s_++, b->it++) {
+        double x = b->x, y = b->y, h = b->h;
+        double gx = T(x + 1, y) - h, gy = T(x, y + 1) - h, gl = sqrt(gx * gx + gy * gy);
+        if (b->spill) {                                /* across a hollow: straight on */
+            if (++b->spill > 31) { b->end = 2; break; }
+        } else if (gl > 1e-3) {
+            double ex = -gx / gl, ey = -gy / gl;
+            if (b->it) { ex += 0.6 * b->dx; ey += 0.6 * b->dy; }
+            double el = hypot(ex, ey);
+            if (el < 1e-6) { b->end = 2; break; }
+            b->dx = ex / el; b->dy = ey / el;
+            b->flat = 0;
+        } else if (++b->flat > 15 || !b->it) { b->end = 2; break; }
+        x += b->dx * step; y += b->dy * step; b->len += step;
+        b->x = x; b->y = y;
+        float hn = b->h = T(x, y);
+        if (hn > b->lowest + 12) { b->end = 2; break; }      /* a hollow it can't spill from */
+        if (hn < b->lowest - 0.02f) { b->lowest = hn; b->lowlen = b->len; b->spill = b->stall = 0; }
+        else if (!b->spill && (hn > b->lowest + 1.5f || ++b->stall > 15)) b->spill = 1;
+        if (hn < 0) b->end = 1;                        /* into the water */
+        else if (b->it % 3 == 2) {
+            float g[5];
+            terrain((float)(x * MPP) + seed_x, (float)(y * MPP) + seed_z, g);
+            if ((k && g[1] < 0.015f && g[3] > 0.3f) || hn < g[4]) b->end = 1;   /* into a river or a tarn */
+        }
+        if (occ_at((int)floor(x / (6 * S)), (int)floor(y / (6 * S)), b->id, 0) != b->id && b->it > 2) b->end = 1;   /* into another beck */
+        if (b->n == b->cap) b->p = realloc(b->p, sizeof(Pt) * (size_t)(b->cap *= 2));
+        b->p[b->n++] = (Pt){(float)x, (float)y, (float)b->len};
+    }
+    if (!b->end && b->it < lim) return NULL;          /* more next time */
+    /* done: lost in a hollow, only down to its lowest */
+    Pt *p = b->p;
+    int nn = b->n;
+    if (b->end != 1) {
+        while (nn > 1 && p[nn - 1].w > b->lowlen) nn--;
+        if (b->lowlen < 120 * S) nn = 0;
+    }
+    if (b->len < 40 * S) nn = 0;
+    /* smoothed: on a flat floor it wanders from side to side of the fall */
+    for (int r = 0; r < 4; r++) {
+        Pt prev = p[0];
+        for (int m = 1; m + 1 < nn; m++) {
+            Pt cur = p[m];
+            p[m].x = 0.25f * prev.x + 0.5f * cur.x + 0.25f * p[m + 1].x;
+            p[m].y = 0.25f * prev.y + 0.5f * cur.y + 0.25f * p[m + 1].y;
+            prev = cur;
+        }
+    }
+    for (int m = 0; m < nn; m++) {
+        float l = p[m].w, w = S * (w0[k] + (w1[k] - w0[k]) * smoothstep(0, 600 * S, l) + (k ? 0 : 1.1f * b->riv));
+        p[m].w = l < 25 * S ? -w : w;
+    }
+    /* where it runs, for the becks after it to join */
+    for (int m = 0; m + 1 < nn; m++)
+        for (int e = 0; e < 3; e++) {
+            float x = p[m].x + (p[m + 1].x - p[m].x) * e / 3, y = p[m].y + (p[m + 1].y - p[m].y) * e / 3;
+            occ_at((int)floorf(x / (6 * S)), (int)floorf(y / (6 * S)), b->id, 1);
+        }
+    b->n = nn ? simplify(p, nn, 0.25f) : 0;
+    b->ok = 2;
+    return b;
+}
+
+/* a point on a river in the cell, if one runs through it (onto the zero of
+ * terrain()'s distance to the rivers), the way it runs and its name */
 static int river_spot(int cx, int cy, double *ox_, double *oy_, float *oa, char *buf, int n) {
     double x = (cx + 0.5) * CELL, y = (cy + 0.5) * CELL;
-    float g[4];
+    float g[5];
     int ok = 0;
     for (int it = 0; it < 6; it++) {           /* Newton onto rv = 0 */
         terrain((float)(x * MPP) + seed_x, (float)(y * MPP) + seed_z, g);
-        float e[4], f2[4];
+        float e[5], f2[5];
         terrain((float)((x + 1) * MPP) + seed_x, (float)(y * MPP) + seed_z, e);
         terrain((float)(x * MPP) + seed_x, (float)((y + 1) * MPP) + seed_z, f2);
         double rx = e[1] - g[1], ry = f2[1] - g[1], r2 = rx * rx + ry * ry;
@@ -1632,45 +2217,30 @@ static int river_spot(int cx, int cy, double *ox_, double *oy_, float *oa, char 
     }
     if (!ok || g[3] < 0.7f || g[0] < WATER_MAX + 2) return 0;
     if (x < cx * CELL || x >= (cx + 1) * CELL || y < cy * CELL || y >= (cy + 1) * CELL) return 0;
-    float e[4];
+    float e[5];
     terrain((float)((x + 1) * MPP) + seed_x, (float)(y * MPP) + seed_z, e);
-    float f2[4];
+    float f2[5];
     terrain((float)(x * MPP) + seed_x, (float)((y + 1) * MPP) + seed_z, f2);
     float a = atan2f(-(e[1] - g[1]), f2[1] - g[1]);   /* along the river */
     if (a > (float)M_PI / 2) a -= (float)M_PI;
     if (a <= -(float)M_PI / 2) a += (float)M_PI;
-    /* which river: the level set's index */
-    float wx = fbm((float)(x * MPP + seed_x) / 6000, (float)(y * MPP + seed_z) / 6000, 3, 71) - 0.5f;
-    float wz = fbm((float)(x * MPP + seed_x) / 6000 + 5.2f, (float)(y * MPP + seed_z) / 6000 + 1.3f, 3, 72) - 0.5f;
-    float X = (float)(x * MPP + seed_x) + wx * 2000, Z = (float)(y * MPP + seed_z) + wz * 2000;
-    float qx = X + (fbm(X / 4200 + 3.1f, Z / 4200 - 7.7f, 3, 91) - 0.5f) * 2600;
-    float qz = Z + (fbm(X / 4200 - 1.9f, Z / 4200 + 4.4f, 3, 92) - 0.5f) * 2600;
-    int id = (int)lroundf((0.6f * qx + 0.8f * qz) / 6000);
+    /* which river: named for the lake it runs to */
+    float qx, qy;
+    warp((float)(x * MPP) + seed_x, (float)(y * MPP) + seed_z, &qx, &qy);
+    Env ev;
+    env(qx, qy, 1, 0.5f, 0.2f, &ev);
+    int ri = ev.ri, rj = ev.rj;
+    for (int k = 0, d; k < 64 && (d = down0(ri, rj)) < 8; k++) { ri += NB[d][0]; rj += NB[d][1]; }
+    int id = (int)hash2(ri, rj, 77);
     name_make(hash2(id, 0, 1400 + opt_seed * 5), 2, buf, n);
     *ox_ = x; *oy_ = y; *oa = a;
     return 1;
 }
 
 static void carto_build(Carto *c, int cx, int cy) {
-    free(c->st);
     for (int i = 0; i < c->nw; i++) free(c->w[i].p);
     memset(c, 0, sizeof *c);
     c->cx = cx; c->cy = cy; c->ok = 1;
-    /* streams, from hashed sources high enough to run somewhere, one after
-     * another with a w = 0 point between */
-    for (int k = 0; k < 3; k++) {
-        uint32_t h = hash2(cx, cy, 700 + k + opt_seed * 11);
-        double x = (cx + 0.1 + 0.8 * ((h >> 8) & 0xfff) / 4096.0) * CELL, y = (cy + 0.1 + 0.8 * (h >> 20) / 4096.0) * CELL;
-        if (T(x, y) < 40) continue;
-        Pt *p;
-        int n = trace_stream(x, y, &p);
-        if (!n) { free(p); continue; }
-        c->st = realloc(c->st, sizeof(Pt) * (size_t)(c->nst + n + 1));
-        memcpy(c->st + c->nst, p, sizeof(Pt) * (size_t)n);
-        c->nst += n;
-        c->st[c->nst++] = (Pt){0, 0, 0};
-        free(p);
-    }
     /* a river through it, for a name */
     if (!(hash2(cx, cy, 1300) & 1)) c->river = river_spot(cx, cy, &c->rx, &c->ry, &c->ra, c->rname, sizeof c->rname);
     /* ways to the neighbours this cell's settlement owns */
@@ -1746,7 +2316,7 @@ static int district(int rx, int ry, double *x, double *y, char *buf, int n) {
     if ((h & 7) > 3) return 0;
     *x = (rx + 0.25 + 0.5 * ((h >> 3) & 0xfff) / 4096.0) * 4 * CELL;
     *y = (ry + 0.25 + 0.5 * (h >> 20) / 4096.0) * 4 * CELL;
-    float g[4];
+    float g[5];
     terrain((float)(*x * MPP) + seed_x, (float)(*y * MPP) + seed_z, g);
     int kind = g[0] > 360 ? 4 : g[2] > 0.6f && g[0] > 20 ? 6 : g[0] > 30 && g[0] < 220 ? 5 : -1;
     if (kind < 0) return 0;
@@ -1807,20 +2377,30 @@ static void build_carto(double ox, double oy) {
                 if (d == ring && !carto_get(cx, cy, 0) && now() - t0 < budget) carto_get(cx, cy, 1);
             }
     static const float CH_ST[4] = {0, 1, 0, 0}, CH_RD[4] = {0, 0, 1, 0}, CH_PT[4] = {0, 0, 0, 1};
+    /* the becks whose valleys may reach the view (the warp moves things
+     * ~1.1 km at most), fading in from their heads */
+    float q0x = (float)((ox + mx0) * MPP) + seed_x - 1200, q1x = (float)((ox + mx1) * MPP) + seed_x + 1200;
+    float q0y = (float)((oy + my0) * MPP) + seed_z - 1200, q1y = (float)((oy + my1) * MPP) + seed_z + 1200;
+    for (int k = 0; k < 3; k++)
+        for (int j = (int)floorf(q0y / LS[k]) - 2; j <= (int)floorf(q1y / LS[k]) + 2; j++)
+            for (int i = (int)floorf(q0x / LS[k]) - 2; i <= (int)floorf(q1x / LS[k]) + 2; i++) {
+                Beck *bk = beck_get(k, i, j, 0, 0);
+                if (!bk && now() - t0 < budget) bk = beck_get(k, i, j, 1, budget > 1 ? 0 : 100);
+                if (!bk) continue;
+                for (int m = 0; m + 1 < bk->n; m++) {
+                    const Pt *a = &bk->p[m], *b = &bk->p[m + 1];
+                    if (a->w == 0 || b->w == 0) continue;
+                    float x0 = (float)(a->x - ox), y0 = (float)(a->y - oy), x1 = (float)(b->x - ox), y1 = (float)(b->y - oy);
+                    if (fmaxf(x0, x1) < mx0 - 8 || fminf(x0, x1) > mx1 + 8 || fmaxf(y0, y1) < my0 - 8 || fminf(y0, y1) > my1 + 8) continue;
+                    float ch[4] = {0, a->w < 0 ? 0.5f : 1, 0, 0};
+                    mseg(x0, y0, x1, y1, fabsf(b->w), a->w < 0 ? ch : CH_ST);
+                }
+            }
     static const float CH_KN[4] = {0, 0, 0.25f, 0}, CH_RD2[4] = {0, 0, 0.5f, 0};
     for (int cy = cy0; cy <= cy1; cy++)
         for (int cx = cx0; cx <= cx1; cx++) {
             Carto *c = carto_get(cx, cy, 0);
             if (!c) continue;
-            /* the streams, fading in from their sources */
-            for (int i = 0; i + 1 < c->nst; i++) {
-                const Pt *a = &c->st[i], *b = &c->st[i + 1];
-                if (a->w == 0 || b->w == 0) continue;
-                float x0 = (float)(a->x - ox), y0 = (float)(a->y - oy), x1 = (float)(b->x - ox), y1 = (float)(b->y - oy);
-                if (fmaxf(x0, x1) < mx0 - 8 || fminf(x0, x1) > mx1 + 8 || fmaxf(y0, y1) < my0 - 8 || fminf(y0, y1) > my1 + 8) continue;
-                float ch[4] = {0, a->w < 0 ? 0.5f : 1, 0, 0};
-                mseg(x0, y0, x1, y1, fabsf(b->w), a->w < 0 ? ch : CH_ST);
-            }
             for (int i = 0; i < c->nw; i++) {
                 const Way *w = &c->w[i];
                 switch (w->kind) {
