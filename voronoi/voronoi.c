@@ -1352,41 +1352,11 @@ static void frame_positions(double t) {
 /* ==== GL ==== */
 #define GLSL(...) #__VA_ARGS__
 
-/* one instance per fan triangle of a cell (site, vertex j, vertex j+1),
- * carrying the bisector lines of its edge and the two either side, so the
- * fragment shader needs no lookups */
-static const char *VS_CELL = "#version 330 core\n" GLSL(
-    layout(location = 0) in vec4 aP01;
-    layout(location = 1) in vec2 aP2;
-    layout(location = 2) in vec4 aSite;
-    layout(location = 3) in vec4 aKey;
-    layout(location = 4) in vec4 aE0;
-    layout(location = 5) in vec4 aE1;
-    layout(location = 6) in vec4 aE2;
-    layout(location = 7) in vec4 aE3;
-    layout(location = 8) in vec4 aE4;
-    layout(location = 9) in vec4 aE5;
-    layout(location = 10) in vec4 aE6;
-    layout(location = 11) in vec4 aE7;
-    uniform vec3 uView;
-    uniform vec2 uRes;
-    out vec2 vW;
-    flat out vec4 vSite, vKey, vE0, vE1, vE2, vE3, vE4, vE5, vE6, vE7;
-    void main() {
-        vec2 w = gl_VertexID == 0 ? aP01.xy : gl_VertexID == 1 ? aP01.zw : aP2;
-        vW = w; vSite = aSite; vKey = aKey;
-        vE0 = aE0; vE1 = aE1; vE2 = aE2; vE3 = aE3; vE4 = aE4; vE5 = aE5; vE6 = aE6; vE7 = aE7;
-        vec2 px = (w - uView.xy) * uView.z;
-        gl_Position = vec4(px.x / uRes.x * 2.0 - 1.0, 1.0 - px.y / uRes.y * 2.0, 0.0, 1.0);
-    });
-
-static const char *FS_CELL = "#version 330 core\n" GLSL(
+/* shared by the cell shaders: uniforms, noise, colours */
+static const char *CELL_COMMON = GLSL(
     uniform int uStyle;
     uniform float uSp, uPx, uArea, uCen, uTime;
     uniform vec3 uLight;
-    in vec2 vW;
-    flat in vec4 vSite, vKey, vE0, vE1, vE2, vE3, vE4, vE5, vE6, vE7;
-    out vec4 o;
 
     float h21(vec2 p) { p = fract(p * vec2(234.34, 435.345)); p += dot(p, p + 34.23); return fract(p.x * p.y); }
     /* noise from the baked tile (see bake_noise): value noise with one
@@ -1436,6 +1406,44 @@ static const char *FS_CELL = "#version 330 core\n" GLSL(
         return vec3(t);
     }
 
+    );
+
+/* one instance per fan triangle of a cell (site, vertex j, vertex j+1),
+ * carrying the bisector lines of its edge and the two either side, so the
+ * fragment shader needs no lookups */
+static const char *VS_CELL = GLSL(
+    layout(location = 0) in vec4 aP01;
+    layout(location = 1) in vec2 aP2;
+    layout(location = 2) in vec4 aSite;
+    layout(location = 3) in vec4 aKey;
+    layout(location = 4) in vec4 aE0;
+    layout(location = 5) in vec4 aE1;
+    layout(location = 6) in vec4 aE2;
+    layout(location = 7) in vec4 aE3;
+    layout(location = 8) in vec4 aE4;
+    layout(location = 9) in vec4 aE5;
+    layout(location = 10) in vec4 aE6;
+    layout(location = 11) in vec4 aE7;
+    uniform vec3 uView;
+    uniform vec2 uRes;
+    out vec2 vW;
+    flat out vec4 vSite, vKey, vE0, vE1, vE2, vE3, vE4, vE5, vE6, vE7;
+    flat out vec3 vFill;
+    void main() {
+        vFill = mix(cellCol(aKey.x, aSite.xy), cellCol(aKey.y, aSite.xy), aSite.w);
+        vec2 w = gl_VertexID == 0 ? aP01.xy : gl_VertexID == 1 ? aP01.zw : aP2;
+        vW = w; vSite = aSite; vKey = aKey;
+        vE0 = aE0; vE1 = aE1; vE2 = aE2; vE3 = aE3; vE4 = aE4; vE5 = aE5; vE6 = aE6; vE7 = aE7;
+        vec2 px = (w - uView.xy) * uView.z;
+        gl_Position = vec4(px.x / uRes.x * 2.0 - 1.0, 1.0 - px.y / uRes.y * 2.0, 0.0, 1.0);
+    });
+
+static const char *FS_CELL = GLSL(
+    in vec2 vW;
+    flat in vec4 vSite, vKey, vE0, vE1, vE2, vE3, vE4, vE5, vE6, vE7;
+    flat in vec3 vFill;
+    out vec4 o;
+
     void main() {
         vec4 t1 = vec4(vKey.xy, vSite.w, vSite.z);
         vec2 s = vSite.xy, p = vW;
@@ -1476,7 +1484,7 @@ static const char *FS_CELL = "#version 330 core\n" GLSL(
         vec2 G = ss > 0.0 ? normalize(sg + 1e-6) : gmin;
 
         float area = t1.w, tA = clamp(0.3 - 0.5 * log2(max(area, 1e-3)), 0.0, 1.0);
-        vec3 fill = mix(cellCol(t1.x, s), cellCol(t1.y, s), t1.z);
+        vec3 fill = vFill;
         vec3 col, ink = vec3(0.0);
         vec2 cen = vKey.zw;
         if (uTime < 0.0) { o = vec4(fill * (1.0 - cov) + 0.001 * Ds, 1.0); return; }
@@ -1836,7 +1844,12 @@ static int caption(double wall) {
 }
 
 static void gl_init(void) {
-    prog_cell = mk_prog(VS_CELL, FS_CELL);
+    {
+        static char vs[32768], fs[65536];
+        snprintf(vs, sizeof vs, "#version 330 core\n%s\n%s", CELL_COMMON, VS_CELL);
+        snprintf(fs, sizeof fs, "#version 330 core\n%s\n%s", CELL_COMMON, FS_CELL);
+        prog_cell = mk_prog(vs, fs);
+    }
     prog_line = mk_prog(VS_LINE, FS_LINE);
     prog_text = mk_prog(VS_TEXT, FS_TEXT);
     glGenVertexArrays(1, &vao_cell);
@@ -2294,7 +2307,7 @@ int main(int argc, char **argv) {
         render(opt_at, opt_epoch + opt_at, fbo);
         glFinish();
         double first = (now() - t0) * 1000;
-        if (opt_shot) {
+        if (opt_shot && !opt_bench) {
             save_ppm(opt_shot);
             fprintf(stderr, "voronoi: %s, %dx%d, %d sites (%s), first frame %.0f ms\n", palettes[pal].name, W, H, N0,
                     kind_name[locate((long)(opt_at / TICK)).kind], first);
@@ -2302,7 +2315,7 @@ int main(int argc, char **argv) {
         }
         GLuint q;
         glGenQueries(1, &q);
-        double sum = 0, worst = 0, gsum = 0, ssum = 0, tsum = 0, sworst = 0;
+        double sum = 0, worst = 0, gsum = 0, ssum = 0, tsum = 0, sworst = 0, gmin = 1e9, tmin = 1e9;
         for (int i = 0; i < opt_bench; i++) {
             double f0 = now(), t = opt_at + (i + 1) / 60.0;
             glBeginQuery(GL_TIME_ELAPSED, q);
@@ -2312,15 +2325,16 @@ int main(int argc, char **argv) {
             GLuint64 ns = 0;
             glGetQueryObjectui64v(q, GL_QUERY_RESULT, &ns);
             double ms = (now() - f0) * 1000;
-            sum += ms; gsum += ns / 1e6; ssum += t_sim; tsum += t_tri;
+            sum += ms; gsum += ns / 1e6; gmin = fmin(gmin, ns / 1e6); tmin = fmin(tmin, t_tri); ssum += t_sim; tsum += t_tri;
             if (ms > worst) worst = ms;
             if (t_sim > sworst) sworst = t_sim;
         }
         printf("voronoi: %s, %dx%d, %d sites, %d frames from %.1f s: avg %.3f ms, worst %.3f ms per frame\n",
                palettes[pal].name, W, H, N0, opt_bench, opt_at, sum / opt_bench, worst);
-        printf("voronoi:   GPU %.3f ms, CPU: simulation %.3f ms (worst %.2f), triangulation + upload %.3f ms\n",
-               gsum / opt_bench, ssum / opt_bench, sworst, tsum / opt_bench);
+        printf("voronoi:   GPU %.3f ms (best %.3f), CPU: simulation %.3f ms (worst %.2f), triangulation + upload %.3f ms (best %.3f)\n",
+               gsum / opt_bench, gmin, ssum / opt_bench, sworst, tsum / opt_bench, tmin);
         printf("voronoi: GL renderer: %s (first frame, replaying to --at, %.0f ms)\n", (const char *)glGetString(GL_RENDERER), first);
+        if (opt_shot) save_ppm(opt_shot);   /* the last frame: a running instance, to compare with a fresh --shot */
         return 0;
     }
 
