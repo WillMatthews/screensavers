@@ -3993,6 +3993,7 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (opt_shot) {
+            render(t_wall0 + opt_at);
             glFinish();
             save_ppm(opt_shot);
             return 0;
