@@ -1,69 +1,83 @@
 /*
  * sand — a falling-sand world that runs itself: a side-on diorama of a
- * country in cross-section, from the clouds down through mountains, lakes,
- * forest and caves to the magma under everything.
+ * country in cross-section, from the clouds down through a volcano, a range,
+ * a lake, downs and forest to the sea, and below them bedded rock, caves and
+ * the magma under everything.
  *
  * The world is a grid of cells (~4-5 screen px each), simulated on the GPU
- * as a cellular automaton in integer textures, ping-ponged every tick:
+ * as a cellular automaton in integer textures, 60 ticks a second:
  *
- *   MOVE   a Margolus block pass: the grid in 2x2 blocks, the blocks offset
- *          by (0,0) and (1,1) on alternate ticks; each block rearranges its
- *          four cells at once (heavier falls through lighter, powders slide
- *          off pile edges at their own rates, liquids run sideways on a
- *          direction bit so they level, gases rise and drift, clouds go with
- *          the wind), so movement never conflicts and nothing is lost
- *   REACT  every cell looks at its 3x3 neighbourhood: temperature diffuses
- *          (in 1/16 K, through each material at its own conductivity) and
- *          relaxes towards the climate (a lapse rate with altitude, a
- *          geotherm with depth, a hot spot under the volcano); phase changes
- *          follow it; fire, growth and weather are "pull" rules decided by a
- *          hash both cells of a pair can compute, so they stay consistent
+ *   MOVE   a Margolus pass: the grid in 2x2 blocks, offset by (0,0) and
+ *          (1,1) on alternate ticks; each block rearranges its four cells at
+ *          once (heavier falls through lighter, powders slide off piles at
+ *          their own angle of repose, liquids run sideways on a direction bit
+ *          so they level, gases rise and wander, flung lava flies), so no
+ *          two moves can conflict and nothing is lost
+ *   REACT  every cell from its 3x3 neighbourhood: temperature diffuses (in
+ *          1/16 K, at each material's conductivity) and relaxes to the
+ *          climate (a lapse rate up the mountains, a geotherm down to the
+ *          magma, hot spots round the chamber and throat); phase changes
+ *          follow it; fire, growth, rain and the rest are "pull" rules whose
+ *          dice both cells of a pair can roll, so they always agree
+ *   WIND   now and then the cloud deck shifts bodily a cell downwind
+ *   SHIFT  now and then a stretch of upper crust is lifted or let down
  *
- * Materials: stone, basalt and obsidian, dirt and grass, sand and wet sand,
- * snow and ice, water, oil, lava (viscous; cools to basalt in air, quenches
- * to obsidian in water, boiling it to steam), steam and smoke, cloud, fire
- * and embers (burning wood, leaves, grass, coal), ash, seeds, grass blades,
- * wood and leaves (trees sprout from seeds, grow up a cell at a time, branch,
- * leaf out, turn and drop their leaves in autumn, and burn), silt (what
- * running water picks up and lets fall where it slows), lightning, coal.
+ * Materials: stone, basalt, obsidian, coal, dirt, grass, sand, wet sand,
+ * silt, snow, ice (floats), water, oil, lava, magma, steam (vapour, visible
+ * when hot), smoke, cloud, fire, embers, ash and cinders, seeds, grass
+ * blades and flowers, wood and leaves, leaf litter, lightning.
  *
- * Nature runs the events (all from the seed and the tick): the seasons turn
- * (snowline, leaves); water evaporates off the sea and lakes, rises, and
- * becomes cloud that rains (or snows) back down; storms blow in, with
- * lightning that can start forest fires; the volcano builds pressure, then
- * melts its throat open and fountains lava that runs down its flanks and
- * cools; columns of the country are slowly lifted or let down so it keeps
- * its relief however the water wears it away. Every couple of seconds a
- * reduction pass reads back per-column counts, which steer that geology and
- * the water budget, so the world stays in a dynamic equilibrium.
+ * Nature runs it, all from the seed and the tick:
+ *   - the year turns every 24 minutes, starting from the real season: the
+ *     snowline rises and falls, leaves colour, drop in autumn and come back
+ *     in spring; trees grow from seeds a cell at a time, branch, leaf out
+ *   - water evaporates off the sea and lakes and rises as vapour that joins
+ *     the clouds; cumulus drift on the wind; storms build wet clouds that
+ *     rain, or snow where it's cold (flakes melt to rain as they fall); a
+ *     canopy holds and drips its rain; lightning strikes in the thick of a
+ *     storm and can set the forest burning (rain puts it out); running water
+ *     picks up silt and drops it where it slows; lakes freeze over
+ *   - the volcano: quiet, a rumble as the magma column rises and smoke
+ *     pours out, then a fountain of lava that flies out, rains cinders and
+ *     runs down the flanks, setting the trees in its way alight, and cools
+ *   - the open sea beyond the edge holds the sea at its level; every two
+ *     seconds a reduction pass reads back per-column counts, and the slow
+ *     geology lifts the country where it's worn down and lets it down where
+ *     it's piled up, so the world keeps its shape however long it runs
  *
- * Rendering: cell colours with per-grain variation, light from the sky
- * propagated down through the grid a row per pass (shadowed by leaves,
- * clouds, smoke and water), emissive lava, fire and red-hot rock lighting
- * their surroundings through a mip-chain glow and blooming, a sky for the
- * real local time of day (sun, moon, stars), parallax ranges behind, a dark
- * back wall in the caves, translucent water with a bright surface line, soft
- * smoke and clouds; and a small caption of the time away.
+ * Rendering, at cell resolution then up to the screen: per-grain colour,
+ * strata folded through the rock, skylight propagated down through the grid
+ * (slanting with the sun, shadowed by canopy, cloud and water), an even
+ * cutaway light on the cross-section, the glow of hot things lighting their
+ * surroundings and blooming, soft smoke and steam, water clear in the
+ * shallows and inky in the depths, a lit lip on ground under open air and
+ * pixel outlines on rock by the caves, rain streaks and snowflakes, the sky
+ * for the real local time (sun, moon, stars, two far ranges in the haze),
+ * and a small pixel-font caption of the time away (swaylock's start time).
  *
- * Machine tie-ins (standalone only, see below): CPU load is the weather (how
- * wet the storms are) and the volcano's temper; CPU temperature warms the
- * climate (the snowline climbs).
+ * Machine tie-ins, standalone only: CPU load makes the storms wetter and the
+ * volcano angrier; CPU temperature warms the climate (the snowline climbs).
+ * They're off when spanning: the instances couldn't agree on a reading
+ * without talking, and a single differing cell would split their worlds.
  *
  * Spanning: run one instance per monitor with the same --seed and --epoch,
  * --layout (every output's logical rect) and --output = this one's index.
- * Every instance simulates the whole wall's world, deterministically from
- * the seed and the tick count (ticks clocked off the shared epoch; integer
- * state, integer hashing), and shows its own rect of it, so the world is
- * continuous across the monitors. The output under the middle of the layout
- * is the front one: the caption goes there, and the world is scaled to it;
- * a portrait output, if there is one, gets the volcano and its plumbing.
- * The sensor tie-ins are off when spanning (the instances can't agree on a
- * reading without talking, and one differing cell would split the worlds).
+ * Every instance simulates the whole wall's world, deterministically (integer
+ * state and hashing, ticks counted off the shared epoch, controllers fed only
+ * by GPU readbacks every instance makes alike) and shows its own rect of it,
+ * so the world runs on continuously across the monitors. The output under
+ * the middle of the layout is the front one: the world is scaled to it and
+ * the caption goes on it; a portrait output gets the volcano and its plumbing
+ * from sky to magma. An instance started late (a restart) fast-forwards from
+ * the epoch to catch up, as many ticks as fit in 12 ms a frame.
  *
  * Same plumbing as gauges: Xlib + GLX for --window / --root, a native
  * wlr-layer-shell surface over EGL for --layer (swaylock-plugin), and
  * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen
- * (fast-forwarding the sim to --at); --bench N times N frames.
+ * (fast-forwarding the sim to --at); --bench N times N frames, per pass.
+ * --hour H fixes the time of day, --season 0..1 the time of year (0 is
+ * midwinter), --load/--temp the tie-ins; --cell PX the cell size; --when
+ * lists the coming eruptions, storms and lightning strikes.
  *
  * Keys (window mode): q / Escape quit.
  */
@@ -515,10 +529,6 @@ static void worldgen(void) {
         h = mixf(sf, h, smooth(-NX * 0.06f, 14, ds));
         surf0[x] = h;
     }
-    if (getenv("SAND_SURF")) {
-        for (int x = 0; x < NX; x += 10) fprintf(stderr, "%d:%.0f ", x, surf0[x]);
-        fprintf(stderr, "\nsea %d lake %d w %d mt %d-%d vent %d sea_end %d\n", j_sea, lake_x, lake_w, mt_x0, mt_x1, vent_x, sea_end);
-    }
     /* the lake's level: the lower of its rims */
     float rimL = 0, rimR = 0;
     for (int x = lake_x; x >= 0 && x > lake_x - lake_w * 3; x--) if (surf0[x] > rimL) rimL = surf0[x];
@@ -570,7 +580,7 @@ static void worldgen(void) {
                 if (m == M_DIRT && y == h && !beach && alt < 0.33f) m = M_GRASS;
                 /* a coal seam, or a vein of obsidian in the old flows */
                 if (m == M_STONE && fbm2(x * 0.02f, y * 0.06f, 3, 61) > 0.56f && y < h - 14) m = M_COAL;
-                if (m == M_BASALT && vnoise2(x * 0.3f, y * 0.3f, 62) > 0.86f) m = M_OBSID;
+                if (m == M_BASALT && vnoise2(x * 0.3f, y * 0.3f, 62) > 0.9f) m = M_OBSID;
             } else if ((ds < 0 || ds < 12) && y <= j_sea) {
                 m = M_WATER;
             } else if (abs(x - lake_x) < lake_w * 3 && y <= lake_lv) {
@@ -714,7 +724,7 @@ static const char *VS = "#version 330 core\n" GLSL(
     /* falling (or rising) mobility, of 256 */ \
     const int MOB[32] = int[32](256,0,0,0,256,256,256,256,110,200, 256,256,80,200,150,40,220,0,0,0, 140,150,0,0,160,0,0,100,0,0, 0,0); \
     /* sliding off a pile, of 256: the angle of repose */ \
-    const int SLD[32] = int[32](0,0,0,0,5,3,190,4,40,0, 256,256,60,160,120,30,140,0,0,0, 90,110,0,0,180,0,0,70,0,0, 0,0); \
+    const int SLD[32] = int[32](0,0,0,0,5,3,190,4,40,30, 256,256,60,160,120,30,140,0,0,0, 90,110,0,0,180,0,0,70,0,0, 0,0); \
     /* running sideways (liquids) or wandering (gases), of 256 */ \
     const int HMV[32] = int[32](0,0,0,0,0,0,0,0,0,0, 256,220,50,110,90,0,110,0,0,0, 0,0,0,0,110,0,0,0,0,0, 0,0); \
     /* thermal conductivity, of 1024 a tick */ \
@@ -738,6 +748,7 @@ static const char *FS_MOVE = "#version 330 core\n" SIM_COMMON GLSL(
     out uvec4 o;
 
     int cls(uvec4 c) { int m = MAT(c); return m == LAVA && c.w > 0u ? 3 : CLS[m]; }
+    bool soft(uvec4 c) { int m = MAT(c); return m == LEAF || m == PLANT || m == LITTER || m == SEED; }
     int dens(uvec4 c, int j) {
         int m = MAT(c);
         if (m == LAVA && c.w > 0u) return 15;          /* fountaining: flung upwards */
@@ -821,10 +832,10 @@ static const char *FS_MOVE = "#version 330 core\n" SIM_COMMON GLSL(
             int ml = MAT(c[L]), mr = MAT(c[R]);
             bool swp = false;
             if (cl == 2 && (c[L].x & DIRR) != 0u) {
-                if (cr != 0 && dens(c[R], j) < dens(c[L], j) && r8 < HMV[ml]) swp = true;
+                if ((cr != 0 && dens(c[R], j) < dens(c[L], j) || ml == WATER && soft(c[R])) && r8 < HMV[ml]) swp = true;
                 else if ((cr == 0 || dens(c[R], j) >= dens(c[L], j)) && r8b < 128) c[L].x &= ~DIRR;
             } else if (cr == 2 && (c[R].x & DIRR) == 0u) {
-                if (cl != 0 && dens(c[L], j) < dens(c[R], j) && r8 < HMV[mr]) swp = true;
+                if ((cl != 0 && dens(c[L], j) < dens(c[R], j) || mr == WATER && soft(c[L])) && r8 < HMV[mr]) swp = true;
                 else if ((cl == 0 || dens(c[L], j) >= dens(c[R], j)) && r8b < 128) c[R].x |= DIRR;
             } else if ((cl == 3 && cr == 4) || (cl == 4 && cr == 3)) {
                 int g = cl == 3 ? L : R;
@@ -888,9 +899,10 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
         return t;
     }
     /* the throat, opening into a funnel of a crater at the top */
-    bool invent(ivec2 p) {
+    bool invent(ivec2 p) { return abs(float(p.x) - vent.x) <= 3.0 && float(p.y) > vent.y && float(p.y) <= vent.z + 16.0; }
+    bool incrater(ivec2 p) {
         float w = 3.0 + max(float(p.y) - vent.z + 3.0, 0.0) * 0.8;
-        return abs(float(p.x) - vent.x) <= w && float(p.y) > vent.y && float(p.y) <= vent.z + 24.0;
+        return abs(float(p.x) - vent.x) <= w && float(p.y) > vent.z - 6.0 && float(p.y) <= vent.z + 24.0;
     }
     /* a cumulus: a few lumps on a flat base */
     bool inpuff(ivec2 p) {
@@ -1028,8 +1040,8 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
         }
         /* magma welling up into the chamber and the throat, through whatever
          * air or fumes are in the way */
-        else if (m != LAVA && m != MAGMA && m != BOLT && (invent(p) && p.y <= magma.x || CLS[m] >= 3 && (inchamber(p) || nMagma > 0)) &&
-                 R16 < magma.y) {
+        else if (m != LAVA && m != MAGMA && m != BOLT &&
+                 ((invent(p) || incrater(p) && CLS[m] != 0) && p.y <= magma.x || CLS[m] >= 3 && (inchamber(p) || nMagma > 0)) && R16 < magma.y) {
             nm = LAVA; T = 1550 * 16; aux = 0; life = 0;
         }
         /* lightning: the path from the cloud down to the first thing it hits */
@@ -1078,6 +1090,8 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
                     nm = PLANT; life = int(nD.z) - 1; T = TE;
                 } else if (mU == LEAF && (nU.w & 256u) == 0u && Q16 < grow.w) {
                     nm = SEED; life = 0; aux = 0;
+                } else if (p.y > cb0 - 24 && p.y < cb0 && int(rnd(p, 17u) & 0xfffffu) < grow2.z) {
+                    nm = SEED; life = 0; aux = 0;                /* blown in from elsewhere */
                 } else if (inpuff(p)) {
                     nm = CLOUD; aux = puff2.x; life = 0; T = min(T, TE);
                 } else if (p.y >= cb0 && p.y <= cb1 && p.x >= storm.x && p.x < storm.y && Q16 < (nCloud >= 4 ? water.w * 6 : 0)) {
@@ -1158,6 +1172,7 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
             bool launch = invent(p) && float(p.y) > vent.z - 30.0 && Q16 < erupt.y * (mU != LAVA && CLS[mU] != 0 ? 8 : 1);
             if (launch) { aux = 25 + R8b % 60; T = max(T, 1500 * 16); x = (r1 & 0x10000u) != 0u ? x | DIRR : x & ~DIRR; }
             if (TE > T) T += (TE - T) >> 4;
+            if (invent(p) && p.y <= magma.x) T = max(T, 1200 * 16);      /* the magma column keeps hot */
             /* the column sinks back when the pressure's off */
             if (invent(p) && p.y > magma.x + 2 && aux == 0 && mU != LAVA && R16 < 1500) { nm = AIR; T = TE; }
             int exposed = 0;
@@ -1166,7 +1181,7 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
             if (nWater > 0 && R8 < 40) { nm = OBSID; aux = 0; }
             else if (T < 1000 * 16 && R8 < 24) {
                 /* it sets: as rock where it lies, as cinders in the air */
-                if (CLS[mD] >= 3 || aux > 0) { nm = ASH; aux = 1; life = 0; }
+                if (CLS[mD] != 0 || aux > 0 || incrater(p)) { nm = ASH; aux = 1; life = 0; }
                 else { nm = BASALT; aux = 0; }
             }
         }
@@ -1179,6 +1194,10 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
         }
         else if (m == STONE || m == BASALT || m == OBSID) {
             T += (TE - T) >> 7;
+            int open = 0;
+            for (int i = 0; i < 8; i++) open += int(CLS[MAT(nb[i])] >= 3);
+            if (open >= 6 && R8 < 16) { nm = m == STONE ? SAND : ASH; aux = m == STONE ? 0 : 1; life = 0; }
+            else
             if (T > 1600 * 16 && R8 < 8) { nm = LAVA; aux = 0; }
             else if (invent(p) && R16 < erupt.z) { nm = LAVA; T = max(T, 1500 * 16); aux = 0; }
             else if (m != STONE && nAir > 0 && T < 320 * 16 && nPlant + nWater > 0 && Q16 < grow2.w) nm = DIRT;
@@ -1210,6 +1229,7 @@ static const char *FS_REACT = "#version 330 core\n" SIM_COMMON GLSL(
             life = min(life + 1, 65535);
             if ((mD == DIRT || mD == GRASS) && life > 1500 && R8 < 2) nm = AIR;
             if (mD == WATER && life > 600 && R8 < 2) nm = AIR;
+            if (aux != 0 && CLS[mU] >= 3 && CLS[mD] <= 1 && life > 3000 && Q16 < 3) nm = AIR;   /* cinders weather away */
         }
         else if (m == SEED) {
             life = min(life + 1, 65535);
@@ -1280,7 +1300,7 @@ static const char *FS_SHIFT = "#version 330 core\n" SIM_COMMON GLSL(
         ivec2 p = ivec2(gl_FragCoord.xy);
         int s = texelFetch(shift, ivec2(p.x, 0), 0).r;
         /* only the upper crust moves: what's deep (the chamber, the floor) stays */
-        int base = max(base0, int(texelFetch(surf, ivec2(p.x, 0), 0).r) - 40);
+        int base = max(base0, int(texelFetch(surf, ivec2(p.x, 0), 0).r) - 14);
         uvec4 c = at(p);
         if (p.y >= base && s > 0) c = p.y == base ? uvec4((c.x & 0xff00u) | uint(STONE), at(p).y, 0u, 0u) : at(p - ivec2(0, 1));
         else if (p.y >= base && s < 0) c = p.y == N.y - 1 ? uvec4(c.x & 0xff00u, c.y, 0u, 0u) : at(p + ivec2(0, 1));
@@ -1308,7 +1328,8 @@ static const char *FS_WIND = "#version 330 core\n" SIM_COMMON GLSL(
 );
 
 /* STATS: per column: (land cells, water in all its forms, cloud + steam,
- * the ground's top row) in row 0; (lava, trees, fire, snow + ice) in row 1 */
+ * the ground's top row) in row 0; (lava, wood, fire, the top of anything
+ * standing, trees included) in row 1 */
 static const char *FS_STATS = "#version 330 core\n" SIM_COMMON GLSL(
     out uvec4 o;
     void main() {
@@ -1319,7 +1340,7 @@ static const char *FS_STATS = "#version 330 core\n" SIM_COMMON GLSL(
             int m = MAT(texelFetch(S, ivec2(p.x, y), 0));
             if (p.y == 0) {
                 bool land = m == STONE || m == BASALT || m == OBSID || m == DIRT || m == GRASS || m == SAND ||
-                            m == WETSAND || m == COAL || m == SILT;
+                            m == WETSAND || m == COAL || m == SILT || m == LAVA || m == ASH || m == MAGMA;
                 run = land ? run + 1 : 0;
                 if (land) a.x++;
                 if (run >= 3) a.w = uint(y);
@@ -1327,9 +1348,9 @@ static const char *FS_STATS = "#version 330 core\n" SIM_COMMON GLSL(
                 if (m == CLOUD || m == STEAM) a.z++;
             } else {
                 if (m == LAVA) a.x++;
-                if (m == WOOD || m == LEAF) a.y++;
+                if (m == WOOD) a.y++;
                 if (m == FIRE || m == EMBER) a.z++;
-                if (m == SNOW || m == ICE) a.w++;
+                if (CLS[m] == 0 && m != MAGMA) a.w = uint(y);       /* the top of anything standing */
             }
         }
         o = a;
@@ -1396,7 +1417,7 @@ static const char *FS_SHADE = "#version 330 core\n" SIM_COMMON NOISE_COMMON GLSL
             a = mix(vec3(0.17, 0.16, 0.17), vec3(0.27, 0.23, 0.22), b) * (0.85 + 0.25 * v);
             a *= 0.9 + 0.12 * smoothstep(0.0, 0.25, f) - 0.15 * smoothstep(0.85, 1.0, f);
         }
-        else if (m == OBSID) { a = vec3(0.09, 0.07, 0.13) * (0.8 + 0.4 * v); if (v > 0.93) a += vec3(0.25, 0.2, 0.35); }
+        else if (m == OBSID) { a = vec3(0.13, 0.10, 0.18) * (0.8 + 0.4 * v); if (v > 0.85) a += vec3(0.30, 0.26, 0.42) * (v - 0.85) * 6.0; }
         else if (m == COAL) { a = vec3(0.14, 0.13, 0.14) * (0.8 + 0.4 * v); if (v > 0.9) a += vec3(0.22, 0.22, 0.25); }
         else if (m == DIRT) {
             a = mix(vec3(0.42, 0.28, 0.17), vec3(0.33, 0.21, 0.13), vn(wp * 0.15, 7u));
@@ -1416,7 +1437,7 @@ static const char *FS_SHADE = "#version 330 core\n" SIM_COMMON NOISE_COMMON GLSL
             a = vec3(0.92, 0.95, 1.0) * (0.94 + 0.08 * v);
             if (mD == AIR) { al = 0.9; tr = 0.9; }
         }
-        else if (m == ICE) { a = mix(vec3(0.62, 0.80, 0.92), vec3(0.78, 0.90, 0.98), v); al = 0.85; tr = 0.8; }
+        else if (m == ICE) { a = mix(vec3(0.70, 0.85, 0.95), vec3(0.86, 0.94, 1.0), v); if (v > 0.9) a = vec3(0.97, 0.99, 1.0); al = 0.92; tr = 0.94; }
         else if (m == WATER) {
             bool top = mU == AIR || CLS[mU] == 3;
             a = mix(vec3(0.10, 0.36, 0.55), vec3(0.13, 0.42, 0.60), v);
@@ -1622,11 +1643,17 @@ static const char *FS_CELL = "#version 330 core\n" NOISE_COMMON GLSL(
             float r2 = sea + U * (0.02 + 0.16 * ridge(x * 0.013 + 50.0, world.w + 5.0));
             vec3 haze = mix(sky_hor, sky_top, 0.25);
             if (cf.y < r1) {
+                /* far peaks: bluer and paler towards their feet, in the haze */
                 vec3 c1 = mix(haze, vec3(0.30, 0.34, 0.45) * (amb + sun_col * 0.4), 0.42);
+                c1 = mix(c1, haze, clamp((r1 - cf.y) / (U * 0.35), 0.0, 1.0) * 0.35);
                 if (cf.y > r1 - U * 0.03 && cf.y > sea + U * 0.28) c1 = mix(c1, vec3(0.9, 0.93, 1.0) * (amb + sun_col * 0.6), 0.45);
                 bg = c1; skyvis = 0.0;
             }
-            if (cf.y < r2) { bg = mix(haze, vec3(0.20, 0.27, 0.27) * (amb + sun_col * 0.5), 0.62); skyvis = 0.0; }
+            if (cf.y < r2) {
+                vec3 c2 = mix(haze, vec3(0.20, 0.27, 0.27) * (amb + sun_col * 0.5), 0.62);
+                c2 = mix(c2, haze, clamp((r2 - cf.y) / (U * 0.25), 0.0, 1.0) * 0.3);
+                bg = c2; skyvis = 0.0;
+            }
             bg += flash * vec3(0.5, 0.5, 0.7) * (1.0 - hz * 0.5);
         }
 
@@ -1843,7 +1870,11 @@ static void gl_init(void) {
     ur.water = U(p_react, "water"); ur.storm = U(p_react, "storm"); ur.grow = U(p_react, "grow"); ur.grow2 = U(p_react, "grow2");
     ur.bolt = U(p_react, "bolt"); ur.cb0 = U(p_react, "cb0"); ur.cb1 = U(p_react, "cb1");
     ur.seaedge = U(p_react, "seaedge"); ur.puff = U(p_react, "puff"); ur.puff2 = U(p_react, "puff2");
+    t_cap = tex2d(GL_RG8, 8, 8, GL_RG, GL_UNSIGNED_BYTE, NULL, GL_NEAREST);
+}
 
+/* the world's textures (sized by it) */
+static void gl_world(void) {
     for (int i = 0; i < 2; i++) {
         t_st[i] = tex2d(GL_RGBA16UI, NX, NY, GL_RGBA_INTEGER, GL_UNSIGNED_SHORT, cells, GL_NEAREST);
         fb_st[i] = fbo_for(t_st[i], 0, 0);
@@ -1878,7 +1909,14 @@ static void gl_init(void) {
     t_shift = tex2d(GL_R8I, NX, 1, GL_RED_INTEGER, GL_BYTE, shift_col, GL_NEAREST);
     t_stats = tex2d(GL_RGBA32UI, NX, 2, GL_RGBA_INTEGER, GL_UNSIGNED_INT, NULL, GL_NEAREST);
     fb_stats = fbo_for(t_stats, 0, 0);
-    t_cap = tex2d(GL_RG8, 8, 8, GL_RG, GL_UNSIGNED_BYTE, NULL, GL_NEAREST);
+}
+
+static void gl_world_free(void) {
+    GLuint t[] = {t_st[0], t_st[1], t_lt[0], t_lt[1], t_alb, t_emi, t_mat, t_gas, t_glow, t_cell, t_over, t_surf, t_back, t_shift, t_stats};
+    GLuint f[] = {fb_st[0], fb_st[1], fb_lt[0], fb_lt[1], fb_shade, fb_glow, fb_cell, fb_stats};
+    glDeleteTextures(sizeof t / sizeof *t, t);
+    glDeleteFramebuffers(sizeof f / sizeof *f, f);
+    free(surf_cur); free(back_cur); free(shift_col);
 }
 
 /* ======================================================================
@@ -1894,7 +1932,7 @@ static float tie_load = 0.1f, tie_temp = 45;
 /* what the controllers make of the stats */
 static double W0 = -1, TR0 = -1, wdef, tdef;
 static float *target;                  /* the ground profile the geology keeps to */
-static int *surf_meas;
+static int *surf_meas, *top_meas;
 static int shift_pending;
 
 /* the uniforms the passes get, worked out once a tick */
@@ -1965,8 +2003,14 @@ static void schedule(uint32_t tk) {
     sc.bolt[2] = 0;
     float lp = (si - 0.6f) * 0.0016f;
     if (lp > 0 && h01((int)tk, 0, 331) < lp) {
-        sc.bolt[0] = sc.storm_x0 + (int)(h01((int)tk, 1, 331) * (sc.storm_x1 - sc.storm_x0));
-        sc.bolt[0] = clampi(sc.bolt[0], 8, NX - 9);
+        /* it goes for the highest thing about: of a few places under the storm */
+        int bx = 0, bh = -1;
+        for (int k = 0; k < 6; k++) {
+            int x = clampi(sc.storm_x0 + (int)(h01((int)tk, 10 + k, 331) * (sc.storm_x1 - sc.storm_x0)), 8, NX - 9);
+            int h = top_meas ? top_meas[x] : 0;
+            if (h > bh) { bh = h; bx = x; }
+        }
+        sc.bolt[0] = bx;
         sc.bolt[1] = cb0 + 2;
         sc.bolt[2] = 1;
         sc.bolt[3] = (int)(hash3((int)tk, 2, 331) & 0xffff);
@@ -1991,7 +2035,7 @@ static void schedule(uint32_t tk) {
     sc.erupt[1] = (int)(1400 * erupt * strength);
     sc.erupt[2] = (int)(60 * build + 300 * erupt);
     sc.erupt[3] = (int)(6 + 150 * build * build + 900 * erupt);
-    sc.grow2[2] = 0;
+    sc.grow2[2] = (A > 0.35f && A < 1.3f && tdef > 0.15) ? (int)(tdef * 40) : 0;     /* of 2^20 */
     {
         float lo = vent_top - 0.25f * (vent_top - vent_bot), hi = vent_top + 3;
         sc.magma[0] = (int)mixf(lo, hi, fmaxf(smooth(0.6f, 0.78f, f) * (1 - smooth(0.9f, 0.98f, f)), 0));
@@ -2014,7 +2058,8 @@ static void schedule(uint32_t tk) {
  * budget and the forest, and pick a stretch of country to lift or let down */
 static void stats_and_geology(void) {
     static unsigned *st;
-    if (!st) st = malloc((size_t)NX * 2 * 4 * sizeof *st);
+    static int st_nx;
+    if (st_nx != NX) { free(st); st = malloc((size_t)NX * 2 * 4 * sizeof *st); st_nx = NX; }   /* sized by the world */
     glBindFramebuffer(GL_FRAMEBUFFER, fb_stats);
     glViewport(0, 0, NX, 2);
     glUseProgram(p_stats);
@@ -2031,9 +2076,10 @@ static void stats_and_geology(void) {
         wat += a[1] + a[2];
         trees += b[1];
         surf_meas[x] = (int)a[3];
+        top_meas[x] = (int)b[3];
     }
     if (W0 < 0) {
-        W0 = wat; TR0 = fmax(trees, NX * 0.5);
+        W0 = wat; TR0 = fmax(trees, NX * 0.1);
         for (int x = 0; x < NX; x++) target[x] = surf_meas[x];
     }
     wdef = (W0 - wat) / fmax(W0, 1);
@@ -2043,12 +2089,22 @@ static void stats_and_geology(void) {
     int best = -1;
     float be = 0;
     for (int x = 4; x < NX - 4; x++) {
-        if (abs(x - vent_x) < 6) continue;
+        if (abs(x - vent_x) < fmaxf(crater_w + 34, (vent_top - j_sea) * 1.3f)) continue;   /* the volcano builds and breaks its own cone */
         float e = 0;
         for (int i = -4; i <= 4; i++) e += surf_meas[x + i] - target[x + i];
         e /= 9;
         float s = fabsf(e) + h01(x, (int)tick, 351) * 0.1f;
         if (s > be) { be = s; best = x; }
+    }
+    if (getenv("SAND_GEO") && tick % (HZ * 60) == 0) {
+        float ev = 0, ea = 0;
+        int nv = 0, na = 0;
+        for (int x = 0; x < NX; x++) {
+            float e = surf_meas[x] - target[x];
+            if (abs(x - vent_x) < 40) { ev += e; nv++; } else { ea += fabsf(e); na++; }
+        }
+        fprintf(stderr, "t %4.0f s  water %.3f trees %.3f  volcano mean err %+.1f  elsewhere mean |err| %.1f  best %d %.1f\n",
+                (tick - PREROLL) / (double)HZ, wdef, tdef, ev / nv, ea / na, best, be);
     }
     if (best >= 0 && be >= 2.5f) {
         float e = 0;
@@ -2057,14 +2113,14 @@ static void stats_and_geology(void) {
         int hw = 3 + (int)(h01(best, (int)tick, 352) * 4);
         memset(shift_col, 0, NX);
         for (int x = best - hw; x <= best + hw; x++)
-            if (x >= 0 && x < NX) { shift_col[x] = (signed char)s; surf_cur[x] += s; back_cur[x] += s; }
+            if (x >= 0 && x < NX && abs(x - vent_x) >= fmaxf(crater_w + 26, (vent_top - j_sea) * 1.3f - 8)) { shift_col[x] = (signed char)s; surf_cur[x] += s; back_cur[x] += s; }
         shift_pending = 1;
     }
 }
 
 /* --bench: GPU time per pass */
-enum { PR_MOVE, PR_REACT, PR_SHADE, PR_LIGHT, PR_COMP, PR_N };
-static const char *prof_name[PR_N] = {"move", "react", "shade", "light", "comp"};
+enum { PR_MOVE, PR_REACT, PR_SHADE, PR_LIGHT, PR_GLOW, PR_CELL, PR_COMP, PR_N };
+static const char *prof_name[PR_N] = {"move", "react", "shade", "light", "glow", "cell", "comp"};
 static GLuint prof_q[PR_N];
 static double prof_ms[PR_N];
 static int prof_on;
@@ -2234,6 +2290,7 @@ static void light_passes(int n, const float *slant) {
     }
 }
 
+static int light_fresh = 1;            /* the skylight hasn't been propagated yet: do it all at once */
 static void render(GLuint target, double wt, double secs, int settle) {
     /* the time of day */
     float hour;
@@ -2287,7 +2344,8 @@ static void render(GLuint target, double wt, double secs, int settle) {
     prof_end();
     /* LIGHT */
     prof_begin(PR_LIGHT);
-    light_passes(settle ? NY + 20 : 2, slant);
+    light_passes(settle || light_fresh ? NY + 20 : 2, slant);
+    light_fresh = 0;
     prof_end();
 
     /* GLOW */
@@ -2296,7 +2354,9 @@ static void render(GLuint target, double wt, double secs, int settle) {
     bind_tex(0, t_emi);
     glUniform1i(U(p_glow, "emi"), 0);
     glUniform2i(U(p_glow, "N"), NX, NY);
+    prof_begin(PR_GLOW);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    prof_end();
 
     /* CELL: only the cells this output shows */
     glBindFramebuffer(GL_FRAMEBUFFER, fb_cell);
@@ -2326,7 +2386,9 @@ static void render(GLuint target, double wt, double secs, int settle) {
     glUniform1f(U(p_cell, "flash"), flash);
     glUniform4f(U(p_cell, "world"), (float)j_sea, Ufeat, (float)cb0, (float)(opt_seed % 997));
     glUniform1ui(U(p_cell, "seed"), opt_seed);
+    prof_begin(PR_CELL);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    prof_end();
     glDisable(GL_SCISSOR_TEST);
 
     /* COMPOSITE */
@@ -2344,7 +2406,7 @@ static void render(GLuint target, double wt, double secs, int settle) {
     glUniform1f(U(p_comp, "salt"), (float)(opt_seed % 997));
     if (opt_caption && front_me && cap_text[0]) {
         float s = fmaxf(2, roundf(CS * 0.5f));
-        float mxp = 3 * CS, myp = 3 * CS;
+        float mxp = 4 * CS, myp = H - 4 * CS - cap_h * s;     /* top left, in the sky */
         glUniform4f(U(p_comp, "capr"), mxp, myp, s, 0.85f);
         glUniform2f(U(p_comp, "capsz"), (float)cap_w, (float)cap_h);
     } else glUniform4f(U(p_comp, "capr"), 0, 0, 1, 0);
@@ -2471,6 +2533,27 @@ static void save_ppm(const char *path) {
     free(px);
 }
 
+/* the world for the current size: laid out, generated, settled a little */
+static int world_w, world_h;
+static void make_world(void) {
+    if (cells) {
+        gl_world_free();
+        free(cells); free(surf0); free(target); free(surf_meas); free(top_meas);
+    }
+    world_w = W; world_h = H;
+    setup_world();
+    worldgen();
+    gl_world();
+    target = malloc(NX * sizeof *target);
+    surf_meas = calloc(NX, sizeof *surf_meas);
+    top_meas = calloc(NX, sizeof *top_meas);
+    tick = 0; cur = 0; lt_cur = 0; W0 = -1; last_bolt = 0xffffffffu;
+    memset(&sc, 0, sizeof sc);
+    light_fresh = 1;
+    for (int i = 0; i < PREROLL; i++) sim_tick();
+    W0 = -1;
+}
+
 /* catch the sim up to the tick for sim time el (seconds since the epoch),
  * spending at most budget seconds of GPU time on it */
 static void catch_up(double el, double budget) {
@@ -2480,7 +2563,7 @@ static void catch_up(double el, double budget) {
     if (behind <= 4) { while (tick < want) sim_tick(); return; }
     double t0 = now();
     while (tick < want) {
-        for (int i = 0; i < 8 && tick < want; i++) sim_tick();
+        for (int i = 0; i < (budget > 1 ? 240 : 8) && tick < want; i++) sim_tick();
         glFinish();
         if (now() - t0 > budget) break;
     }
@@ -2594,14 +2677,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    setup_world();
-    worldgen();
     gl_init();
-    target = malloc(NX * sizeof *target);
-    surf_meas = malloc(NX * sizeof *surf_meas);
-    /* the world settles a little before it begins */
-    for (int i = 0; i < PREROLL; i++) sim_tick();
-    W0 = -1;
+    make_world();
     char cap[64];
 
     if (offscreen) {
@@ -2660,8 +2737,27 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    double last_read = 0;
+    double last_read = 0, t_resized = 0;
+    int last_w = W, last_h = H;
+    /* debugging: SAND_RESIZE_TEST=N resizes the window N times, then quits */
+    int rtest = dpy && !opt_root && getenv("SAND_RESIZE_TEST") ? atoi(getenv("SAND_RESIZE_TEST")) : 0, rdone = 0;
+    double rnext = now() + 1;
     for (;;) {
+        if (rtest && now() > rnext) {
+            if (rdone == rtest) {
+                char st[256];
+                long rss = 0;
+                FILE *f = fopen("/proc/self/statm", "r");
+                if (f) { if (fscanf(f, "%*s %ld", &rss) != 1) rss = 0; fclose(f); }
+                snprintf(st, sizeof st, "sand: resize test: %d resizes, now %dx%d, world %dx%d cells, rss %ld KB\n",
+                         rdone, W, H, NX, NY, rss * (sysconf(_SC_PAGESIZE) / 1024));
+                fputs(st, stderr);
+                return 0;
+            }
+            XResizeWindow(dpy, win, 320 + (int)(hash32(rdone * 7 + 1) % 1600), 240 + (int)(hash32(rdone * 13 + 5) % 1000));
+            rdone++;
+            rnext = now() + (rdone % 3 ? 0.25 : 0.9);     /* some settle long enough to rebuild, some don't */
+        }
         if (opt_layer && !wl_poll()) return 0;
         while (dpy && XPending(dpy)) {
             XEvent ev;
@@ -2677,6 +2773,10 @@ int main(int argc, char **argv) {
             }
         }
         double t = now(), wt = wall(), el = wt - t_wall0;
+        /* standalone, a new size gets a world of its own once it's settled
+         * (a window tiled, then fullscreened; an output's mode changed) */
+        if (W != last_w || H != last_h) { last_w = W; last_h = H; t_resized = t; }
+        if (span_me < 0 && (W != world_w || H != world_h) && t - t_resized > 0.5) make_world();
         if (tied && t - last_read >= 2) {
             read_sensors();
             if (opt_load < 0 && sens_load >= 0) tie_load = sens_load;
