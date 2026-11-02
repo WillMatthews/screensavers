@@ -692,7 +692,7 @@ static void movement_layout(void) {
 }
 /* where the hammer strikes and the bell hangs */
 #define BELL_PIV_Y 32.25f
-#define HAM_PIV (V3(1.55f, 31.15f, 0))
+#define HAM_PIV (V3(0, 31.15f, 1.55f))
 
 /* ---- parts that move: each is a range of the dynamic mesh with a pivot ---- */
 enum { D_G1, D_G2, D_E, D_ANCHOR, D_PEND, D_S1, D_S2, D_FLY, D_TAIL, D_ROD, D_HAMMER, D_BELL, D_LEAD,
@@ -889,9 +889,10 @@ static void build_tower(Mesh *m) {
     mbox(m, V3(0, BELF_Y + 0.05f, 0), V3(3, 0.08f, 3), M_WOOD, 0.4f);
     mbox(m, V3(0, TOP_Y - 0.15f, 0), V3(3, 0.15f, 3), M_WOOD, 0.2f);
     for (int s = -1; s <= 1; s += 2) {
-        mbox(m, V3(0, BELF_Y + 2.5f, s * 0.95f), V3(0.16f, 2.5f, 0.12f), M_WOOD, 0.3f);
-        mbox(m, V3(0, BELF_Y + 2.5f, s * 2.5f), V3(0.16f, 2.5f, 0.12f), M_WOOD, 0.35f);
-        mbox(m, V3(0, BELF_Y + 5.05f, s * 1.7f), V3(0.18f, 0.14f, 0.95f), M_WOOD, 0.4f);
+        /* the bell frame: two beams along z on posts, the headstock across them */
+        mbox(m, V3(s * 1.05f, BELF_Y + 2.55f, s > 0 ? 2.45f : -2.45f), V3(0.13f, 2.55f, 0.13f), M_WOOD, 0.3f);
+        mbox(m, V3(s * 1.05f, BELF_Y + 2.55f, s > 0 ? -2.45f : 2.45f), V3(0.13f, 2.55f, 0.13f), M_WOOD, 0.35f);
+        mbox(m, V3(s * 1.05f, BELF_Y + 5.08f, 0), V3(0.15f, 0.14f, 2.6f), M_WOOD, 0.4f);
     }
     /* the movement's bed: two iron rails, and a slim cock rising from each
      * to carry every arbor front and back (a flatbed, open to the eye) */
@@ -946,9 +947,10 @@ static void build_tower(Mesh *m) {
     mbox(m, vadd(lampc, V3(0, -0.22f, 0)), V3(0.15f, 0.03f, 0.15f), M_IRON, 0.2f);
     lamp_pos[0] = lampc;
     nlamp = 2;
-    /* the bell's frame beam and the hammer's bracket */
-    mbox(m, V3(1.75f, HAM_PIV.y, 0), V3(0.2f, 0.12f, 0.18f), M_IRON, 0.3f);
-    mbox(m, V3(2.4f, HAM_PIV.y, 0), V3(0.6f, 0.08f, 0.08f), M_IRON, 0.3f);
+    /* the hammer's bracket off the frame, and the wire's crank to it */
+    mbox(m, V3(0, HAM_PIV.y, 1.75f), V3(0.18f, 0.12f, 0.2f), M_IRON, 0.3f);
+    mbox(m, V3(0, HAM_PIV.y, 2.2f), V3(0.08f, 0.08f, 0.35f), M_IRON, 0.3f);
+    mcyl(m, V3(X_FRONT + 0.15f, HAM_PIV.y + 0.4f, 2.85f), V3(0.0f, HAM_PIV.y + 0.4f, 1.85f), 0.018f, 0.018f, 6, 0, M_STEEL, 0.2f);
 }
 
 /* the side turret on the south-west corner: round, with a conical roof,
@@ -1169,10 +1171,10 @@ static void build_dynamic(Mesh *m) {
     part_end(id);
     /* the hammer */
     id = part_begin(D_HAMMER, HAM_PIV);
-    mcyl(m, V3(0, 0, -0.08f), V3(0, 0, 0.08f), 0.06f, 0.06f, 10, 3, M_IRON, 0.2f);
-    mcyl(m, V3(0, 0, 0), V3(-0.5f, -0.78f, 0), 0.035f, 0.035f, 8, 0, M_IRON, 0.3f);
-    mcyl(m, V3(-0.5f, -0.78f, -0.11f), V3(-0.5f, -0.78f, 0.11f), 0.1f, 0.1f, 14, 3, M_IRON, 0.5f);
-    mcyl(m, V3(0, 0, 0), V3(-0.2f, 0.22f, 0), 0.03f, 0.03f, 8, 0, M_IRON, 0.3f);
+    mcyl(m, V3(-0.08f, 0, 0), V3(0.08f, 0, 0), 0.06f, 0.06f, 10, 3, M_IRON, 0.2f);
+    mcyl(m, V3(0, 0, 0), V3(0, -0.78f, -0.5f), 0.035f, 0.035f, 8, 0, M_IRON, 0.3f);
+    mcyl(m, V3(-0.11f, -0.78f, -0.5f), V3(0.11f, -0.78f, -0.5f), 0.1f, 0.1f, 14, 3, M_IRON, 0.5f);
+    mcyl(m, V3(0, 0, 0), V3(0, 0.4f, 0.3f), 0.03f, 0.03f, 8, 0, M_IRON, 0.3f);
     part_end(id);
     /* the bell: bronze, on its headstock */
     id = part_begin(D_BELL, V3(0, BELL_PIV_Y, 0));
@@ -1184,9 +1186,9 @@ static void build_dynamic(Mesh *m) {
         mlathe(m, V3(0, 0, 0), pr, 20, 40, M_BRONZE, 0);
         for (int i = f1; i < m->n; i++) m->v[(size_t)i * VSZ + 1] -= 0.28f;
         mbox(m, V3(0, -0.1f, 0), V3(0.1f, 0.12f, 0.06f), M_IRON, 0.3f);
-        mbox(m, V3(0, 0, 0), V3(0.2f, 0.16f, 0.95f), M_WOOD, 0.2f);
-        for (int s = -1; s <= 1; s += 2) mbox(m, V3(0, 0, s * 0.5f), V3(0.21f, 0.17f, 0.04f), M_IRON, 0.3f);
-        mcyl(m, V3(0, 0, -1.2f), V3(0, 0, 1.2f), 0.05f, 0.05f, 10, 3, M_STEEL, 0);
+        mbox(m, V3(0, 0, 0), V3(0.95f, 0.16f, 0.2f), M_WOOD, 0.2f);
+        for (int s = -1; s <= 1; s += 2) mbox(m, V3(s * 0.5f, 0, 0), V3(0.04f, 0.17f, 0.21f), M_IRON, 0.3f);
+        mcyl(m, V3(-1.2f, 0, 0), V3(1.2f, 0, 0), 0.05f, 0.05f, 10, 3, M_STEEL, 0);
     }
     part_end(id);
     /* the leading-off rod up to the dials' motion work */
@@ -1747,7 +1749,7 @@ vec3 shade(vec3 p, vec3 n, vec3 v, vec3 alb, float rough, float metal, float ao,
     float NL = dot(n, uKeyDir);
     vec3 col = vec3(0.0);
     if (NL > 0.0) {
-        float sh = (dot(uCam - p, uCam - p) < 3600.0 ? shadowAt(p, n) : shadowFast(p + n * 0.05)) * cloudShadow(p);
+        float sh = (dot(uCam - p, uCam - p) < 3600.0 ? shadowAt(p, n) : shadowFast(p + n * 0.05)) * cloudShadowFast(p);
         vec3 h = normalize(uKeyDir + v);
         float NH = max(dot(n, h), 0.0), VH = max(dot(v, h), 0.0);
         vec3 F = f0 + (1.0 - f0) * pow(1.0 - VH, 5.0);
@@ -1759,7 +1761,7 @@ vec3 shade(vec3 p, vec3 n, vec3 v, vec3 alb, float rough, float metal, float ao,
     if (occ < 0.99) occ *= 0.55 + 0.6 * max(n.x, 0.0) + 0.1 * n.y;
     col += dif * amb * ao * occ;
     /* inside, light bounced off the sunlit floor and stone, warm */
-    if (occ < 0.99) col += dif * ao * (uKeyCol * max(uKeyDir.y, 0.15) * 0.11 * cloudShadow(p) + uAmbSky * 0.3) * vec3(1.0, 0.8, 0.6) * (1.0 - occ);
+    if (occ < 0.99) col += dif * ao * (uKeyCol * max(uKeyDir.y, 0.15) * 0.11 * cloudShadowFast(p) + uAmbSky * 0.3) * vec3(1.0, 0.8, 0.6) * (1.0 - occ);
     vec3 R = reflect(-v, n);
     float fr = pow(1.0 - max(dot(n, v), 0.0), 5.0);
     vec3 Fe = f0 + (max(vec3(1.0 - rough), f0) - f0) * fr;
@@ -1796,6 +1798,7 @@ layout(location = 3) in vec2 aMat;
 uniform mat4 uModel, uVP, uMirror;
 uniform float uClipY;
 out vec3 vP; out vec3 vN; out vec2 vUV; flat out int vMat; out float vAux;
+invariant gl_Position;
 void main() {
     vec4 w = uModel * vec4(aPos, 1.0);
     vP = w.xyz;
@@ -1830,9 +1833,10 @@ void stone(vec3 p, inout vec3 n, vec3 gn, vec2 uv, float aux, float rubble, out 
     float e = min(b.x, b.y);
     float joint = 1.0 - smoothstep(0.004, 0.016 + rubble * 0.02, e);
     /* weathering across the whole wall, not per block */
-    vec2 wp = vec2(p.x + p.z, p.y);
-    float W = fbm2(wp * 0.11 + 3.0);
-    float grain = fbm2(uv * 1.3 + b.z * 7.0);
+    vec2 wp = abs(gn.y) > 0.7 ? p.xz : vec2(p.x + p.z, p.y);
+    vec4 f1 = nz(wp * 0.11 + 3.0), f2 = nz(uv * 1.3 + b.z * 7.0), f3 = nz(wp * 2.6 + 3.7);
+    float W = f1.r * 0.55 + f1.g * 0.3 + f1.b * 0.15;
+    float grain = f2.r * 0.5 + f2.g * 0.3 + f2.a * 0.2;
     float h = smoothstep(0.0, 0.04, e) * 0.01 + (grain - 0.5) * 0.004;
     if (uLowQ < 0.5 && dot(uCam - p, uCam - p) < 8100.0) n = bump(p, n, h);
     vec3 warm = vec3(0.34, 0.315, 0.28), cool = vec3(0.29, 0.295, 0.29);
@@ -1841,12 +1845,13 @@ void stone(vec3 p, inout vec3 n, vec3 gn, vec2 uv, float aux, float rubble, out 
     c *= 0.7 + 0.45 * W;
     if (rubble > 0.5) c *= vec3(0.82, 0.8, 0.78);
     /* grime run down from the ledges, long and vertical */
-    float streak = nz(vec2(wp.x * 1.4, wp.y * 0.05)).g * 0.6 + nz(vec2(wp.x * 4.1, wp.y * 0.12)).b * 0.4;
+    vec4 fs = nz(vec2(wp.x * 1.4, wp.y * 0.05));
+    float streak = fs.g * 0.6 + fs.a * 0.4;
     c *= 1.0 - 0.38 * smoothstep(0.42, 0.8, streak) * (1.0 - abs(gn.y));
     /* lichens: orange spots and grey-green crust, on what faces the weather */
-    float lich = smoothstep(0.74, 0.8, nz(wp * 2.6 + 3.7).a * 0.7 + nz(wp * 0.4).b * 0.4) * (0.4 + 0.6 * smoothstep(0.3, 1.0, gn.y + 0.5));
+    float lich = smoothstep(0.74, 0.8, f3.a * 0.7 + f1.a * 0.4) * (0.4 + 0.6 * smoothstep(0.3, 1.0, gn.y + 0.5));
     c = mix(c, vec3(0.50, 0.35, 0.14), lich * 0.55 * (1.0 - rubble));
-    float lich2 = smoothstep(0.64, 0.72, nz(wp * 0.23 + 9.1).r + grain * 0.1);
+    float lich2 = smoothstep(0.64, 0.72, f1.g + grain * 0.1);
     c = mix(c, vec3(0.36, 0.38, 0.33), lich2 * 0.3);
     /* damp low down: green-black algae, salt, the high-water mark */
     float damp = 1.0 - smoothstep(PLAT + 0.2, PLAT + 2.2 + W * 1.5, p.y);
@@ -1876,10 +1881,12 @@ void main() {
     float wet = uWet;
     vec2 uv = vUV;
     int m = vMat;
+\n#ifdef G_STONE\n
     if (m == 0 || m == 1) {
         stone(vP, n, gn, uv, vAux, float(m), alb, rough, ao);
         wet = max(wet, 1.0 - smoothstep(uTide + 0.2, uTide + 1.4, vP.y));
-    } else if (m == 10) {
+    }
+    if (m == 10) {
         /* the causeway's blocks: worn, weedy, wet after the tide */
         stone(vP, n, gn, uv * vec2(1.0, 1.25) + vec2(0.0, 0.11), vAux, 0.0, alb, rough, ao);
         float g = fbm2(vP.xz * 0.4);
@@ -1890,33 +1897,39 @@ void main() {
         alb = mix(alb, vec3(0.55, 0.53, 0.48), barn * 0.6);
         wet = max(wet, 1.0 - smoothstep(uTide + 0.15, uTide + 0.9, vP.y));
         wet = max(wet, 0.35 * tidal);
-    } else if (m == 2 || m == 15) {
+    }\n#endif\n\n#ifdef G_METAL\n
+    if (m == 2 || m == 15) {
         float r = fbm2(uv * 1.7 + vP.xz * 0.3 + vP.y * 0.4);
         alb = m == 2 ? vec3(0.075, 0.08, 0.075) : vec3(0.32, 0.32, 0.33);
         alb = mix(alb, vec3(0.24, 0.10, 0.04), smoothstep(0.45, 0.8, r) * (m == 2 ? 0.8 : 0.4));
         rough = m == 2 ? 0.55 : 0.32; metal = m == 2 ? 0.4 : 0.9;
-    } else if (m == 3) {
+    }
+    if (m == 3) {
         /* brass, tarnished, rubbed bright on the edges that work */
-        float t = fbm2(uv * 1.3 + vP.yz * 0.7 + vAux * 5.0);
-        alb = mix(vec3(0.78, 0.58, 0.26), vec3(0.42, 0.30, 0.14), smoothstep(0.35, 0.75, t) * 0.8);
-        float verd = smoothstep(0.72, 0.8, nz(vP.yz * 0.9 + vAux).b);
-        rough = 0.28 + 0.25 * t;
+        float t = fbm2(uv * 2.3 + vP.yz * 1.7 + vAux * 5.0);
+        alb = mix(vec3(0.86, 0.66, 0.32), vec3(0.55, 0.40, 0.18), smoothstep(0.4, 0.8, t) * 0.7);
+        float verd = smoothstep(0.82, 0.9, nz(vP.yz * 14.0 + vAux * 3.0).a * 0.6 + nz(vP.yz * 1.5).b * 0.5) * 0.6;
+        rough = 0.22 + 0.2 * t;
         metal = 1.0 - verd;
-        alb = mix(alb, vec3(0.22, 0.42, 0.33), verd);
-    } else if (m == 4) {
+        alb = mix(alb, vec3(0.24, 0.42, 0.34), verd);
+    }
+    if (m == 4) {
         /* bronze with verdigris running down */
-        float s = nz(vec2(atan(vP.z, vP.x - 0.0) * 1.3, vP.y * 0.12)).g;
+        float s = nz(vec2(atan(vP.z, vP.x) * 3.0, vP.y * 0.5)).b;
         float t = fbm2(vP.xz * 2.0 + vP.y);
-        alb = mix(vec3(0.46, 0.30, 0.15), vec3(0.26, 0.47, 0.39), smoothstep(0.4, 0.75, s + 0.2 * t));
-        metal = 1.0 - smoothstep(0.45, 0.7, s + 0.2 * t);
+        float g = smoothstep(0.72, 0.95, s + 0.25 * t) * 0.8;
+        alb = mix(vec3(0.40, 0.26, 0.13), vec3(0.24, 0.43, 0.36), g);
+        metal = 1.0 - g;
         rough = 0.35 + 0.25 * t;
-    } else if (m == 5 || m == 14) {
+    }
+    if (m == 5 || m == 14) {
         float g = nz(vec2(uv.x * 0.6 + vAux, uv.y * 7.0 + vAux * 3.0)).g;
         float plank = m == 14 ? smoothstep(0.0, 0.02, abs(fract(vP.x * 4.5) - 0.5) - 0.46) : 0.0;
         alb = mix(vec3(0.21, 0.14, 0.09), vec3(0.13, 0.09, 0.06), g) * (m == 14 ? 0.8 : 1.0);
         alb *= 1.0 - plank * 0.7;
         rough = 0.75;
-    } else if (m == 6) {
+    }
+    if (m == 6) {
         /* copper gone green, with standing seams and dark runs */
         float seam = 1.0 - smoothstep(0.0, 0.035, abs(fract(uv.x * 1.6) - 0.5) * 0.625 - 0.0);
         float run = nz(vec2(uv.x * 3.0, uv.y * 0.08)).g;
@@ -1925,7 +1938,8 @@ void main() {
         alb *= 0.85 + 0.3 * t;
         if (uLowQ < 0.5) n = bump(vP, n, seam * 0.02);
         rough = 0.55;
-    } else if (m == 7 || m == 13 || m == 12) {
+    }\n#endif\n\n#ifdef G_SPECIAL\n
+    if (m == 7 || m == 13 || m == 12) {
         /* lantern glass, the gear room lamp, the window: lit at night */
         int k = int(vAux + 0.5);
         float on = uNight;
@@ -1940,7 +1954,8 @@ void main() {
         if (m == 12) frame = step(0.92, max(fract(vP.x * 2.6), fract(vP.y * 2.2)));
         vec3 warm = m == 12 ? vec3(1.0, 0.55, 0.22) * 2.2 : vec3(1.0, 0.63, 0.3) * 9.0;
         emis = warm * on * flick * (1.0 - frame);
-    } else if (m == 8) {
+    }
+    if (m == 8) {
         /* a dial: opal glass in an iron chapter ring, the hands over it */
         int f = int(vAux + 0.5);
         vec2 q = uv;
@@ -1976,7 +1991,8 @@ void main() {
         rough = mix(0.25, 0.5, max(ink, hand));
         metal = 0.0;
         emis = vec3(1.0, 0.82, 0.55) * 0.9 * uNight * (1.0 - max(ink, hand)) * (1.0 - grime * 0.6) * (1.0 - sh * 0.5);
-    } else if (m == 9) {
+    }
+    if (m == 9) {
         /* a drum face: an ivory enamel numeral plate, the numeral in black */
         int d = int(vAux + 0.5);
         vec2 q = vec2(uv.x, 1.0 - uv.y);
@@ -1989,10 +2005,12 @@ void main() {
         alb *= 0.7 + 0.3 * edge;
         rough = 0.35;
         emis = alb * vec3(1.0, 0.75, 0.45) * 0.35 * uNight;          /* a small lamp above the niche */
-    } else if (m == 11) {
+    }\n#endif\n\n#ifdef G_METAL\n
+    if (m == 11) {
         alb = vec3(0.22, 0.17, 0.11) * (0.8 + 0.4 * nz(vec2(vP.y * 9.0, vP.x)).r);
         rough = 0.85;
     }
+\n#endif\n
     if (wet > 0.0 && m != 7 && m != 8 && m != 12 && m != 13) {
         alb *= 1.0 - 0.45 * wet;
         rough = mix(rough, 0.12, wet * 0.85);
@@ -2027,35 +2045,40 @@ void main() {
     float slope = 1.0 - n.y;
     /* texture coordinates that don't smear down the steep faces */
     vec2 w = n.y > 0.55 ? p.xz : (abs(n.x) > abs(n.z) ? p.zy : p.xy);
-    float g1 = fbm2(w * 0.11), g2 = nz(w * 0.53).a, g3 = nz(w * 2.1).b;
+    vec4 f1 = nz(w * 0.11), f2 = nz(w * 0.53);
+    float g1 = f1.r * 0.55 + f1.g * 0.3 + f1.b * 0.15, g2 = f2.b, g3 = f2.a;
     float fineK = 1.0 - smoothstep(30.0, 140.0, dist);
     /* rock: craggy, cracked */
-    float cr = 1.0 - smoothstep(0.0, 0.05, abs(nz(w * 0.21 + p.y * 0.05).g - 0.5));
-    float h = g2 * 0.15 + g3 * 0.05 * fineK - cr * 0.06 * fineK + g1 * 0.25;
+    /* what kind of ground: shingle and sand low and level, turf up top, rock elsewhere */
+    float shore = smoothstep(80.0, 120.0, p.z);
+    float level = smoothstep(0.25, 0.08, slope);
+    float sandK = shore * level * (1.0 - smoothstep(1.8, 3.5, p.y)) * smoothstep(-3.0, -0.5, p.y);
+    float turfK = shore * smoothstep(0.35, 0.15, slope) * smoothstep(4.0, 7.0, p.y + g1 * 3.0);
+    float rockK = 1.0 - max(sandK, turfK);
+    float cr = (1.0 - smoothstep(0.0, 0.05, abs(nz(w * 0.21 + p.y * 0.05).g - 0.5))) * rockK;
+    float h = g2 * 0.15 * rockK + g3 * 0.05 * fineK * rockK - cr * 0.06 * fineK + g1 * 0.25;
     if (uLowQ < 0.5) n = bump(p, n, h * 1.2);
     vec3 rock = mix(vec3(0.11, 0.105, 0.10), vec3(0.21, 0.195, 0.175), g1) * (0.8 + 0.4 * g2);
     rock *= 1.0 - cr * 0.45;
     /* orange and grey lichens above the splash zone, a black band below */
     float above = smoothstep(2.9, 3.8, p.y);
-    float lich = smoothstep(0.7, 0.78, nz(w * 0.37 + 4.0).b + g3 * 0.12) * above * smoothstep(0.2, 0.8, n.y + 0.3);
-    rock = mix(rock, vec3(0.47, 0.32, 0.11), lich * 0.7);
-    rock = mix(rock, vec3(0.30, 0.30, 0.28), smoothstep(0.64, 0.72, nz(w * 0.29 + 8.0).r + g3 * 0.1) * above * 0.4);
+    float lich = smoothstep(0.76, 0.82, f2.a * 0.7 + f1.b * 0.45) * above * smoothstep(0.2, 0.8, n.y + 0.3);
+    rock = mix(rock, vec3(0.45, 0.30, 0.11), lich * 0.6);
+    rock = mix(rock, vec3(0.30, 0.30, 0.28), smoothstep(0.64, 0.72, f1.g + g3 * 0.1) * above * 0.4);
     rock = mix(rock, vec3(0.05, 0.05, 0.045), smoothstep(2.0, 2.6, p.y) * (1.0 - smoothstep(2.9, 3.6, p.y)) * smoothstep(0.3, 0.6, g2) * 0.8);
     /* the intertidal: barnacles, then wrack */
     float tid = 1.0 - smoothstep(1.8, 2.8, p.y + g1 * 0.6);
-    float barn = step(0.62, hash12(floor(w * 18.0 + p.y * 7.0))) * smoothstep(-0.5, 0.5, p.y) * tid;
+    float barn = smoothstep(0.7, 0.85, nz(w * 3.0 + p.y).a) * smoothstep(-0.5, 0.5, p.y) * tid * fineK;
     rock = mix(rock, vec3(0.08, 0.075, 0.04), tid * 0.8);
-    rock = mix(rock, vec3(0.5, 0.48, 0.42), barn * 0.5);
+    rock = mix(rock, vec3(0.5, 0.48, 0.42), barn * 0.4);
     float weed = (1.0 - smoothstep(-0.2, 1.2, p.y + g2 * 0.8)) * smoothstep(0.3, 0.6, g1 + g3 * 0.3);
     rock = mix(rock, vec3(0.09, 0.075, 0.025), weed);
-    /* the shore: shingle and sand low down, turf and heather up top */
-    float shore = smoothstep(80.0, 120.0, p.z + 40.0 * step(abs(p.x), 30.0) * 0.0);
-    float level = smoothstep(0.25, 0.08, slope);
-    float sandK = shore * level * (1.0 - smoothstep(1.8, 3.5, p.y)) * smoothstep(-3.0, -0.5, p.y);
-    vec3 sand = mix(vec3(0.42, 0.39, 0.33), vec3(0.30, 0.28, 0.25), g3) * (0.85 + 0.3 * step(0.7, hash12(floor(w * 9.0))));
-    float turfK = shore * smoothstep(0.35, 0.15, slope) * smoothstep(4.0, 7.0, p.y + g1 * 3.0);
+    /* wet sand and shingle: ripples low down, pebbles higher up */
+    float rip = sin(w.y * 7.0 + w.x * 1.3 + g1 * 9.0) * 0.5 + 0.5;
+    vec3 sand = mix(vec3(0.40, 0.37, 0.31), vec3(0.29, 0.27, 0.24), g2 * 0.7 + rip * 0.3 * (1.0 - smoothstep(0.5, 1.5, p.y)));
+    sand = mix(sand, vec3(0.24, 0.23, 0.22), smoothstep(0.55, 0.75, g3) * smoothstep(0.8, 2.0, p.y) * 0.7);
     vec3 turf = mix(vec3(0.075, 0.095, 0.045), vec3(0.16, 0.15, 0.08), g1 * 0.7 + g2 * 0.3);
-    turf = mix(turf, vec3(0.12, 0.07, 0.08), smoothstep(0.55, 0.7, nz(w * 0.05).r) * 0.85);
+    turf = mix(turf, vec3(0.12, 0.07, 0.08), smoothstep(0.55, 0.7, f1.r) * 0.85);
     vec3 alb = rock;
     alb = mix(alb, sand, sandK);
     alb = mix(alb, turf, turfK);
@@ -2327,7 +2350,13 @@ void main() {
     vec3 p = aP.xyz;
     float a = iB.x, s = sign(p.x), ax = abs(p.x);
     vec3 n = vec3(0.0, 1.0, 0.0);
-    if (aP.w > 0.5) {
+    if (aP.w < 0.5 || aP.w > 2.5) n = normalize(vec3(p.x, (p.y - 0.02) * 1.2, 0.15 * sign(p.z)) + vec3(0.0, 0.001, 0.0));
+    if (aP.w > 0.5 && aP.w < 2.5 && a > 5.0) {
+        /* perched: the wings folded along the back */
+        p.x = s * (0.06 + ax * 0.06);
+        p.y = 0.05 + ax * 0.03;
+        p.z = p.z - ax * 0.25;
+    } else if (aP.w > 0.5 && aP.w < 2.5) {
         float r1 = min(ax, 0.45) - 0.08, r2 = max(ax - 0.45, 0.0);
         float a2 = aP.w > 1.5 ? a * 1.6 - 0.25 : a;
         p.x = s * (0.08 + r1 * cos(a) + r2 * cos(a2));
@@ -2354,7 +2383,7 @@ void main() {
     vec3 v = normalize(uCam - vP);
     vec3 n = normalize(vN);
     if (dot(n, v) < 0.0) n = -n;
-    vec3 alb = vW > 1.5 ? vec3(0.05) : vec3(0.72, 0.73, 0.74);
+    vec3 alb = vW > 2.5 ? vec3(0.75, 0.6, 0.15) : vW > 1.5 ? vec3(0.05) : vec3(0.62, 0.64, 0.66);
     if (vW < 0.5) alb = vec3(0.85);
     vec3 col = shade(vP, n, v, alb, 0.7, 0.0, 1.0, 0.5);
     /* the underside catches the light off the sea */
@@ -2371,6 +2400,12 @@ void main() { gl_Position = uVP * (uModel * vec4(aPos, 1.0)); }
 );
 static const char *FS_DEPTH = GLSL(
 void main() {}
+);
+/* the depth pre-pass: VS_MESH's positions exactly, no shading */
+static const char *FS_PRE = GLSL(
+in vec3 vP;
+out vec4 oCol;
+void main() { oCol = vec4(0.0); }
 );
 
 /* ---- light in the air: shafts through the clouds and the broken wall ---- */
@@ -2426,8 +2461,8 @@ void main() {
             float t1 = -b - s, t2 = -b + s;
             if (t1 > 0.0 && t1 < tmax) hit += 1.0;
             if (t2 > 0.0 && t2 < tmax) hit += 1.0;
-            float graze = exp(-s * s * 0.03);
-            col += vec3(1.0, 0.88, 0.7) * hit * graze * exp(-tb * 0.6) * 0.06 * (uAmbSky + uKeyCol * 0.15 + 0.02);
+            float graze = exp(-s * s * 0.1);
+            col += vec3(1.0, 0.88, 0.7) * hit * graze * exp(-tb * 0.6) * 0.03 * (uAmbSky + uKeyCol * 0.15 + 0.02);
         }
     }
     oCol = vec4(col, 1.0);
@@ -2539,14 +2574,15 @@ void main() {
         float r = 0.0;
         for (int i = 0; i < 3; i++) {
             float sc = 1.0 + float(i) * 0.7;
-            vec2 rq = vec2(q.x * 26.0 * sc + q.y * 2.0, q.y * 1.3 * sc + uTime * (2.2 + float(i) * 0.6));
+            vec2 rq = vec2(q.x * 40.0 * sc + q.y * 3.0, q.y * 4.0 * sc + uTime * (6.0 + float(i) * 1.5));
             vec2 cell = floor(rq);
             float h = hash12(cell + float(i) * 13.0);
             float x = abs(fract(rq.x) - 0.2 - 0.6 * h);
             float y = fract(rq.y + h * 7.0);
             r += smoothstep(0.06, 0.0, x) * smoothstep(0.0, 0.3, y) * smoothstep(0.75, 0.3, y) * step(0.62, h) * (0.7 - 0.2 * float(i));
         }
-        c += vec3(0.55, 0.6, 0.65) * r * uRain * 0.05 * (c + 0.05);
+        float lum = dot(c, vec3(0.3, 0.5, 0.2));
+        c += vec3(0.75, 0.8, 0.85) * r * uRain * (lum * 0.35 + 0.012);
     }
     c *= uExposure;
     /* a filmic curve, then a gentle split-tone: cool shadows, warm lights */
@@ -2769,8 +2805,8 @@ static void parts_update(void) {
     part[D_FLY].model = m4mul(m4trans(part[D_FLY].pivot), m4rot(X, tf));
     part[D_TAIL].model = m4mul(m4trans(part[D_TAIL].pivot), m4rot(X, -0.28f * CK.lift));
     part[D_ROD].model = m4trans(vadd(part[D_ROD].pivot, V3(0, -0.12f * CK.lift, 0)));
-    part[D_HAMMER].model = m4mul(m4trans(part[D_HAMMER].pivot), m4rot(V3(0, 0, 1), -0.5f * CK.lift));
-    part[D_BELL].model = m4mul(m4trans(part[D_BELL].pivot), m4rot(V3(0, 0, 1), CK.swing));
+    part[D_HAMMER].model = m4mul(m4trans(part[D_HAMMER].pivot), m4rot(V3(1, 0, 0), -0.55f * CK.lift));
+    part[D_BELL].model = m4mul(m4trans(part[D_BELL].pivot), m4rot(V3(1, 0, 0), CK.swing));
     part[D_LEAD].model = m4mul(m4trans(part[D_LEAD].pivot), m4rot(V3(0, 1, 0), tg2 * 0.5f));
     /* the weights go down through the hours (and are wound, unseen, at twelve) */
     float hf = fmodf(CK.hour_ang / (2 * PI), 1.0f);
@@ -2794,8 +2830,8 @@ static void parts_update(void) {
 }
 
 /* ---- gulls: most sit on the parapet until the bell sends them up ---- */
-#define NBIRD 21
-#define NPERCH 14
+#define NBIRD 27
+#define NPERCH 20
 static float bird_inst[NBIRD * 8];
 static int bird_n;
 static void bird_at(int b, double t, v3 *pos, float *flap, float *roll) {
@@ -2824,7 +2860,7 @@ static void bird_at(int b, double t, v3 *pos, float *flap, float *roll) {
     float w2 = w * w * (3 - 2 * w);
     *pos = vadd(vlerp(perch, orb, w2), V3(0, 5 * sinf(PI * w2) * (1 - w2), 0));
     float ft = (float)t + h1 * 10;
-    if (w <= 0.001f) { *flap = -1.2f; *roll = 0; }
+    if (w <= 0.001f) { *flap = 9.0f; *roll = 0; }
     else {
         float climb = 1 - smooth01(0.6f, 0.95f, w);
         float glide = smooth01(0.1f, 0.5f, sinf(ft * 0.4f + h3 * 5)) * (1 - climb);
@@ -2842,13 +2878,13 @@ static void birds_update(double t) {
         v3 vel = vsub(p2, p);
         float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
         float *o = bird_inst + 8 * bird_n++;
-        o[0] = p.x; o[1] = p.y + (flap < -1 ? 0.12f : 0); o[2] = p.z;
+        o[0] = p.x; o[1] = p.y + (flap > 5 ? 0.14f : 0); o[2] = p.z;
         if (hv > 0.01f) o[3] = atan2f(-vel.x, -vel.z);
         else {   /* perched: face out from the tower */
             o[3] = atan2f(p.x, p.z) + PI;
         }
         o[4] = flap; o[5] = roll; o[6] = 1.0f + 0.25f * hash1(b, 104);
-        o[7] = hv > 0.01f ? atanf(vel.y / hv) : 0;
+        o[7] = hv > 0.01f ? atanf(vel.y / hv) : -0.25f;
     }
 }
 
@@ -2856,24 +2892,26 @@ static void birds_update(double t) {
 typedef struct { float t; v3 p, look; float fov, sx, sy, span; } Key;
 static const Key keys[] = {
     {0,   {30, 4.6f, 176},   {0, 20, 0},       40, 0.38f, 0.06f, 1},
-    {36,  {16, 4.2f, 170},   {0, 19, 0},       42, 0.30f, 0.05f, 1},
+    {36,  {-24, 5.0f, 163},  {0, 19, 0},       42, -0.25f, 0.05f, 1},
     {66,  {7.0f, 3.4f, 162}, {1, 16, 0},       46, 0.18f, 0.05f, 1},
-    {96,  {9.0f, 2.6f, 118}, {0, 17, 0},       48, 0.15f, 0.05f, 1},
+    {96,  {9.0f, 2.6f, 118}, {0, 22, 0},       30, 0.0f, 0.05f, 1},
     {124, {6.5f, 2.4f, 80},  {-1, 15, 0},      48, 0.10f, 0.05f, 1},
-    {150, {-1.5f, 3.4f, 30}, {-5.3f, 8.4f, 5.4f}, 30, 0.15f, 0.0f, 0.3f},
+    {150, {-1.5f, 3.4f, 30}, {-5.3f, 8.4f, 5.4f}, 24, 0.12f, 0.0f, 0.3f},
     {172, {14, 6.5f, 27},    {0, 16, 0},       50, -0.2f, 0.05f, 1},
     {192, {18, 12, 7},       {2, 14.5f, 0},    44, -0.1f, 0.0f,  0.7f},
     {210, {8.0f, 14.2f, 1.6f}, {0.6f, 14.2f, -0.4f}, 46, 0, 0, 0},
     {228, {3.7f, 14.8f, -0.3f}, {1.0f, 15.4f, -1.0f}, 50, 0, 0, 0},
     {246, {3.5f, 14.0f, 1.2f}, {0.7f, 14.6f, 1.7f}, 52, 0, 0, 0},
-    {263, {3.9f, 11.9f, -0.7f}, {1.4f, 10.0f, -1.0f}, 52, 0, 0, 0},
-    {282, {9.5f, 21.5f, 5.0f}, {0, 26, 0},     50, 0, 0, 0.5f},
-    {300, {7.6f, 30.4f, 2.0f}, {0, 30.6f, 0},  46, 0, 0, 0.3f},
-    {318, {15, 37, 13},      {0, 31, 0},       50, -0.1f, 0, 0.8f},
-    {346, {75, 30, 95},      {0, 21, 0},       44, 0.3f, 0, 1},
+    {262, {2.7f, 15.5f, -2.65f}, {0.0f, 14.6f, -1.4f}, 56, 0, 0, 0},
+    {280, {-1.7f, 14.9f, -2.65f}, {3.5f, 14.3f, 0.3f}, 58, 0, 0, 0},
+    {297, {2.6f, 16.2f, -2.4f}, {8.0f, 17.0f, 1.0f}, 55, 0, 0, 0.2f},
+    {314, {9.5f, 21.5f, 5.0f}, {0, 26, 0},     50, 0, 0, 0.5f},
+    {332, {8.6f, 30.6f, 0.3f}, {0, 30.6f, 0},  40, 0, 0, 0.3f},
+    {350, {15, 38.5f, 13},   {0, 36, 0},       50, -0.1f, 0, 0.8f},
+    {378, {75, 30, 95},      {0, 21, 0},       44, 0.3f, 0, 1},
 };
 #define NKEY ((int)(sizeof keys / sizeof keys[0]))
-#define TOUR 376.0f
+#define TOUR 408.0f
 
 static v3 herm(v3 p0, v3 p1, v3 m0, v3 m1, float s, float dt) {
     float s2 = s * s, s3 = s2 * s;
@@ -2916,9 +2954,9 @@ static void tour(float t, v3 *pos, v3 *look, float *fov, v3 *frame) {
 /* ======================================================================
  * Rendering
  * ====================================================================== */
-static GLuint p_mesh, p_terr, p_sky, p_water, p_bird, p_depth, p_vol, p_down, p_up, p_post;
+static GLuint p_mesh_s, p_mesh_m, p_mesh, p_pre, p_terr, p_sky, p_water, p_bird, p_depth, p_vol, p_down, p_up, p_post;
 static GLuint vao_stat, vao_dyn, vao_water, vao_bird, vao_empty, vbo_bird;
-static int water_n;
+static int water_n, bird_nv, stat_count[3];
 static int opt_msaa = 1;
 #define SHADOW_N 2048
 static GLuint tex_shadow, fbo_shadow;
@@ -2938,10 +2976,11 @@ static int bloom_w[NBLOOM], bloom_h[NBLOOM];
 static float render_scale = 0.6f;
 static unsigned frame_no;
 
+static const char *shader_defs = "";   /* extra #defines for the next program */
 static GLuint compile(GLenum type, const char *a, const char *b, const char *name) {
     GLuint s = glCreateShader(type);
-    const char *src[3] = {type == GL_VERTEX_SHADER ? "#version 330 core\n#define VERTEX\n" : "#version 330 core\n", a, b};
-    glShaderSource(s, b ? 3 : 2, src, NULL);
+    const char *src[4] = {type == GL_VERTEX_SHADER ? "#version 330 core\n#define VERTEX\n" : "#version 330 core\n", shader_defs, a, b};
+    glShaderSource(s, b ? 4 : 3, src, NULL);
     glCompileShader(s);
     GLint ok;
     glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
@@ -2988,7 +3027,14 @@ static GLuint mesh_vao(Mesh *m) {
 }
 
 static void gl_init(void) {
+    shader_defs = "#define G_STONE\n";
+    p_mesh_s = mk_prog("mesh stone", VS_MESH, 1, FS_MESH, 1);
+    shader_defs = "#define G_METAL\n";
+    p_mesh_m = mk_prog("mesh metal", VS_MESH, 1, FS_MESH, 1);
+    shader_defs = "#define G_STONE\n#define G_METAL\n#define G_SPECIAL\n";
     p_mesh = mk_prog("mesh", VS_MESH, 1, FS_MESH, 1);
+    shader_defs = "";
+    p_pre = mk_prog("prepass", VS_MESH, 1, FS_PRE, 0);
     p_terr = mk_prog("terrain", VS_MESH, 1, FS_TERRAIN, 1);
     p_sky = mk_prog("sky", VS_FULL, 0, FS_SKY, 1);
     p_water = mk_prog("water", VS_WATER, 1, FS_WATER, 1);
@@ -3021,6 +3067,24 @@ static void gl_init(void) {
     if (getenv("CLOCKTOWER_DEBUG"))
         fprintf(stderr, "clocktower: geometry %d + %d + %d verts (%d tris) in %.0f ms, maps %.0f ms\n", mstat.n, mdyn.n, terr_nv, terr_ni / 3,
                 (t1 - t0) * 1e3, (now() - t1) * 1e3);
+    /* the static mesh sorted by which shader variant draws it */
+    {
+        float *sorted = malloc(sizeof(float) * VSZ * (size_t)mstat.n);
+        int k = 0;
+        for (int g = 0; g < 3; g++) {
+            stat_count[g] = 0;
+            for (int t = 0; t < mstat.n; t += 3) {
+                int m = (int)mstat.v[(size_t)t * VSZ + 8];
+                int grp = m == M_STONE || m == M_RUBBLE || m == M_PAVE ? 0
+                        : m == M_LANTERN || m == M_DIAL || m == M_DRUM || m == M_WINDOW || m == M_LAMP ? 2 : 1;
+                if (grp != g) continue;
+                memcpy(sorted + (size_t)k * VSZ, mstat.v + (size_t)t * VSZ, sizeof(float) * VSZ * 3);
+                k += 3; stat_count[g] += 3;
+            }
+        }
+        free(mstat.v);
+        mstat.v = sorted;
+    }
     vao_stat = mesh_vao(&mstat);
     vao_dyn = mesh_vao(&mdyn);
 
@@ -3051,10 +3115,22 @@ static void gl_init(void) {
     }
     /* a gull: body and two jointed wings (as flightsim's) */
     {
-        static const float v[][4] = {
-            {0, 0, 0.35f, 0}, {-0.08f, 0, 0.05f, 0}, {0.08f, 0, 0.05f, 0},
-            {-0.08f, 0, 0.05f, 0}, {0, 0.02f, -0.3f, 0}, {0.08f, 0, 0.05f, 0},
-            {0, 0.02f, -0.3f, 0}, {-0.1f, 0, -0.42f, 0}, {0.1f, 0, -0.42f, 0},
+        /* the body: a spindle of six sides, then the head's beak and the tail */
+        static float v[400][4];
+        int nv = 0;
+        static const float ring[][2] = {{0.40f, 0.0f}, {0.33f, 0.035f}, {0.25f, 0.055f}, {0.17f, 0.045f}, {0.05f, 0.085f}, {-0.15f, 0.07f}, {-0.32f, 0.03f}, {-0.36f, 0.0f}};
+        for (int r = 0; r + 1 < 8; r++)
+            for (int k = 0; k < 6; k++) {
+                float a0 = k * PI / 3, a1 = (k + 1) * PI / 3;
+                float yo0 = r == 1 || r == 2 ? 0.05f : r == 3 ? 0.03f : 0, yo1 = r + 1 == 1 || r + 1 == 2 ? 0.05f : r + 1 == 3 ? 0.03f : 0;
+                float q[4][3] = {{ring[r][1] * cosf(a0), yo0 + ring[r][1] * sinf(a0) * 0.85f, ring[r][0]},
+                                 {ring[r][1] * cosf(a1), yo0 + ring[r][1] * sinf(a1) * 0.85f, ring[r][0]},
+                                 {ring[r + 1][1] * cosf(a1), yo1 + ring[r + 1][1] * sinf(a1) * 0.85f, ring[r + 1][0]},
+                                 {ring[r + 1][1] * cosf(a0), yo1 + ring[r + 1][1] * sinf(a0) * 0.85f, ring[r + 1][0]}};
+                int o[6] = {0, 1, 2, 0, 2, 3};
+                for (int t = 0; t < 6; t++) { v[nv][0] = q[o[t]][0]; v[nv][1] = q[o[t]][1]; v[nv][2] = q[o[t]][2]; v[nv][3] = r == 0 ? 3 : 0; nv++; }
+            }
+        static const float wings[][4] = {
             {-0.08f, 0, 0.12f, 1}, {-0.45f, 0, 0.08f, 1}, {-0.08f, 0, -0.08f, 1},
             {-0.08f, 0, -0.08f, 1}, {-0.45f, 0, 0.08f, 1}, {-0.45f, 0, -0.12f, 1},
             {-0.45f, 0, 0.08f, 2}, {-0.86f, 0, -0.10f, 2}, {-0.45f, 0, -0.12f, 2},
@@ -3062,12 +3138,14 @@ static void gl_init(void) {
             {0.08f, 0, -0.08f, 1}, {0.45f, 0, -0.12f, 1}, {0.45f, 0, 0.08f, 1},
             {0.45f, 0, 0.08f, 2}, {0.45f, 0, -0.12f, 2}, {0.86f, 0, -0.10f, 2},
         };
+        for (size_t i = 0; i < sizeof wings / sizeof wings[0]; i++) { memcpy(v[nv], wings[i], sizeof v[nv]); v[nv][1] += 0.04f; nv++; }
+        bird_nv = nv;
         GLuint vbo;
         glGenVertexArrays(1, &vao_bird);
         glBindVertexArray(vao_bird);
         glGenBuffers(1, &vbo);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof v, v, GL_STATIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(sizeof v[0] * (size_t)nv), v, GL_STATIC_DRAW);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 16, (void *)0);
         glGenBuffers(1, &vbo_bird);
@@ -3347,25 +3425,67 @@ static void bind_common_tex(void) {
     glActiveTexture(GL_TEXTURE0);
 }
 
-static void draw_meshes(int with_dyn, int with_terrain, int terr_max) {
-    GLuint p = p_mesh;
-    set_common(p);
-    glUniform4fv(U(p, "uHands"), 4, &F.hands[0][0]);
-    glUniform1i(U(p, "uDigits"), 2);
+/* depth first, so the costly shading runs once a pixel */
+static void prepass(int terr_max) {
     m4 I = m4id();
+    GLuint p = p_pre;
+    glUseProgram(p);
+    glUniformMatrix4fv(U(p, "uVP"), 1, GL_FALSE, proj_view.m);
+    glUniformMatrix4fv(U(p, "uMirror"), 1, GL_FALSE, F.mirror.m);
+    glUniform1f(U(p, "uClipY"), F.clip_y);
     glUniformMatrix4fv(U(p, "uModel"), 1, GL_FALSE, I.m);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     glBindVertexArray(vao_stat);
     glDrawArrays(GL_TRIANGLES, 0, mstat.n);
     m4 cvp = m4mul(proj_view, F.mirror);
+    glBindVertexArray(vao_dyn);
+    for (int i = 0; i < D_N; i++) {
+        v3 c = V3(part[i].model.m[12], part[i].model.m[13], part[i].model.m[14]);
+        float r = part[i].rad * (i == D_CABLE_G || i == D_CABLE_S ? 6 : 1);
+        float bmin[3] = {c.x - r, c.y - r, c.z - r}, bmax[3] = {c.x + r, c.y + r, c.z + r};
+        if (!box_visible(bmin, bmax, cvp)) continue;
+        glUniformMatrix4fv(U(p, "uModel"), 1, GL_FALSE, part[i].model.m);
+        glDrawArrays(GL_TRIANGLES, part[i].first, part[i].count);
+    }
+    glUniformMatrix4fv(U(p, "uModel"), 1, GL_FALSE, I.m);
+    glBindVertexArray(vao_terr_);
+    for (int k = 0; k < nchunk; k++) {
+        if (chunks[k].patch > terr_max || !chunks[k].count || !box_visible(chunks[k].bmin, chunks[k].bmax, cvp)) continue;
+        glDrawElements(GL_TRIANGLES, chunks[k].count, GL_UNSIGNED_INT, (void *)(sizeof(uint32_t) * (size_t)chunks[k].first));
+    }
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+}
+
+/* a mesh program for this frame, with its own uniforms */
+static GLuint use_mesh_prog(GLuint p) {
+    set_common(p);
+    glUniform4fv(U(p, "uHands"), 4, &F.hands[0][0]);
+    glUniform1i(U(p, "uDigits"), 2);
+    return p;
+}
+static void draw_meshes(int with_dyn, int with_terrain, int terr_max) {
+    m4 I = m4id();
+    glBindVertexArray(vao_stat);
+    int first = 0;
+    for (int g = 0; g < 3; g++) {
+        GLuint p = use_mesh_prog(g == 0 ? p_mesh_s : g == 1 ? p_mesh_m : p_mesh);
+        glUniformMatrix4fv(U(p, "uModel"), 1, GL_FALSE, I.m);
+        glDrawArrays(GL_TRIANGLES, first, stat_count[g]);
+        first += stat_count[g];
+    }
+    m4 cvp = m4mul(proj_view, F.mirror);
     if (with_dyn) {
         glBindVertexArray(vao_dyn);
+        GLuint cur = 0;
         for (int i = 0; i < D_N; i++) {
             if (with_dyn == 2 && i != D_BELL && i != D_HAMMER && i != D_ARMIL && i != D_ARMIL2 && i != D_LEVER) continue;
             v3 c = V3(part[i].model.m[12], part[i].model.m[13], part[i].model.m[14]);
             float r = part[i].rad * (i == D_CABLE_G || i == D_CABLE_S ? 6 : 1);
             float bmin[3] = {c.x - r, c.y - r, c.z - r}, bmax[3] = {c.x + r, c.y + r, c.z + r};
             if (!box_visible(bmin, bmax, cvp)) continue;
-            glUniformMatrix4fv(U(p, "uModel"), 1, GL_FALSE, part[i].model.m);
+            GLuint want = i >= D_DRUM0 && i <= D_DRUM3 ? p_mesh : p_mesh_m;
+            if (want != cur) cur = use_mesh_prog(want);
+            glUniformMatrix4fv(U(cur, "uModel"), 1, GL_FALSE, part[i].model.m);
             glDrawArrays(GL_TRIANGLES, part[i].first, part[i].count);
         }
     }
@@ -3385,7 +3505,7 @@ static void draw_birds(void) {
     glBindVertexArray(vao_bird);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_bird);
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(float) * 8 * bird_n, bird_inst);
-    glDrawArraysInstanced(GL_TRIANGLES, 0, 27, bird_n);
+    glDrawArraysInstanced(GL_TRIANGLES, 0, bird_nv, bird_n);
 }
 
 static void draw_sky(void) {
@@ -3506,6 +3626,7 @@ static void render(GLuint target, double t, double wt) {
     glBindFramebuffer(GL_FRAMEBUFFER, opt_msaa > 1 ? fbo_ms : fbo_scene);
     glViewport(0, 0, sw, sh);
     glClear(GL_DEPTH_BUFFER_BIT);
+    prepass(3);
     draw_meshes(1, 1, 3);
     draw_birds();
     prof_mark(PR_SKY);
