@@ -2940,6 +2940,9 @@ static void draw_maze(const Act *a, double tau) {
             mix3(o, dc, k, o);
         }
     }
+    /* the maze steps back while its path is traced */
+    float back = 0.42f * smooth(0, (float)MZ_TRACE, (float)(ts - a->Ts));
+    if (back > 0) for (int c = 0; c < n; c++) mix3(mz_col + 3 * c, pal.bg, back, mz_col + 3 * c);
     float cullm = G.pitch * cur.mz_sc * 2;
     /* ghosts of cells not yet in the maze */
     if (relax < 1)
@@ -2999,8 +3002,14 @@ static void draw_maze(const Act *a, double tau) {
     /* solving overlays */
     if (ts > -MZ_GAP * 0.5) {
         float k = smooth(-1.2f, 0, (float)ts);
-        if (m->solve == SOL_DFS)
-            for (int i = 0; i + 1 < m->nstack; i++) maze_link(m->stack[i], m->stack[i + 1], w * 0.45f, pal.hot, pal.hot, 1, 0.35f);
+        if (m->solve == SOL_DFS && ts < a->Ts + 0.4) {
+            /* the stack, until the traced path takes over */
+            float ka = 1 - smooth((float)a->Ts, (float)a->Ts + 0.4f, (float)ts);
+            for (int i = 0; i + 1 < m->nstack; i++) {
+                if (!cell_visible(m->stack[i], cullm) && !cell_visible(m->stack[i + 1], cullm)) continue;
+                maze_link(m->stack[i], m->stack[i + 1], w * 0.45f, pal.hot, pal.hot, ka, 0);
+            }
+        }
         if (m->solve == SOL_ASTAR && m->shead >= 0 && ts < a->Ts + 0.5) {
             int guard = n;
             for (int c = m->shead; m->par[c] >= 0 && guard--; c = m->par[c]) maze_link(c, m->par[c], w * 0.32f, pal.hi, pal.hi, 0.85f, 0.3f);
@@ -3028,9 +3037,22 @@ static void draw_maze(const Act *a, double tau) {
         for (int pass = 0; pass < 2; pass++) {
             float gl = pass ? 0 : (pal.light ? 0.3f : 0.75f);
             glBlendEquation(pass ? GL_FUNC_ADD : GL_MAX);
-            for (int i = 0; i < full && i + 1 < m->npath; i++) {
-                if (!cell_visible(m->path[i], cullm) && !cell_visible(m->path[i + 1], cullm)) continue;
-                maze_link(m->path[i], m->path[i + 1], pw, pal.path, pal.path, 1, gl);
+            for (int i = 0; i < full && i + 1 < m->npath;) {
+                int a0 = m->path[i], j = i + 1;
+                if (G.grid != G_THETA) {
+                    /* a straight run as one segment: fewer, longer glows */
+                    float dx = G.c[m->path[j]].x - G.c[a0].x, dy = G.c[m->path[j]].y - G.c[a0].y;
+                    while (j + 1 <= full && j + 1 < m->npath &&
+                           fabsf((G.c[m->path[j + 1]].x - G.c[m->path[j]].x) - dx) < 1e-3f &&
+                           fabsf((G.c[m->path[j + 1]].y - G.c[m->path[j]].y) - dy) < 1e-3f) j++;
+                }
+                int b0 = m->path[j];
+                float x0 = MXP(G.c[a0].x), y0 = MYP(G.c[a0].y), x1 = MXP(G.c[b0].x), y1 = MYP(G.c[b0].y);
+                if (fmaxf(x0, x1) > -cullm && fminf(x0, x1) < W + cullm && fmaxf(y0, y1) > -cullm && fminf(y0, y1) < H + cullm) {
+                    if (G.grid == G_THETA) maze_link(a0, b0, pw, pal.path, pal.path, 1, gl);
+                    else seg(x0, y0, x1, y1, pw, pal.path, 1, gl);
+                }
+                i = j;
             }
             if (full + 1 < m->npath) {
                 const Cell *p = &G.c[m->path[full]], *q = &G.c[m->path[full + 1]];
