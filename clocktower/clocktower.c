@@ -3121,10 +3121,6 @@ static void gl_init(void) {
     build_waves();
     build_digits();
     if (getenv("CLOCKTOWER_DEBUG"))
-        for (int k = 0; k < NKEY; k++)
-            fprintf(stderr, "key %2d t %3.0f  cam %6.1f %5.1f %6.1f  ground %5.1f\n", k, keys[k].t, keys[k].p.x, keys[k].p.y, keys[k].p.z,
-                    terrain(keys[k].p.x, keys[k].p.z));
-    if (getenv("CLOCKTOWER_DEBUG"))
         fprintf(stderr, "clocktower: geometry %d + %d + %d verts (%d tris) in %.0f ms, maps %.0f ms\n", mstat.n, mdyn.n, terr_nv, terr_ni / 3,
                 (t1 - t0) * 1e3, (now() - t1) * 1e3);
     /* the static mesh sorted by which shader variant draws it */
