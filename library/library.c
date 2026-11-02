@@ -125,11 +125,6 @@ static double wall(void) {
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
-static uint32_t rng;
-static float frand(void) {
-    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-    return (rng >> 8) * (1.0f / 16777216.0f);
-}
 static uint32_t hash32(uint32_t x) {
     x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
     return x;
@@ -4293,7 +4288,6 @@ int main(int argc, char **argv) {
     if (opt_fov > 150) opt_fov = 150;
     if (opt_hour >= 24) opt_hour = fmodf(opt_hour, 24);
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
-    rng = opt_seed | 1;
     int offscreen = opt_shot || opt_bench > 0;
 
     gethostname(host, sizeof host - 1);
