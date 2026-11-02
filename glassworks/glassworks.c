@@ -49,8 +49,12 @@
  * Same plumbing as gauges: Xlib + GLX for --window / --root, a native
  * wlr-layer-shell surface over EGL for --layer (swaylock-plugin), and
  * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen.
- * --bench N times N frames offscreen at --size. --scale sets the internal
- * render scale (default: about two megapixels).
+ * --bench N times N frames offscreen at --size (GW_PROF=1 in the environment
+ * breaks a frame down by pass, from GPU timestamps). The 3-D work renders at
+ * an internal resolution of about a megapixel, 4x multisampled (--scale F,
+ * --msaa N to change), and is upscaled under the depth of field, bloom and
+ * grain. --no-caption drops the time; --role front|gallery|fires and --cam N
+ * (a director's shot kind) pin a view, for testing.
  *
  * Keys (window mode): q / Escape quit.
  */
@@ -1978,7 +1982,7 @@ static GLuint mk_fbo(GLuint color, GLuint depth) {
 
 /* the internal resolution: about two megapixels unless --scale says otherwise */
 static void targets(void) {
-    float sc = opt_scale > 0 ? opt_scale : fminf(1.0f, sqrtf(1.05e6f / ((float)W * H)));
+    float sc = opt_scale > 0 ? opt_scale : fminf(1.0f, sqrtf(0.95e6f / ((float)W * H)));
     int w = (int)(W * sc + 0.5f), h = (int)(H * sc + 0.5f);
     if (w == rt_w && h == rt_h && tex_scene) return;
     if (tex_scene) {
@@ -2531,7 +2535,7 @@ static void build_gallery(int k) {
         xf[3] = hf((uint32_t)j, 34, 0) * 6.283f;
         gal_pid[1 + gal_n] = j;
         gal_first[gal_n] = ggal.ni;
-        build_glass(&ggal, &pr, 40, 300, (float)(1 + gal_n), xf);
+        build_glass(&ggal, &pr, 28, 300, (float)(1 + gal_n), xf);
         gal_count[gal_n] = ggal.ni - gal_first[gal_n];
         float hgt = prof_height(&pr), rad = prof_rmax(&pr);
         gal_c[gal_n] = v3(xf[0], xf[1] + hgt / 2, xf[2]);
@@ -2687,6 +2691,7 @@ static void director(double t, const Frame *F, Cam *cm) {
     if (kind == C_MACRO || kind == C_HANDS || kind == C_LOW || kind == C_MARVER)
         cm->exposure *= mixf(1.0f, 0.5f, sstep(900, 1400, F->T) * (1 - F->inside));
     cm->focus = vlen(vsub(pc, cm->eye));
+    if (kind == C_MACRO) cm->focus -= F->rmax * 0.6f;   /* on its near face */
     if (kind == C_FURNACE || kind == C_GLORY) cm->focus = vlen(vsub(cm->at, cm->eye));
     if (kind == C_ANNEAL || kind == C_WIDE) cm->focus = vlen(vsub(vlerp(cm->at, pc, 0.6f), cm->eye));
     if (kind == C_RACK) {
@@ -3149,7 +3154,7 @@ static void render(double t, double wt, GLuint target) {
     glUniformMatrix4fv(U(p_vol, "uInvVP"), 1, GL_FALSE, inv_vp);
     glUniform1i(U(p_vol, "uDepth"), 0);
     glUniform1f(U(p_vol, "uFog"), 0.016f);
-    glUniform1i(U(p_vol, "uSteps"), 18);
+    glUniform1i(U(p_vol, "uSteps"), 14);
     glUniform1f(U(p_vol, "uFrame"), frame_no);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex_depth);
