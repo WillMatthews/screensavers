@@ -150,7 +150,7 @@ typedef struct {
     float glow[3];     /* the light the lamp throws on the room */
 } Palette;
 static const Palette pals[] = {
-    {"classic", {0.92f, 0.13f, 0.03f}, {1.0f, 3.0f, 8.0f}, {0.03f, 0.12f, 1.1f}, {1.00f, 0.80f, 0.22f}, M_BRASS, 0,
+    {"classic", {0.85f, 0.07f, 0.02f}, {1.0f, 4.0f, 9.0f}, {0.03f, 0.12f, 1.1f}, {1.00f, 0.80f, 0.22f}, M_BRASS, 0,
      {1.00f, 0.52f, 0.16f}},
     {"blue", {0.05f, 0.22f, 0.95f}, {9.0f, 3.6f, 0.9f}, {0.05f, 0.04f, 0.035f}, {0.30f, 0.33f, 0.38f}, M_CHROME, 0,
      {0.42f, 0.52f, 1.00f}},
@@ -893,6 +893,7 @@ uniform sampler3D uLight;
 uniform vec3 uWax, uExt, uAbs, uSc, uBulb, uMetal, uGlow;
 uniform int uMetalKind;
 uniform float uGlitter, uTime, uSeed, uWarm;
+uniform int uMode;             /* 1: just the room, for the cached background */
 const float ZW = 1.9, ZE = -2.4, FOOT = -1.75;
 
 float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
@@ -982,7 +983,7 @@ vec3 tableShade(vec3 p, vec3 rd) {
     float w = p.x * 0.7 + 0.25 * fbm(vec2(p.x * 0.3, p.z * 2.0));
     float grain = fbm(vec2(p.x * 0.35, p.z * 9.0 + 2.0 * fbm(vec2(p.x * 0.5, p.z * 1.3))));
     float rings = 0.5 + 0.5 * sin(p.z * 26.0 + grain * 9.0 + w);
-    vec3 alb = mix(vec3(0.050, 0.026, 0.014), vec3(0.11, 0.060, 0.032), grain * 0.7 + rings * 0.3);
+    vec3 alb = mix(vec3(0.085, 0.045, 0.024), vec3(0.19, 0.105, 0.056), grain * 0.7 + rings * 0.3);
     vec3 n = vec3(0.0, 1.0, 0.0);
     float ao = 1.0;
     for (int l = 0; l < uNL; l++) {
@@ -1120,7 +1121,12 @@ vec3 shadeWax(vec3 p, vec3 d, float T) {
     vec3 amb = uSc * bulbE(p) * 0.035 + uSc * uBulb * 0.008;
     /* thin edges let the light through */
     float rim = pow(1.0 - max(dot(-d, n), 0.0), 2.0);
-    vec3 col = uWax * (diff * 2.2 + sss * ext * 1.6 + amb * 1.5 + rim * eo * 0.15);
+    /* light from the bulb shines up through the wax: the underside glows, the crown falls dark */
+    float under = smoothstep(0.35, -0.85, n.y);
+    vec3 col = uWax * (diff * 2.0 + sss * ext * 0.45 * (0.35 + 1.3 * under) + amb * 0.7 + rim * eo * 0.1);
+    col *= (0.55 + 0.45 * pow(max(dot(-d, n), 0.0), 0.6)) * 1.7;
+
+
     /* hotter wax glows a touch more */
     col *= 0.85 + 0.4 * smoothstep(0.4, 0.75, T);
     /* solid wax: paler, chalky, more of its light from the surface */
@@ -1202,7 +1208,7 @@ vec3 metalShade(vec3 p, vec3 rd, int id) {
         col = diff + env * F;
     } else {
         vec3 F = uMetal + (1.0 - uMetal) * pow(1.0 - c, 5.0);
-        col = env * F * brush + uMetal * lampLight(toWorld(p), n) * 0.08;
+        col = env * F * brush + uMetal * lampLight(toWorld(p), n) * 0.22;
     }
     return col;
 }
@@ -1239,6 +1245,10 @@ vec3 shadeLamp(vec3 ro, vec3 rd, vec3 bgc, float jit) {
     /* the glass's own thickness at the rim, a faint dark-green edge */
     float edge = smoothstep(0.25, 0.0, cs);
     inside *= mix(vec3(1.0), vec3(0.55, 0.7, 0.62), edge * 0.6);
+    /* at grazing angles the glass wall carries the liquid's glow along it: a bright rim */
+    float yy = clamp(p.y / 3.2, 0.0, 1.0);
+    inside += uSc * uBulb * 0.05 * (1.2 - yy) * smoothstep(0.32, 0.06, cs) * smoothstep(0.0, 0.15, p.y) * smoothstep(3.25, 3.1, p.y);
+
     return mix(inside, refl, F);
 }
 
@@ -1248,6 +1258,7 @@ void main() {
     vec3 rd = normalize(vec3(lp.x - uPP.x, uPP.y - lp.y, uPP.z));
     vec3 ro = uCam;
     vec3 col = bg(ro, rd);
+    if (uMode == 1) { o = vec4(col, 1.0); return; }
     Lp = uLP[uMe].xyz; Ls = uLP[uMe].w;
     float jit = 0.5 + 0.5 * hash12(gl_FragCoord.xy + fract(uTime * 7.31) * 100.0);
     col = shadeLamp((ro - Lp) / Ls, rd, col, jit);
@@ -1261,8 +1272,10 @@ static const char *FS_DOWN = "#version 330 core\n" GLSL(
 out vec4 o;
 uniform sampler2D uSrc;
 uniform vec2 uTexel;           /* of the source */
+uniform float uStep;           /* source texels per target texel */
 void main() {
-    vec2 uv = gl_FragCoord.xy * 2.0 * uTexel;
+    vec2 uv = gl_FragCoord.xy * uStep * uTexel;
+
     vec3 c = texture(uSrc, uv + uTexel * vec2(-1.0, -1.0)).rgb + texture(uSrc, uv + uTexel * vec2(1.0, -1.0)).rgb
            + texture(uSrc, uv + uTexel * vec2(-1.0, 1.0)).rgb + texture(uSrc, uv + uTexel * vec2(1.0, 1.0)).rgb;
     o = vec4(c * 0.25, 1.0);
@@ -1292,6 +1305,8 @@ out vec4 o;
 uniform sampler2D uHDR, uBloom;
 uniform vec2 uOut;
 uniform float uTime;
+uniform vec4 uVig;             /* this output within the whole wall: x, y, w, h (0..1), and */
+uniform float uVigAspect;      /* the wall's aspect */
 float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 vec3 filmic(vec3 x) {
     /* Hable's curve, toe lifted a hair */
@@ -1308,8 +1323,9 @@ void main() {
     c = c + b * 0.035;
     c *= 7.5;
 
-    vec2 v = uv - 0.5; v.x *= uOut.x / uOut.y;
-    c *= 1.0 - 0.32 * smoothstep(0.35, 1.05, length(v));
+    vec2 gw = uVig.xy + vec2(uv.x, 1.0 - uv.y) * uVig.zw;
+    vec2 v = gw - 0.5; v.x *= uVigAspect;
+    c *= 1.0 - 0.32 * smoothstep(0.35, 1.05, length(v) * min(1.0, 1.6 / max(uVigAspect, 1.0)));
     c = filmic(c);
     /* grade: shadows a little warm, saturation held */
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -1344,8 +1360,9 @@ void main() { o = vec4(vCol.rgb, vCol.a * texture(uAtlas, vUV).r); }
 static GLuint p_field, p_light, p_scene, p_down, p_up, p_final, p_text;
 static GLuint vao, vao_text, vbo_text, tex_atlas;
 static GLuint tex_field, tex_light, fbo_field, fbo_light;
-static GLuint tex_hdr, fbo_hdr;
-#define NBLOOM 6
+static GLuint tex_hdr, fbo_hdr, tex_room, fbo_room;
+static double room_at = -1e9;          /* when the cached room was drawn */
+#define NBLOOM 5
 static GLuint tex_bl[NBLOOM], fbo_bl[NBLOOM];
 static int bl_w[NBLOOM], bl_h[NBLOOM];
 static int rt_w, rt_h;
@@ -1464,13 +1481,17 @@ static void ensure_targets(void) {
     if (w == rt_w && h == rt_h) return;
     if (rt_w) {
         glDeleteTextures(1, &tex_hdr); glDeleteFramebuffers(1, &fbo_hdr);
+        glDeleteTextures(1, &tex_room); glDeleteFramebuffers(1, &fbo_room);
         glDeleteTextures(NBLOOM, tex_bl); glDeleteFramebuffers(NBLOOM, fbo_bl);
     }
     rt_w = w; rt_h = h;
     tex_hdr = mk_tex2d(w, h, GL_RGBA16F, GL_LINEAR);
     fbo_hdr = mk_fbo(tex_hdr);
+    tex_room = mk_tex2d(w, h, GL_RGBA16F, GL_NEAREST);
+    fbo_room = mk_fbo(tex_room);
+    room_at = -1e9;
     for (int i = 0; i < NBLOOM; i++) {
-        w = (w + 1) / 2; h = (h + 1) / 2;
+        w = (w + (i ? 1 : 3)) / (i ? 2 : 4); h = (h + (i ? 1 : 3)) / (i ? 2 : 4);
         if (w < 1) w = 1;
         if (h < 1) h = 1;
         bl_w[i] = w; bl_h[i] = h;
@@ -1537,6 +1558,20 @@ static void upload_wax(float a) {
 
 static double t_now;                   /* seconds since switch-on, for the shaders */
 
+/* --bench: GPU time per pass */
+enum { PR_FIELD, PR_LIGHT, PR_SCENE, PR_BLOOM, PR_FINAL, PR_N };
+static const char *prof_name[PR_N] = {"field", "light", "scene", "bloom", "final"};
+static GLuint prof_q[PR_N + 1];
+static double prof_ms[PR_N];
+static int prof_on;
+static void prof_mark(int i) { if (prof_on) glQueryCounter(prof_q[i], GL_TIMESTAMP); }
+static void prof_collect(void) {
+    if (!prof_on) return;
+    GLuint64 t[PR_N + 1];
+    for (int i = 0; i <= PR_N; i++) glGetQueryObjectui64v(prof_q[i], GL_QUERY_RESULT, &t[i]);
+    for (int i = 0; i < PR_N; i++) prof_ms[i] += (t[i + 1] - t[i]) * 1e-6;
+}
+
 static void caption(double wt) {
     tvn = 0;
     if (!opt_caption || me != front) return;
@@ -1578,12 +1613,14 @@ static void render(double t, float a, double wt, GLuint target) {
     const Palette *P = &pals[out_pal[me]];
 
     /* the wax, and the light through it */
+    prof_mark(PR_FIELD);
     glDisable(GL_BLEND);
     glBindVertexArray(vao);
     glViewport(0, 0, FX, FY);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_field);
     upload_wax(a);
     glDrawArrays(GL_POINTS, 0, FZ);
+    prof_mark(PR_LIGHT);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_light);
     glUseProgram(p_light);
     glActiveTexture(GL_TEXTURE0);
@@ -1591,9 +1628,9 @@ static void render(double t, float a, double wt, GLuint target) {
     glUniform1i(U(p_light, "uField"), 0);
     glDrawArrays(GL_POINTS, 0, FZ);
 
-    /* the scene */
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr);
-    glViewport(0, 0, rt_w, rt_h);
+    /* the scene: the room is cached (it changes only as the lamps warm up)
+     * and copied in; only the lamp's own box is drawn every frame */
+    prof_mark(PR_SCENE);
     GLuint p = p_scene;
     glUseProgram(p);
     glUniform2f(U(p, "uRes"), (float)rt_w, (float)rt_h);
@@ -1633,18 +1670,50 @@ static void render(double t, float a, double wt, GLuint target) {
     glUniform1f(U(p, "uTime"), (float)fmod(t, 10000.0));
     glUniform1f(U(p, "uSeed"), (float)(opt_seed % 1000));
     glUniform1f(U(p, "uWarm"), warmth(t));
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    if (fabs(t - room_at) > 1.0) {
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo_room);
+        glViewport(0, 0, rt_w, rt_h);
+        glUniform1i(U(p, "uMode"), 1);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        room_at = t;
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_room);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_hdr);
+    glBlitFramebuffer(0, 0, rt_w, rt_h, 0, 0, rt_w, rt_h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr);
+    glViewport(0, 0, rt_w, rt_h);
+    glUniform1i(U(p, "uMode"), 0);
+    {   /* the lamp's box on screen: its corners through our camera */
+        float S = out_s[me], F = out_f[me], cx = r[0] + r[2] / 2, x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+        for (int k = 0; k < 8; k++) {
+            float X = ((k & 1) ? 1.0f : -1.0f) * 1.0f * S, Y = (k & 2) ? (LAMP_H + 0.05f) * S : -0.05f, Z = ((k & 4) ? 1.0f : -1.0f) * S;
+            float lx = cx + F * X / (Z + DC), ly = out_y0[me] - F * (Y - YC) / (Z + DC);
+            float px = (lx - r[0]) / r[2] * rt_w, py = (1 - (ly - r[1]) / r[3]) * rt_h;
+            x0 = fminf(x0, px); x1 = fmaxf(x1, px); y0 = fminf(y0, py); y1 = fmaxf(y1, py);
+        }
+        int sx0 = (int)clampf(x0 - 4, 0, rt_w), sx1 = (int)clampf(x1 + 4, 0, rt_w);
+        int sy0 = (int)clampf(y0 - 4, 0, rt_h), sy1 = (int)clampf(y1 + 4, 0, rt_h);
+        if (sx1 > sx0 && sy1 > sy0) {
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(sx0, sy0, sx1 - sx0, sy1 - sy0);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDisable(GL_SCISSOR_TEST);
+        }
+    }
 
     /* bloom */
+    prof_mark(PR_BLOOM);
     glUseProgram(p_down);
     glUniform1i(U(p_down, "uSrc"), 0);
     glActiveTexture(GL_TEXTURE0);
     for (int i = 0; i < NBLOOM; i++) {
+
         int sw = i ? bl_w[i - 1] : rt_w, sh = i ? bl_h[i - 1] : rt_h;
         glBindFramebuffer(GL_FRAMEBUFFER, fbo_bl[i]);
         glViewport(0, 0, bl_w[i], bl_h[i]);
         glBindTexture(GL_TEXTURE_2D, i ? tex_bl[i - 1] : tex_hdr);
         glUniform2f(U(p_down, "uTexel"), 1.0f / sw, 1.0f / sh);
+        glUniform1f(U(p_down, "uStep"), i ? 2.0f : 4.0f);
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
     glUseProgram(p_up);
@@ -1662,6 +1731,7 @@ static void render(double t, float a, double wt, GLuint target) {
     glDisable(GL_BLEND);
 
     /* the final picture */
+    prof_mark(PR_FINAL);
     glBindFramebuffer(GL_FRAMEBUFFER, target);
     glViewport(0, 0, W, H);
     glUseProgram(p_final);
@@ -1673,6 +1743,16 @@ static void render(double t, float a, double wt, GLuint target) {
     glUniform1i(U(p_final, "uBloom"), 1);
     glUniform2f(U(p_final, "uOut"), (float)W, (float)H);
     glUniform1f(U(p_final, "uTime"), (float)fmod(t, 1000.0));
+    {
+        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+        for (int i = 0; i < span_n; i++) {
+            x0 = fminf(x0, span[i][0]); y0 = fminf(y0, span[i][1]);
+            x1 = fmaxf(x1, span[i][0] + span[i][2]); y1 = fmaxf(y1, span[i][1] + span[i][3]);
+        }
+        glUniform4f(U(p_final, "uVig"), (r[0] - x0) / (x1 - x0), (r[1] - y0) / (y1 - y0), r[2] / (x1 - x0), r[3] / (y1 - y0));
+        glUniform1f(U(p_final, "uVigAspect"), (x1 - x0) / (y1 - y0));
+    }
+
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     caption(wt);
@@ -1692,6 +1772,7 @@ static void render(double t, float a, double wt, GLuint target) {
         glDisable(GL_BLEND);
         glBindVertexArray(vao);
     }
+    prof_mark(PR_N);
 }
 
 /* ---- --layer: a native Wayland wallpaper (wlr-layer-shell + EGL) ---- */
@@ -1915,19 +1996,26 @@ int main(int argc, char **argv) {
         render(at, 1, wt, fbo);
         glFinish();
         double sum = 0, worst = 0;
+        glGenQueries(PR_N + 1, prof_q);
+        prof_on = 1;
         for (int i = 0; i < opt_bench; i++) {
             double f0 = now();
             double t = at + (i + 1) / 60.0;
             sim_advance(t, 0);
             render(t, 1, wt + (i + 1) / 60.0, fbo);
             glFinish();
+            prof_collect();
             double ms = (now() - f0) * 1000;
             sum += ms;
             if (ms > worst) worst = ms;
         }
         printf("lavalamp: %dx%d scale %.2f, %d frames: avg %.3f ms, worst %.3f ms per frame (wax run up in %.0f ms)\n",
                W, H, render_scale, opt_bench, sum / opt_bench, worst, tsim * 1000);
+        printf("lavalamp: CPU %.3f ms per frame\n", (double)clock() / CLOCKS_PER_SEC * 1000 / opt_bench);
+
         printf("lavalamp: GL renderer: %s\n", (const char *)glGetString(GL_RENDERER));
+        for (int i = 0; i < PR_N; i++) printf("  %-6s %6.2f ms\n", prof_name[i], prof_ms[i] / opt_bench);
+
         return 0;
     }
 
