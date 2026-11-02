@@ -187,10 +187,10 @@ static void gen_scene(int idx, Scene *s) {
     idx += scene_shift;
     rng = mix32(opt_seed * 2654435761U ^ (uint32_t)idx * 0x9E3779B9U ^ 0x1c4U);
     memset(s, 0, sizeof *s);
-    float t = 1.6f, lo = wall_l + 0.08f, hi = wall_r - 0.08f;
+    float mg = fmaxf(0.08f, 0.14f * (wall_r - wall_l)), t = 1.6f, lo = wall_l + mg, hi = wall_r - mg;
     int last = -1;
     float lastx = (lo + hi) / 2;
-    while (t < SCENE - FADE - 40 && s->n < MAXDROP) {
+    while (t < SCENE - FADE - 28 && s->n < MAXDROP) {
         int pair = s->n > 0 && frand() < 0.22f;
         for (int k = 0; k <= pair && s->n < MAXDROP; k++) {
             Drop *d = &s->d[s->n++];
@@ -212,7 +212,8 @@ static void gen_scene(int idx, Scene *s) {
             d->speed = frange(0.26f, 0.36f);
             d->wob = frange(-0.18f, 0.18f);
         }
-        t += frange(7.0f, 17.0f) * (s->n < 3 ? 0.8f : 1.0f);
+        /* a wider tank (a wall of outputs) gets them more often */
+        t += frange(7.0f, 17.0f) * (s->n < 3 ? 0.8f : 1.0f) * fminf(1.0f, 1.6f / (wall_r - wall_l));
     }
 }
 
@@ -439,6 +440,8 @@ static const char *FS_SHOW = GLSL(
     /* the ink seen through slice k at q */
     vec4 column(int k, vec2 q, float lod, int nz, float jit) {
         vec4 pl = tap(k, q, lod);
+        /* a touch of unsharp mask: the folds as crisp as the photographs' */
+        if (lod < 0.5) pl = max(pl + 0.7 * (pl - tap(k, q, 1.3)), 0.0);
         int n = k == 0 ? uNAxA : uNAxB;
         float d1 = 1e9, d2 = 1e9, a1 = q.x;
         for (int i = 0; i < 8; i++) {
@@ -478,8 +481,11 @@ static const char *FS_SHOW = GLSL(
         float lit = exp(-sh * 0.07 * uFade);
         /* the cloud's surface, from the blurred density's slope */
         vec2 e = vec2(2.0 / uDyeN.y, 0.0) * (dm.w - dm.y);
-        float dl = log(1.0 + dot(tap(k, q - e.xy, 1.5), vec4(1))), dr = log(1.0 + dot(tap(k, q + e.xy, 1.5), vec4(1)));
-        float dd = log(1.0 + dot(tap(k, q - e.yx, 1.5), vec4(1))), du = log(1.0 + dot(tap(k, q + e.yx, 1.5), vec4(1)));
+        float dl = 0.0, dr = 0.0, dd = 0.0, du = 0.0;
+        if (k == 0) {           /* the far slice is too soft to show it */
+            dl = log(1.0 + dot(tap(k, q - e.xy, 1.5), vec4(1))); dr = log(1.0 + dot(tap(k, q + e.xy, 1.5), vec4(1)));
+            dd = log(1.0 + dot(tap(k, q - e.yx, 1.5), vec4(1))); du = log(1.0 + dot(tap(k, q + e.yx, 1.5), vec4(1)));
+        }
         vec3 n = normalize(vec3(dl - dr, dd - du, 0.35));
         float lam = clamp(dot(n, normalize(vec3(-0.35, 1.0, 0.6))), 0.0, 1.0);
         if (uDark == 0) {
@@ -490,11 +496,11 @@ static const char *FS_SHOW = GLSL(
         }
         vec3 sc = (c.x * uCol[0] + c.y * uCol[1] + c.z * uCol[2] + c.w * uCol[3]) / tot;
         /* faint old ink sinks back into the dark; dense new ink stands out */
-        float a = 1.0 - exp(-0.7 * tot * tot / (tot + 0.5));
+        float a = 1.0 - exp(-0.9 * tot * tot / (tot + 0.3));
         float lt2 = exp(-sh * 0.03 * uFade);
         float thin = tot * exp(-tot * 1.2);
         float edge = clamp(length(vec2(dl - dr, dd - du)) * 1.5, 0.0, 1.0);
-        vec3 l = sc * a * (0.08 + 1.9 * lt2 * (0.2 + 0.8 * lam)) + sc * thin * 0.45 * lt2 + sc * edge * a * 0.4 * lt2;
+        vec3 l = sc * a * (0.1 + 2.6 * lt2 * (0.25 + 0.75 * lam)) + sc * thin * 0.6 * lt2 + sc * edge * a * 0.5 * lt2;
         /* a glow round it, light scattered on through the water */
         vec4 g = tap(k, q, 4.5) * uFade;
         vec3 glow = (g.x * uCol[0] + g.y * uCol[1] + g.z * uCol[2] + g.w * uCol[3]) * 0.05;
@@ -562,9 +568,9 @@ static const char *FS_SHOW = GLSL(
             if (d > -0.3 && d < 1.3) {
                 float band = smoothstep(-0.05, 0.05, d) * smoothstep(1.05, 0.95, d);
                 vec3 glass = uDark == 1 ? vec3(0.05, 0.075, 0.07) : vec3(0.80, 0.86, 0.83);
-                col = mix(col, col * glass * (uDark == 1 ? 12.0 : 1.0), 0.35 * band);
+                col = mix(col, col * glass * (uDark == 1 ? 12.0 : 1.0), 0.2 * band);
                 float face = exp(-pow(d * 0.006 / uPx, 2.0) * 0.4) + 0.6 * exp(-pow((d - 1.0) * 0.006 / uPx, 2.0) * 0.4);
-                col = uDark == 1 ? col + vec3(0.07, 0.09, 0.085) * face : col * (1.0 - 0.18 * face);
+                col = uDark == 1 ? col + vec3(0.04, 0.05, 0.048) * face : col * (1.0 - 0.1 * face);
             }
         }
         /* drops falling in, and their splashes */
@@ -895,7 +901,8 @@ static void tank_setup(float a, float cells) {
     /* the far slice: as far down, but wider, so its walls are out of sight */
     sl[1].dom[0] = CAMX + (dom[0] - 0.01f - CAMX) / ZOOM; sl[1].dom[2] = CAMX + (dom[2] + 0.01f - CAMX) / ZOOM;
     sl[1].dom[1] = dom[1]; sl[1].dom[3] = dom[3];
-    slice_init(&sl[0], cells, 3);
+    /* the near ink at four times the velocity's resolution where that stays affordable */
+    slice_init(&sl[0], cells, cells * 16 <= 1.0e6f ? 4 : 3);
     slice_init(&sl[1], cells * 0.45f, 3);
     scene_idx = -1;
 }
@@ -1003,7 +1010,7 @@ static void fonts_init(void) {
 
 static void build_atlas(int h) {
     font_for_h = h;
-    font_px[0] = (int)lroundf(h * 0.024f); font_px[1] = (int)lroundf(h * 0.0155f);
+    font_px[0] = (int)lroundf(h * 0.03f); font_px[1] = (int)lroundf(h * 0.017f);
     if (font_px[0] < 12) font_px[0] = 12;
     if (font_px[1] < 9) font_px[1] = 9;
     int cap = 1024;
@@ -1092,7 +1099,7 @@ static void draw_caption(GLuint target) {
         else snprintf(abuf, sizeof abuf, "away %ldh %02ldm", a / 3600, a / 60 % 60);
     }
     tvn = 0;
-    float m = ref * 0.035f, x = W - m - (W > H ? 0.0f : 0.0f), y = H - m;
+    float m = ref * 0.05f, x = W - m, y = H - m;
     if (abuf[0]) { text(1, x, y, abuf, font_px[1] * 0.06f); y -= font_px[1] * 1.55f; }
     text(0, x, y, tbuf, font_px[0] * 0.04f);
     glBindFramebuffer(GL_FRAMEBUFFER, target);
@@ -1167,7 +1174,7 @@ static void prof_read(void) {
 /* the first pass's target, at --scale of the output */
 static GLuint low_tex, low_fbo;
 static int low_w, low_h;
-static float opt_scale = 0.7f;
+static float opt_scale;                /* 0: 0.7, less on a big output */
 
 static void set_uniforms(GLuint p, double lt, float fade) {
     glUseProgram(p);
@@ -1178,7 +1185,7 @@ static void set_uniforms(GLuint p, double lt, float fade) {
     glUniform2f(U(p, "uCam"), CAMX, CAMY);
     glUniform1f(U(p, "uZoom"), ZOOM);
     glUniform1f(U(p, "uZ0"), 0.09f);
-    glUniform1f(U(p, "uTilt"), 0.12f);
+    glUniform1f(U(p, "uTilt"), 0.08f);
     /* the axes of the drops in so far, the latest first */
     for (int k = 0; k < 2; k++) {
         float ax[8];
@@ -1239,7 +1246,8 @@ static void render(double t, GLuint target) {
     prof_mark(2);
 
     /* the water and the ink, scaled down */
-    int lw = (int)lroundf(W * opt_scale), lh = (int)lroundf(H * opt_scale);
+    float sc = opt_scale > 0 ? opt_scale : fminf(0.7f, sqrtf(1.1e6f / ((float)W * H)));
+    int lw = (int)lroundf(W * sc), lh = (int)lroundf(H * sc);
     if (lw < 1) lw = 1;
     if (lh < 1) lh = 1;
     if (lw != low_w || lh != low_h) {
@@ -1397,7 +1405,7 @@ static void span_setup(void) {
 static void usage(void) {
     fprintf(stderr,
         "usage: ink [--window | --root | --layer] [--seed N] [--palette NAME] [--font FAMILY] [--no-caption]\n"
-        "           [--scale F (of the output the ink is drawn at, default 0.7)]\n"
+        "           [--scale F (of the output the ink is drawn at; default 0.7, less above 1.1 Mpx)]\n"
         "           [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX] [--split]\n"
         "           [--shot FILE.ppm | --bench N] [--size WxH] [--at SECONDS]\n"
         "palettes: indigo sumi botanical neon sunset (default: from the seed)\n");
@@ -1459,7 +1467,7 @@ int main(int argc, char **argv) {
     P = &PALETTES[opt_palette >= 0 ? opt_palette : (int)(mix32(opt_seed * 2246822519U ^ 0x1c4e7U) % NPAL)];
     span_setup();
     int offline = opt_shot || opt_bench > 0;
-    if (!offline) locked_at = lock_start();
+    locked_at = lock_start();
 
     Display *dpy = NULL;
     Window root = 0, win = 0;
