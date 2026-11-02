@@ -609,7 +609,7 @@ static void act_frame(void) {
         {-5.0f, -3.4f, 5.0f, 1.8f},  /* tir */
         {-3.4f, -2.2f, 3.4f, 2.2f},  /* cavity */
     };
-    static const float NL[NACT] = {44, 30, 40, 32, 28, 30, 32, 32, 42, 28, 36, 40};
+    static const float NL[NACT] = {44, 30, 40, 32, 28, 30, 32, 32, 36, 28, 36, 40};
     static const float FV[NACT] = {0.9f, 1.0f, 0.9f, 1.0f, 1.3f, 1.0f, 1.0f, 1.0f, 0.8f, 1.0f, 0.9f, 1.0f};
     static const float G[NACT] = {1, 1, 1, 0.7f, 1, 1, 1, 0.45f, 0.75f, 1, 0.9f, 0.3f};
     memcpy(roi, R[act], sizeof roi);
@@ -1044,7 +1044,7 @@ static const char *FS_PATTERN = VERSION GLSL(
         float ph = (floor(gl_FragCoord.x) + 0.5) * (6.28318531 / 360.0);
         vec2 r = vec2(cos(ph), sin(ph));
         vec2 acc = vec2(0.0);
-        for (int k = 0; k < uNp; k++) {
+        for (int k = int(gl_FragCoord.y); k < uNp; k += 16) {
             vec4 pn = texelFetch(uPos, ivec2(k, 0), 0);
             vec4 a = texelFetch(uA, ivec2(k, 0), 0);
             vec2 hy = texelFetch(uB, ivec2(k, 0), 0).xy;
@@ -1054,17 +1054,27 @@ static const char *FS_PATTERN = VERSION GLSL(
             vec2 e = vec2(cos(arg), sin(arg));
             acc += vec2(f.x * e.x - f.y * e.y, f.x * e.y + f.y * e.x);
         }
-        o = vec4(length(acc));
+        o = vec4(acc, 0.0, 0.0);
+    });
+
+/* the partial sums added up: the far field's magnitude */
+static const char *FS_PATSUM = VERSION GLSL(
+    uniform sampler2D uT;
+    out vec4 o;
+    void main() {
+        vec2 s = vec2(0.0);
+        for (int j = 0; j < 16; j++) s += texelFetch(uT, ivec2(int(gl_FragCoord.x), j), 0).xy;
+        o = vec4(length(s));
     });
 
 /* the largest of a row of texels, into one */
 static const char *FS_MAX = VERSION GLSL(
     uniform sampler2D uT;
-    uniform int uN0, uN1, uW;
+    uniform int uN0, uN1, uW, uStride;
     out vec4 o;
     void main() {
         float m = 1e-12;
-        for (int i = uN0; i < uN1; i++) m = max(m, abs(texelFetch(uT, ivec2((i % uW + uW) % uW, 0), 0).r));
+        for (int i = uN0 + int(gl_FragCoord.x); i < uN1; i += uStride) m = max(m, abs(texelFetch(uT, ivec2((i % uW + uW) % uW, 0), 0).r));
         o = vec4(m);
     });
 
@@ -1088,19 +1098,23 @@ static const char *FS_PREP = VERSION GLSL(
 
 /* the exposure: a slow average of the mean field amplitude, sqrt <u>,
  * sampled over the domain inside the PML (robust to the sources' peaks) */
-static const char *FS_EXPO = VERSION GLSL(
-    uniform sampler2D uAcc, uPrev;
+static const char *FS_EXPO_S = VERSION GLSL(
+    uniform sampler2D uAcc;
     uniform vec2 uLo, uHi;
+    out vec4 o;
+    void main() {
+        vec2 uv = mix(uLo, uHi, gl_FragCoord.xy / vec2(32.0, 18.0));
+        o = vec4(sqrt(max(texture(uAcc, uv).r, 0.0)));
+    });
+static const char *FS_EXPO = VERSION GLSL(
+    uniform sampler2D uS, uPrev;
     uniform vec2 uK2;
     out vec4 o;
     void main() {
         float m = 0.0;
-        for (int j = 0; j < 30; j++)
-            for (int i = 0; i < 48; i++) {
-                vec2 uv = mix(uLo, uHi, (vec2(i, j) + 0.5) / vec2(48.0, 30.0));
-                m += sqrt(max(texture(uAcc, uv).r, 0.0));
-            }
-        m /= 1440.0;
+        for (int j = 0; j < 18; j++)
+            for (int i = 0; i < 32; i++) m += texelFetch(uS, ivec2(i, j), 0).r;
+        m /= 576.0;
         float p = texelFetch(uPrev, ivec2(0), 0).r;
         o = vec4(mix(p, m, m > p ? uK2.x : uK2.y));
     });
@@ -1380,6 +1394,7 @@ static void clear_fbo(GLuint f) {
     glClear(GL_COLOR_BUFFER_BIT);
 }
 
+static GLuint prog_patsum, tPatPart, fPatPart, tMaxPart, fMaxPart, prog_expo_s, tExpS, fExpS;
 static GLuint prog_t, prog_z, prog_probe, prog_ntff, prog_pat, prog_max, prog_prep, prog_expo, prog_blur, prog_comp,
               prog_polar, prog_trace, prog_text;
 static GLuint vao, vao_text, vbo_text, tex_atlas;
@@ -1412,6 +1427,10 @@ static void gl_init(void) {
     prog_ntff = mk_prog(VS, FS_NTFF);
     prog_pat = mk_prog(VS, FS_PATTERN);
     prog_max = mk_prog(VS, FS_MAX);
+    prog_patsum = mk_prog(VS, FS_PATSUM);
+    prog_expo_s = mk_prog(VS, FS_EXPO_S);
+    tExpS = mk_tex(GL_R32F, 32, 18, GL_RED, GL_FLOAT, NULL, GL_NEAREST);
+    fExpS = mk_fbo(tExpS, 0);
     prog_prep = mk_prog(VS, FS_PREP);
     prog_expo = mk_prog(VS, FS_EXPO);
     prog_blur = mk_prog(VS, FS_BLUR);
@@ -1445,6 +1464,10 @@ static void gl_init(void) {
     tPat = mk_tex(GL_R32F, 360, 1, GL_RED, GL_FLOAT, NULL, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     fPat = mk_fbo(tPat, 0);
+    tPatPart = mk_tex(GL_RG32F, 360, 16, GL_RG, GL_FLOAT, NULL, GL_NEAREST);
+    fPatPart = mk_fbo(tPatPart, 0);
+    tMaxPart = mk_tex(GL_R32F, 64, 1, GL_RED, GL_FLOAT, NULL, GL_NEAREST);
+    fMaxPart = mk_fbo(tMaxPart, 0);
     tPatMax = mk_tex(GL_R32F, 1, 1, GL_RED, GL_FLOAT, NULL, GL_NEAREST);
     fPatMax = mk_fbo(tPatMax, 0);
     tTMax = mk_tex(GL_R32F, 1, 1, GL_RED, GL_FLOAT, NULL, GL_NEAREST);
@@ -1473,7 +1496,7 @@ static void grid_alloc(void) {
         tFt[i] = mk_tex(GL_RGBA32F, NX, NY, GL_RGBA, GL_FLOAT, NULL, GL_LINEAR);
         fFz[i] = mk_fbo(tFz[i], 0);
         fFt[i] = mk_fbo(tFt[i], 0);
-        tAcc[i] = mk_tex(GL_RGBA32F, NX, NY, GL_RGBA, GL_FLOAT, NULL, GL_LINEAR);
+        tAcc[i] = mk_tex(GL_RGBA16F, NX, NY, GL_RGBA, GL_FLOAT, NULL, GL_LINEAR);
         fAcc[i] = mk_fbo(tAcc[i], 0);
         tGlow[i] = mk_tex(GL_R16F, gw, gh, GL_RED, GL_FLOAT, NULL, GL_LINEAR);
         fGlow[i] = mk_fbo(tGlow[i], 0);
@@ -1939,9 +1962,43 @@ static void inset_layout(void) {
     if (trace_span > RING - 2) trace_span = RING - 2;
 }
 
+/* the largest |value| of texels n0..n1 (wrapping at w) of a row, into a 1x1
+ * target: 64 strided partial maxima, then their max */
+static void max_of(GLuint tex, int n0, int n1, int w, GLuint dst) {
+    glUseProgram(prog_max);
+    glUniform1i(U(prog_max, "uT"), 0);
+    glUniform1i(U(prog_max, "uN0"), n0); glUniform1i(U(prog_max, "uN1"), n1);
+    glUniform1i(U(prog_max, "uW"), w); glUniform1i(U(prog_max, "uStride"), 64);
+    bind_tex(0, tex);
+    glViewport(0, 0, 64, 1);
+    glBindFramebuffer(GL_FRAMEBUFFER, fMaxPart);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glUniform1i(U(prog_max, "uN0"), 0); glUniform1i(U(prog_max, "uN1"), 64);
+    glUniform1i(U(prog_max, "uW"), 64); glUniform1i(U(prog_max, "uStride"), 1);
+    bind_tex(0, tMaxPart);
+    glViewport(0, 0, 1, 1);
+    glBindFramebuffer(GL_FRAMEBUFFER, dst);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+}
+
 static void set_col(GLuint p, const char *n, int c) { glUniform3fv(U(p, n), 1, pal_c[c]); }
 
+/* --bench: GPU timestamps between the stages of a frame */
+enum { PR_SIM, PR_PREP, PR_EXPO, PR_GLOW, PR_PLOTS, PR_COMP, PR_INSETS, PR_TEXT, PR_N };
+static const char *prof_name[PR_N] = {"sim", "average", "exposure", "glow", "plots", "picture", "insets", "text"};
+static GLuint prof_q[PR_N + 1];
+static double prof_ms[PR_N];
+static int prof_on;
+static void prof_mark(int i) { if (prof_on) glQueryCounter(prof_q[i], GL_TIMESTAMP); }
+static void prof_collect(void) {
+    if (!prof_on) return;
+    GLuint64 t[PR_N + 1];
+    for (int i = 0; i <= PR_N; i++) glGetQueryObjectui64v(prof_q[i], GL_QUERY_RESULT, &t[i]);
+    for (int i = 0; i < PR_N; i++) prof_ms[i] += (t[i + 1] - t[i]) * 1e-6;
+}
+
 static void render(GLuint target, double ta, float dt) {
+    prof_mark(PR_PREP);
     glBindVertexArray(vao);
     glDisable(GL_BLEND);
     /* the averages */
@@ -1955,17 +2012,25 @@ static void render(GLuint target, double ta, float dt) {
     glBindFramebuffer(GL_FRAMEBUFFER, fAcc[ca ^ 1]);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     ca ^= 1;
+    prof_mark(PR_EXPO);
     /* the exposure */
+    glViewport(0, 0, 32, 18);
+    glUseProgram(prog_expo_s);
+    glUniform1i(U(prog_expo_s, "uAcc"), 0);
+    glUniform2f(U(prog_expo_s, "uLo"), (PML + 0.5f) / NX, (PML + 0.5f) / NY);
+    glUniform2f(U(prog_expo_s, "uHi"), 1 - (PML + 0.5f) / NX, 1 - (PML + 0.5f) / NY);
+    bind_tex(0, tAcc[ca]);
+    glBindFramebuffer(GL_FRAMEBUFFER, fExpS);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
     glViewport(0, 0, 1, 1);
     glUseProgram(prog_expo);
-    glUniform1i(U(prog_expo, "uAcc"), 0); glUniform1i(U(prog_expo, "uPrev"), 1);
-    glUniform2f(U(prog_expo, "uLo"), (PML + 0.5f) / NX, (PML + 0.5f) / NY);
-    glUniform2f(U(prog_expo, "uHi"), 1 - (PML + 0.5f) / NX, 1 - (PML + 0.5f) / NY);
+    glUniform1i(U(prog_expo, "uS"), 0); glUniform1i(U(prog_expo, "uPrev"), 1);
     glUniform2f(U(prog_expo, "uK2"), 1 - expf(-dt / 0.5f), 1 - expf(-dt / 4.0f));
-    bind_tex(0, tAcc[ca]); bind_tex(1, tExp[ce]);
+    bind_tex(0, tExpS); bind_tex(1, tExp[ce]);
     glBindFramebuffer(GL_FRAMEBUFFER, fExp[ce ^ 1]);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     ce ^= 1;
+    prof_mark(PR_GLOW);
     /* the glow */
     glUseProgram(prog_blur);
     glUniform1i(U(prog_blur, "uT"), 0);
@@ -1981,6 +2046,7 @@ static void render(GLuint target, double ta, float dt) {
     bind_tex(0, tGlow[0]);
     glBindFramebuffer(GL_FRAMEBUFFER, fGlow[1]);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    prof_mark(PR_PLOTS);
     /* the far field and the trace's scale */
     inset_layout();
     if (show_polar || (opt_check && np)) {
@@ -1991,31 +2057,23 @@ static void render(GLuint target, double ta, float dt) {
         glUniform2f(U(prog_pat, "uC"), ncen[0], ncen[1]);
         glUniform1f(U(prog_pat, "uSgn"), -1);
         bind_tex(0, tNPos); bind_tex(1, tNA[cn]); bind_tex(2, tNB[cn]);
+        glViewport(0, 0, 360, 16);
+        glBindFramebuffer(GL_FRAMEBUFFER, fPatPart);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glUseProgram(prog_patsum);
+        glUniform1i(U(prog_patsum, "uT"), 0);
+        bind_tex(0, tPatPart);
         glViewport(0, 0, 360, 1);
         glBindFramebuffer(GL_FRAMEBUFFER, fPat);
         glDrawArrays(GL_TRIANGLES, 0, 3);
-        glUseProgram(prog_max);
-        glUniform1i(U(prog_max, "uT"), 0);
-        glUniform1i(U(prog_max, "uN0"), 0); glUniform1i(U(prog_max, "uN1"), 360); glUniform1i(U(prog_max, "uW"), 360);
-        bind_tex(0, tPat);
-        glViewport(0, 0, 1, 1);
-        glBindFramebuffer(GL_FRAMEBUFFER, fPatMax);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        max_of(tPat, 0, 360, 360, fPatMax);
         if (ana_kind == 2) analytic_upload();
     }
-    if (show_trace) {
-        glUseProgram(prog_max);
-        glUniform1i(U(prog_max, "uT"), 0);
-        glUniform1i(U(prog_max, "uN0"), (int)(step_n - (long)trace_span)); glUniform1i(U(prog_max, "uN1"), (int)step_n + 1);
-        glUniform1i(U(prog_max, "uW"), RING);
-        bind_tex(0, tRing);
-        glViewport(0, 0, 1, 1);
-        glBindFramebuffer(GL_FRAMEBUFFER, fTMax);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
-    }
+    if (show_trace) max_of(tRing, (int)(step_n - (long)trace_span), (int)step_n + 1, RING, fTMax);
     if (act == A_CAVITY && show_trace && ta - q_at > 1.0) { q_at = ta; estimate_q(); }
     if (ta < q_at) q_at = ta;
 
+    prof_mark(PR_COMP);
     /* the picture */
     glBindFramebuffer(GL_FRAMEBUFFER, target);
     glViewport(0, 0, W, H);
@@ -2044,6 +2102,7 @@ static void render(GLuint target, double ta, float dt) {
     if (ncards) glUniform4fv(U(p, "uCard"), ncards, &cards[0][0]);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
+    prof_mark(PR_INSETS);
     /* the insets */
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -2078,6 +2137,7 @@ static void render(GLuint target, double ta, float dt) {
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
 
+    prof_mark(PR_TEXT);
     /* text */
     build_text(ta);
     if (nstyles != atlas_n) {
@@ -2105,6 +2165,7 @@ static void render(GLuint target, double ta, float dt) {
     }
     glDisable(GL_BLEND);
     glActiveTexture(GL_TEXTURE0);
+    prof_mark(PR_N);
 }
 
 /* ---- where we are on the wall ---- */
@@ -2575,25 +2636,29 @@ int main(int argc, char **argv) {
         double ta = show_advance(t, 1 << 30);
         render(fbo, ta, 1.0f / 60);
         glFinish();
-        double sum = 0, worst = 0, ssim = 0;
+        double sum = 0, worst = 0;
         long steps0 = step_n;
+        glGenQueries(PR_N + 1, prof_q);
+        prof_on = 1;
         for (int i = 0; i < opt_bench; i++) {
             double f0 = now();
+            prof_mark(PR_SIM);
             ta = show_advance(t + (i + 1) / 60.0, 64);
-            glFinish();
-            double f1 = now();
             render(fbo, ta, 1.0f / 60);
             glFinish();
             double ms = (now() - f0) * 1000;
-            ssim += (f1 - f0) * 1000;
+            prof_collect();
             sum += ms;
             if (ms > worst) worst = ms;
         }
         printf("fdtd: %s %dx%d, grid %dx%d (%.0fk cells, %.1f cells/λ), %.2f steps/frame\n", act_names[act], W, H,
                NX, NY, NX * NY / 1e3, nl, (double)(step_n - steps0) / opt_bench);
-        printf("fdtd: %d frames: avg %.3f ms (sim %.3f, draw %.3f), worst %.3f ms\n", opt_bench, sum / opt_bench,
-               ssim / opt_bench, (sum - ssim) / opt_bench, worst);
-        printf("fdtd: GL renderer: %s\n", (const char *)glGetString(GL_RENDERER));
+        printf("fdtd: %d frames: avg %.3f ms wall (submit to finish), worst %.3f ms\n", opt_bench, sum / opt_bench, worst);
+        double gpu = 0;
+        for (int i = 0; i < PR_N; i++) gpu += prof_ms[i];
+        printf("fdtd: GPU %.3f ms/frame:", gpu / opt_bench);
+        for (int i = 0; i < PR_N; i++) printf(" %s %.3f", prof_name[i], prof_ms[i] / opt_bench);
+        printf("\nfdtd: GL renderer: %s\n", (const char *)glGetString(GL_RENDERER));
         return 0;
     }
 
