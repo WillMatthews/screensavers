@@ -574,8 +574,11 @@ static float cw_top(float z) {
 static float stair_top(int i) { return cw_top(CW_Z0) + (PLAT_Y - cw_top(CW_Z0)) * (i + 1) / ST_N; }
 
 /* where the shore runs: a bay, the headlands closing in on either side */
+/* where the shore runs: high cliffs curving out to a headland in the west;
+ * to the east low rocks falling back, so the sea opens out that way */
 static float shore_z(float x) {
-    return 158 - 95 * (1 - expf(-(x / 175) * (x / 175))) + 14 * (fbm(x * 0.012f, 7.7f, 3, 60) - 0.5f);
+    float w = x < 0 ? 158 - 100 * (1 - expf(-(x / 190) * (x / 190))) : 158 + 0.22f * x + 18 * (1 - expf(-(x / 120) * (x / 120)));
+    return w + 14 * (fbm(x * 0.012f, 7.7f, 3, 60) - 0.5f);
 }
 
 /* jointed rock: a Voronoi of tilted facets, cracked along the joints */
@@ -634,10 +637,11 @@ static float terrain(float x, float z) {
     }
     /* the shore: shingle, then rock and turf rising into the headlands */
     float zs = shore_z(x), dz = z - zs;
-    float cliffs = smooth01(18, 70, fabsf(x - cw_x(CW_Z1)));
-    float land = 0.3f + dz * 0.075f;
+    float cliffs = smooth01(-25, -80, x);
+    float hills = 0.35f + 0.65f * smooth01(10, -60, x);
+    float land = 0.3f + dz * (0.075f - 0.03f * smooth01(0, 80, x));
     if (dz > 0) {
-        land += cliffs * 13 * smooth01(4, 16, dz) + 16 * fbm(x * 0.008f, z * 0.008f, 4, 7) * smooth01(0, 90, dz);
+        land += cliffs * 13 * smooth01(4, 16, dz) + 16 * hills * fbm(x * 0.008f, z * 0.008f, 4, 7) * smooth01(0, 90, dz);
         land += (fbm(x * 0.05f, z * 0.05f, 4, 8) - 0.5f) * 3 * smooth01(2, 12, dz);
     }
     h = fmaxf(h, land);
@@ -889,36 +893,42 @@ static void build_tower(Mesh *m) {
         mbox(m, V3(0, BELF_Y + 2.5f, s * 2.5f), V3(0.16f, 2.5f, 0.12f), M_WOOD, 0.35f);
         mbox(m, V3(0, BELF_Y + 5.05f, s * 1.7f), V3(0.18f, 0.14f, 0.95f), M_WOOD, 0.4f);
     }
-    /* the movement's iron frame: a posted cage, open at the front */
+    /* the movement's bed: two iron rails, and a slim cock rising from each
+     * to carry every arbor front and back (a flatbed, open to the eye) */
     float zl = -2.55f, zr = 2.85f;
     for (int i = 0; i < 2; i++) {
-        float x = i ? X_FRONT + 0.06f : 0.02f, t = i ? 0.03f : 0.05f;
-        mbox(m, V3(x, BED_Y + 0.12f, (zl + zr) / 2), V3(t, 0.07f, (zr - zl) / 2), M_IRON, 0.1f);
-        if (!i) mbox(m, V3(x, 16.75f, (zl + zr) / 2), V3(t, 0.06f, (zr - zl) / 2), M_IRON, 0.15f);
-        for (int k = 0; k < 3; k++) {
-            float z = k == 0 ? zl : k == 1 ? 0.15f : zr;
-            if (i == 1 && k == 1) continue;
-            float top = i ? 15.3f : 16.75f;
-            mbox(m, V3(x, (BED_Y + top) / 2, z), V3(t, (top - BED_Y) / 2, t), M_IRON, 0.2f);
-        }
+        float x = i ? X_FRONT + 0.06f : 0.02f;
+        mbox(m, V3(x, BED_Y + 0.1f, (zl + zr) / 2), V3(0.06f, 0.1f, (zr - zl) / 2), M_IRON, 0.1f);
     }
-    for (int k = 0; k < 3; k += 2) {
-        float z = k == 0 ? zl : zr;
-        mbox(m, V3((X_FRONT + 0.08f) / 2, BED_Y + 0.12f, z), V3((X_FRONT + 0.06f) / 2, 0.06f, 0.06f), M_IRON, 0.2f);
+    for (int k = 0; k < 2; k++) {
+        float z = k ? zr : zl;
+        mbox(m, V3((X_FRONT + 0.08f) / 2, BED_Y + 0.1f, z), V3((X_FRONT + 0.06f) / 2, 0.08f, 0.08f), M_IRON, 0.2f);
     }
-    /* front bearing straps to each arbor, and the arbors themselves */
     P2 arb[6] = {C_G1, C_G2, C_E, C_S1, C_S2, C_F};
-    for (int i = 0; i < 6; i++) {
-        /* a slim cock (bearing bracket) rising from the bed to each arbor */
-        float x = X_FRONT + 0.06f;
-        v3 a = V3(x, BED_Y + 0.15f, arb[i].z + 0.12f), b = V3(x, arb[i].y, arb[i].z);
-        mcyl(m, a, b, 0.028f, 0.022f, 6, 0, M_IRON, 0.25f);
-        mcyl(m, V3(x - 0.02f, arb[i].y, arb[i].z), V3(x + 0.1f, arb[i].y, arb[i].z), 0.07f, 0.07f, 14, 3, M_BRASS, 0.9f);
-        mcyl(m, V3(0.0f, arb[i].y, arb[i].z), V3(0.07f, arb[i].y, arb[i].z), 0.07f, 0.07f, 14, 3, M_BRASS, 0.9f);
+    for (int i = 0; i < 6; i++)
+        for (int side = 0; side < 2; side++) {
+            float x = side ? X_FRONT + 0.06f : 0.02f, lean = side ? 0.14f : -0.14f;
+            /* an A of two legs to each bearing */
+            for (int leg = -1; leg <= 1; leg += 2) {
+                v3 a = V3(x, BED_Y + 0.2f, arb[i].z + leg * (0.22f + 0.1f * (arb[i].y - BED_Y))), b = V3(x, arb[i].y - 0.05f, arb[i].z);
+                (void)lean;
+                mcyl(m, a, b, 0.026f, 0.02f, 6, 0, M_IRON, 0.25f);
+            }
+            mcyl(m, V3(x - 0.05f, arb[i].y, arb[i].z), V3(x + 0.07f, arb[i].y, arb[i].z), 0.075f, 0.075f, 14, 3, M_BRASS, 0.9f);
+        }
+    /* the pendulum hangs from a beam across the room */
+    mbox(m, V3(X_PEND, PEND_TOP + 0.45f, 0), V3(0.14f, 0.18f, 3.0f), M_WOOD, 0.45f);
+    mbox(m, V3(X_PEND, PEND_TOP + 0.18f, C_E.z), V3(0.08f, 0.12f, 0.12f), M_IRON, 0.3f);
+    /* a candle lantern on the bed by the escapement */
+    {
+        v3 c = V3(1.75f, BED_Y + 0.42f, -2.1f);
+        mbox(m, c, V3(0.09f, 0.14f, 0.09f), M_LAMP, 1);
+        mbox(m, vadd(c, V3(0, 0.17f, 0)), V3(0.11f, 0.025f, 0.11f), M_IRON, 0.2f);
+        mbox(m, vadd(c, V3(0, -0.16f, 0)), V3(0.11f, 0.025f, 0.11f), M_IRON, 0.2f);
+        mcyl(m, vadd(c, V3(0, 0.19f, 0)), vadd(c, V3(0, 0.32f, 0)), 0.08f, 0.01f, 8, 0, M_IRON, 0.2f);
+        mbox(m, V3(1.75f, BED_Y + 0.1f, -2.1f), V3(0.35f, 0.1f, 0.35f), M_WOOD, 0.3f);
+        lamp_pos[1] = vadd(c, V3(0, 0.02f, 0));
     }
-    /* the pendulum's suspension bracket */
-    mbox(m, V3(X_PEND, PEND_TOP + 0.25f, C_E.z), V3(0.1f, 0.25f, 0.18f), M_IRON, 0.3f);
-    mbox(m, V3((X_PEND + 0.05f) / 2, PEND_TOP + 0.45f, C_E.z), V3((X_PEND + 0.05f) / 2, 0.06f, 0.06f), M_IRON, 0.3f);
     /* a ladder to the bed, and the lamp's chain */
     for (int s = -1; s <= 1; s += 2) {
         v3 a = V3(-2.55f, GFLOOR, -2.35f + s * 0.25f), b = V3(-2.75f, BED_Y + 0.8f, -2.35f + s * 0.25f);
@@ -934,7 +944,8 @@ static void build_tower(Mesh *m) {
     mbox(m, lampc, V3(0.13f, 0.2f, 0.13f), M_LAMP, 0);
     mbox(m, vadd(lampc, V3(0, 0.25f, 0)), V3(0.17f, 0.04f, 0.17f), M_IRON, 0.2f);
     mbox(m, vadd(lampc, V3(0, -0.22f, 0)), V3(0.15f, 0.03f, 0.15f), M_IRON, 0.2f);
-    lamp_pos[nlamp++] = lampc;
+    lamp_pos[0] = lampc;
+    nlamp = 2;
     /* the bell's frame beam and the hammer's bracket */
     mbox(m, V3(1.75f, HAM_PIV.y, 0), V3(0.2f, 0.12f, 0.18f), M_IRON, 0.3f);
     mbox(m, V3(2.4f, HAM_PIV.y, 0), V3(0.6f, 0.08f, 0.08f), M_IRON, 0.3f);
@@ -1250,7 +1261,7 @@ static void build_dynamic(Mesh *m) {
 typedef struct { float x0, z0, x1, z1, step; } Patch;
 static const Patch patches[] = {
     {-48, -48, 48, 48, 0.6f},          /* the islet and its skerries */
-    {-30, 48, 36, 168, 1.0f},          /* the reef along the causeway */
+    {-40, 48, 44, 196, 1.0f},          /* the reef along the causeway, and its beach */
     {-150, 100, 180, 340, 1.6f},       /* the shore the camera stands on */
     {-720, -640, 720, 880, 8.0f},      /* the bay and the headlands */
 };
@@ -1627,6 +1638,12 @@ float cloudShadow(vec3 p) {
     vec2 q = p.xz + uKeyDir.xz / max(uKeyDir.y, 0.06) * (1600.0 - p.y);
     return 1.0 - 0.88 * cloudAt(q);
 }
+/* the same from the first octave only: for the sea and the air */
+float cloudShadowFast(vec3 p) {
+    vec2 q = (p.xz + uKeyDir.xz / max(uKeyDir.y, 0.06) * (1600.0 - p.y)) / 900.0 + uWind * uTime * 0.0002;
+    float n = nz(q).r * 0.55 + 0.28 * 0.5 + 0.17 * 0.5;
+    return 1.0 - 0.88 * smoothstep(1.02 - uCloud * 0.95, 1.18 - uCloud * 0.75, n + 0.12);
+}
 float shadowAt(vec3 p, vec3 n) {
     vec4 s = uShadowVP * vec4(p + n * 0.04, 1.0);
     vec3 q = s.xyz * 0.5 + 0.5;
@@ -1704,14 +1721,14 @@ vec3 lamps(vec3 p, vec3 n, vec3 v, vec3 alb, float rough, vec3 f0) {
     vec3 sum = vec3(0.0);
     for (int i = 0; i < uNLamp; i++) {
         /* the gear room's lamp burns day and night; the lanterns only at night */
-        float on = i == 0 ? max(uNight, 0.45) : uNight;
+        float on = i < 2 ? max(uNight, 0.5) : uNight;
         if (on < 0.01) continue;
         vec3 L = uLamp[i].xyz - p;
         float d2 = dot(L, L);
         if (d2 > 900.0) continue;
         bool inside = abs(p.x) < 3.05 && abs(p.z) < 3.05 && p.y > 8.0 && p.y < 21.5;
-        if (i == 0 && !inside) continue;
-        if (i > 0 && inside) continue;
+        if (i < 2 && !inside) continue;
+        if (i >= 2 && inside) continue;
         L *= inversesqrt(d2);
         float NL = max(dot(n, L), 0.0);
         float att = uLamp[i].w / (d2 + 0.4) * smoothstep(900.0, 300.0, d2);
@@ -1730,7 +1747,7 @@ vec3 shade(vec3 p, vec3 n, vec3 v, vec3 alb, float rough, float metal, float ao,
     float NL = dot(n, uKeyDir);
     vec3 col = vec3(0.0);
     if (NL > 0.0) {
-        float sh = shadowAt(p, n) * cloudShadow(p);
+        float sh = (dot(uCam - p, uCam - p) < 3600.0 ? shadowAt(p, n) : shadowFast(p + n * 0.05)) * cloudShadow(p);
         vec3 h = normalize(uKeyDir + v);
         float NH = max(dot(n, h), 0.0), VH = max(dot(v, h), 0.0);
         vec3 F = f0 + (1.0 - f0) * pow(1.0 - VH, 5.0);
@@ -1739,6 +1756,7 @@ vec3 shade(vec3 p, vec3 n, vec3 v, vec3 alb, float rough, float metal, float ao,
     }
     /* sky and bounce, and the sky in the sheen */
     vec3 amb = mix(uAmbGnd, uAmbSky, n.y * 0.5 + 0.5);
+    if (occ < 0.99) occ *= 0.55 + 0.6 * max(n.x, 0.0) + 0.1 * n.y;
     col += dif * amb * ao * occ;
     /* inside, light bounced off the sunlit floor and stone, warm */
     if (occ < 0.99) col += dif * ao * (uKeyCol * max(uKeyDir.y, 0.15) * 0.11 * cloudShadow(p) + uAmbSky * 0.3) * vec3(1.0, 0.8, 0.6) * (1.0 - occ);
@@ -1816,7 +1834,7 @@ void stone(vec3 p, inout vec3 n, vec3 gn, vec2 uv, float aux, float rubble, out 
     float W = fbm2(wp * 0.11 + 3.0);
     float grain = fbm2(uv * 1.3 + b.z * 7.0);
     float h = smoothstep(0.0, 0.04, e) * 0.01 + (grain - 0.5) * 0.004;
-    if (uLowQ < 0.5) n = bump(p, n, h);
+    if (uLowQ < 0.5 && dot(uCam - p, uCam - p) < 8100.0) n = bump(p, n, h);
     vec3 warm = vec3(0.34, 0.315, 0.28), cool = vec3(0.29, 0.295, 0.29);
     vec3 c = mix(warm, cool, b.z) * (0.9 + 0.2 * b.w);
     c *= 0.86 + 0.28 * grain;
@@ -1913,6 +1931,7 @@ void main() {
         float on = uNight;
         float flick = 1.0;
         if (m == 7 && k == 4) on = 0.0;                               /* one has gone out */
+        if (m == 13) on = max(uNight, 0.5);
         if (m == 7 && k == 6) flick = 0.55 + 0.45 * smoothstep(0.2, 0.6, nz(vec2(uTime * 0.7, 0.3)).r);
         flick *= 0.92 + 0.08 * nz(vec2(uTime * 2.3 + vAux, 0.7)).g;
         alb = vec3(0.05, 0.05, 0.05);
@@ -2035,8 +2054,8 @@ void main() {
     float sandK = shore * level * (1.0 - smoothstep(1.8, 3.5, p.y)) * smoothstep(-3.0, -0.5, p.y);
     vec3 sand = mix(vec3(0.42, 0.39, 0.33), vec3(0.30, 0.28, 0.25), g3) * (0.85 + 0.3 * step(0.7, hash12(floor(w * 9.0))));
     float turfK = shore * smoothstep(0.35, 0.15, slope) * smoothstep(4.0, 7.0, p.y + g1 * 3.0);
-    vec3 turf = mix(vec3(0.16, 0.19, 0.08), vec3(0.25, 0.25, 0.12), g1);
-    turf = mix(turf, vec3(0.22, 0.13, 0.15), smoothstep(0.6, 0.7, nz(w * 0.05).r) * 0.8);
+    vec3 turf = mix(vec3(0.075, 0.095, 0.045), vec3(0.16, 0.15, 0.08), g1 * 0.7 + g2 * 0.3);
+    turf = mix(turf, vec3(0.12, 0.07, 0.08), smoothstep(0.55, 0.7, nz(w * 0.05).r) * 0.85);
     vec3 alb = rock;
     alb = mix(alb, sand, sandK);
     alb = mix(alb, turf, turfK);
@@ -2235,7 +2254,7 @@ void main() {
     /* the bell's blows ripple out over the bay */
     for (int i = 0; i < 4; i++) {
         float tb = uPulse[i];
-        if (tb < 0.0 || tb > 14.0) continue;
+        if (tb < 0.0 || tb > 14.0) break;
         vec2 dv = p.xz - uBellPos.xz;
         float r = length(dv), R = tb * 22.0;
         float env = exp(-abs(r - R) * 0.35) * exp(-tb * 0.22) * 0.5;
@@ -2249,7 +2268,7 @@ void main() {
     vec2 suv = gl_FragCoord.xy / uScreen + n.xz * vec2(0.6, 0.6) * 0.05 / (1.0 + dist * 0.02);
     vec4 refl = texture(uRefl, clamp(suv, vec2(0.001), vec2(0.999)));
     /* the body of the water: green in the shallows, slate in the deep */
-    float sh = shadowFast(p) * cloudShadow(p);
+    float sh = shadowFast(p) * cloudShadowFast(p);
     vec3 lightIn = uAmbSky * 0.9 + uKeyCol * max(uKeyDir.y, 0.0) * sh * 0.45;
     vec3 deep = vec3(0.006, 0.02, 0.026), shallow = vec3(0.035, 0.085, 0.075);
     vec3 body = mix(shallow, deep, smoothstep(0.0, 5.0, depth)) * lightIn;
@@ -2264,7 +2283,7 @@ void main() {
     vec3 spec = uKeyCol * sh * ggx(NH, a * a) * F * 0.5 * step(0.0, uKeyDir.y);
     /* lamps glitter in it at night */
     if (uNight > 0.01) {
-        for (int i = 1; i < uNLamp; i++) {
+        for (int i = 2; i < uNLamp; i++) {
             vec3 L = uLamp[i].xyz - p;
             float d2 = dot(L, L);
             if (d2 > 2500.0) continue;
@@ -2273,8 +2292,11 @@ void main() {
         }
     }
     /* foam: on the rocks and the causeway, where it's shallow, as the swell runs in */
-    float fn = fbm2(p.xz * 0.35 + vec2(uTime * 0.03, 0.0));
-    float fn2 = nz(p.xz * 1.3 - vec2(0.0, uTime * 0.05)).a;
+    float fn = 0.5, fn2 = 0.5;
+    if (depth < 1.4 || uWaveAmp > 0.6) {
+        fn = fbm2(p.xz * 0.35 + vec2(uTime * 0.03, 0.0));
+        fn2 = nz(p.xz * 1.3 - vec2(0.0, uTime * 0.05)).a;
+    }
     float surge = 0.5 + 0.5 * sin(uTime * 0.9 - depth * 3.0 + fn * 6.0 + p.x * 0.05);
     float shoreF = smoothstep(0.7, 0.0, depth + (fn - 0.5) * 0.5 - surge * 0.25);
     float lace = smoothstep(0.5, 0.8, fn2 * 0.6 + fn * 0.4 + surge * 0.35);
@@ -2373,7 +2395,7 @@ void main() {
     float zn = z * 2.0 - 1.0;
     float lin = 2.0 * uNF.x * uNF.y / (uNF.y + uNF.x - zn * (uNF.y - uNF.x));
     float tmax = min(lin * length(rdc), z >= 1.0 ? 350.0 : 600.0);
-    const int N = 20;
+    const int N = 14;
     float j = fract(52.9829189 * fract(dot(gl_FragCoord.xy + uFrame * vec2(5.3, 7.1), vec2(0.06711056, 0.00583715))));
     float dt = tmax / float(N);
     float mu = dot(rd, uKeyDir);
@@ -2385,7 +2407,7 @@ void main() {
         float t = (float(i) + j) * dt;
         vec3 p = uCam + rd * t;
         float dn = density(p);
-        float vis = shadowAt(p, vec3(0.0)) * cloudShadow(p);
+        float vis = shadowFast(p) * cloudShadowFast(p);
         float T = exp(-od);
         sum += vec3(vis * dn * T * dt);
         od += dn * dt;
@@ -2404,8 +2426,8 @@ void main() {
             float t1 = -b - s, t2 = -b + s;
             if (t1 > 0.0 && t1 < tmax) hit += 1.0;
             if (t2 > 0.0 && t2 < tmax) hit += 1.0;
-            float graze = exp(-s * 0.15);
-            col += vec3(1.0, 0.85, 0.6) * hit * graze * exp(-tb * 0.7) * 0.05 * (uAmbSky + uKeyCol * 0.2 + 0.03);
+            float graze = exp(-s * s * 0.03);
+            col += vec3(1.0, 0.88, 0.7) * hit * graze * exp(-tb * 0.6) * 0.06 * (uAmbSky + uKeyCol * 0.15 + 0.02);
         }
     }
     oCol = vec4(col, 1.0);
@@ -2833,8 +2855,8 @@ static void birds_update(double t) {
 /* ---- the camera: a slow tour, as one smooth path through key shots ---- */
 typedef struct { float t; v3 p, look; float fov, sx, sy, span; } Key;
 static const Key keys[] = {
-    {0,   {52, 21.5f, 198},   {0, 19, 0},       44, 0.40f, 0.02f, 1},
-    {36,  {31, 11.5f, 186},   {0, 18, 0},       42, 0.30f, 0.00f, 1},
+    {0,   {30, 4.6f, 176},   {0, 20, 0},       40, 0.38f, 0.06f, 1},
+    {36,  {16, 4.2f, 170},   {0, 19, 0},       42, 0.30f, 0.05f, 1},
     {66,  {7.0f, 3.4f, 162}, {1, 16, 0},       46, 0.18f, 0.05f, 1},
     {96,  {9.0f, 2.6f, 118}, {0, 17, 0},       48, 0.15f, 0.05f, 1},
     {124, {6.5f, 2.4f, 80},  {-1, 15, 0},      48, 0.10f, 0.05f, 1},
@@ -2883,6 +2905,9 @@ static void tour(float t, v3 *pos, v3 *look, float *fov, v3 *frame) {
     v3 n0 = vscale(vsub(lb, lp), 1 / (tb - tp)), n1 = vscale(vsub(ln, la), 1 / (tn - ta));
     *pos = herm(pa, pb, m0, m1, s, dt);
     *look = herm(la, lb, n0, n1, s, dt);
+    /* never in the ground: ride a little over it */
+    float g = terrain(pos->x, pos->z) + 1.7f;
+    if (pos->y < g + 1.0f) pos->y = g + 1.0f * expf((pos->y - g - 1.0f) / 1.0f);
     float e = s * s * (3 - 2 * s);
     *fov = mixf(fa, fb, e);
     *frame = vlerp(ra, rb, e);
@@ -3083,7 +3108,7 @@ static GLuint mk_fbo(GLuint tex) {
 static void resize_targets(int w, int h) {
     if (w == sc_w && h == sc_h) return;
     if (sc_w) {
-        glDeleteFramebuffers(1, &fbo_ms); glDeleteRenderbuffers(1, &rb_ms_col); glDeleteRenderbuffers(1, &rb_ms_dep);
+        if (opt_msaa > 1) { glDeleteFramebuffers(1, &fbo_ms); glDeleteRenderbuffers(1, &rb_ms_col); glDeleteRenderbuffers(1, &rb_ms_dep); }
         glDeleteFramebuffers(1, &fbo_scene); glDeleteTextures(1, &tex_scene); glDeleteTextures(1, &tex_depth);
         glDeleteFramebuffers(1, &fbo_refl); glDeleteTextures(1, &tex_refl); glDeleteRenderbuffers(1, &rb_refl_dep);
         glDeleteFramebuffers(1, &fbo_vol); glDeleteTextures(1, &tex_vol);
@@ -3092,6 +3117,7 @@ static void resize_targets(int w, int h) {
     }
     sc_w = w; sc_h = h;
     int ms = opt_msaa;
+    if (ms > 1) {
     glGenFramebuffers(1, &fbo_ms);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_ms);
     glGenRenderbuffers(1, &rb_ms_col);
@@ -3105,6 +3131,7 @@ static void resize_targets(int w, int h) {
     else glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, w, h);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb_ms_dep);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) die("multisampled target incomplete");
+    }
 
     tex_scene = mk_tex(GL_RGBA16F, w, h, GL_RGBA, GL_HALF_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
     tex_depth = mk_tex(GL_DEPTH_COMPONENT32F, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, NULL, GL_NEAREST, GL_CLAMP_TO_EDGE);
@@ -3120,11 +3147,11 @@ static void resize_targets(int w, int h) {
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb_refl_dep);
 
     for (int i = 0; i < 2; i++) {
-        tex_taa[i] = mk_tex(GL_RGBA16F, w, h, GL_RGBA, GL_HALF_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
+        tex_taa[i] = mk_tex(GL_R11F_G11F_B10F, w, h, GL_RGB, GL_HALF_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
         fbo_taa[i] = mk_fbo(tex_taa[i]);
     }
     taa_hist = 0;
-    tex_vol = mk_tex(GL_RGBA16F, (w + 3) / 4, (h + 3) / 4, GL_RGBA, GL_HALF_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
+    tex_vol = mk_tex(GL_R11F_G11F_B10F, (w + 3) / 4, (h + 3) / 4, GL_RGB, GL_HALF_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
     fbo_vol = mk_fbo(tex_vol);
     int bw = w, bh = h;
     for (int i = 0; i < NBLOOM; i++) {
@@ -3132,7 +3159,7 @@ static void resize_targets(int w, int h) {
         if (bw < 1) bw = 1;
         if (bh < 1) bh = 1;
         bloom_w[i] = bw; bloom_h[i] = bh;
-        tex_bloom[i] = mk_tex(GL_RGBA16F, bw, bh, GL_RGBA, GL_HALF_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
+        tex_bloom[i] = mk_tex(GL_R11F_G11F_B10F, bw, bh, GL_RGB, GL_HALF_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
         fbo_bloom[i] = mk_fbo(tex_bloom[i]);
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -3173,7 +3200,7 @@ static void setup_view(void) {
             best = span[i][3] / span[i][2];
             has_portrait = 1;
             por_x = span[i][0] + span[i][2] / 2 - cam_cx;
-            por_y = span[i][1] + span[i][3] * 0.52f - cam_cy;
+            por_y = span[i][1] + span[i][3] * 0.40f - cam_cy;
         }
     view_x = span[span_me][0]; view_y = span[span_me][1];
     view_w = span[span_me][2]; view_h = span[span_me][3];
@@ -3300,7 +3327,7 @@ static void set_common(GLuint p) {
     float lp[MAXL][4];
     for (int i = 0; i < nlamp; i++) {
         lp[i][0] = lamp_pos[i].x; lp[i][1] = lamp_pos[i].y; lp[i][2] = lamp_pos[i].z;
-        lp[i][3] = i == 0 ? 3.5f : (i - 1 == 4 ? 0 : 6.0f);
+        lp[i][3] = i == 0 ? 3.5f : i == 1 ? 1.6f : (i - 2 == 4 ? 0 : 6.0f);
     }
     glUniform4fv(U(p, "uLamp"), nlamp, &lp[0][0]);
     glUniform1i(U(p, "uNLamp"), nlamp);
@@ -3378,8 +3405,8 @@ static void fullscreen(void) {
 }
 
 /* --bench: GPU time per pass */
-enum { PR_SHADOW, PR_REFL, PR_OPAQUE, PR_SKY, PR_WATER, PR_VOL, PR_BLOOM, PR_POST, PR_END };
-static const char *prof_name[PR_END] = {"shadow", "reflect", "opaque", "sky", "water", "vol", "bloom", "post"};
+enum { PR_SHADOW, PR_REFL, PR_OPAQUE, PR_SKY, PR_WATER, PR_TAA, PR_VOL, PR_BLOOM, PR_POST, PR_END };
+static const char *prof_name[PR_END] = {"shadow", "reflect", "opaque", "sky", "water", "taa", "vol", "bloom", "post"};
 static GLuint prof_q[PR_END + 1];
 static double prof_ms[PR_END];
 static int prof_on;
@@ -3423,7 +3450,9 @@ static void render(GLuint target, double t, double wt) {
     glDisable(GL_CULL_FACE);
 
     prof_mark(PR_SHADOW);
-    /* 1. shadows from the key light */
+    /* 1. shadows from the key light: every other frame is plenty for what
+     * moves in them (the light itself crawls) */
+    if (frame_no % 2 == 0 || opt_shot) {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_shadow);
     glViewport(0, 0, SHADOW_N, SHADOW_N);
     glClear(GL_DEPTH_BUFFER_BIT);
@@ -3446,6 +3475,7 @@ static void render(GLuint target, double t, double wt) {
     }
     glDisable(GL_POLYGON_OFFSET_FILL);
     bind_common_tex();
+    }
 
     prof_mark(PR_REFL);
     /* 2. what the water reflects: the world mirrored in the mean surface */
@@ -3472,8 +3502,8 @@ static void render(GLuint target, double t, double wt) {
     }
 
     prof_mark(PR_OPAQUE);
-    /* 3. the scene */
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_ms);
+    /* 3. the scene (straight into the textures unless multisampled) */
+    glBindFramebuffer(GL_FRAMEBUFFER, opt_msaa > 1 ? fbo_ms : fbo_scene);
     glViewport(0, 0, sw, sh);
     glClear(GL_DEPTH_BUFFER_BIT);
     draw_meshes(1, 1, 3);
@@ -3501,10 +3531,13 @@ static void render(GLuint target, double t, double wt) {
     glDisable(GL_BLEND);
 
     /* resolve */
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_ms);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_scene);
-    glBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    glBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    prof_mark(PR_TAA);
+    if (opt_msaa > 1) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_ms);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_scene);
+        glBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    }
     glDisable(GL_DEPTH_TEST);
 
     /* temporal AA into the history */
