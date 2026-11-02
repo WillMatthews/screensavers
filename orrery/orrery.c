@@ -1812,6 +1812,24 @@ static const char *FS_SCENE = GLSL(
         return c * (0.85 + 0.15 * pores);
     }
 
+    /* a bookcase: bays of shelves, spines in leather and cloth with gilt bands */
+    vec3 books(float u, float h) {
+        float sh = floor((h + 76.0) / 36.0), hy = fract((h + 76.0) / 36.0) * 36.0;
+        float bay = abs(fract((u + 20.0) / 80.0) - 0.5) * 80.0;
+        vec3 alb = vec3(0.05, 0.028, 0.015);
+        float bx = u + sh * 37.0;
+        float bi = floor(bx / 3.4);
+        float bh = 22.0 + 9.0 * hash(vec2(bi, sh));
+        if (bay < 37.5 && hy > 2.5 && hy < bh && hash(vec2(bi, sh + 9.0)) > 0.1) {
+            float hu = hash(vec2(bi, sh + 2.0));
+            vec3 bc = hu < 0.3 ? vec3(0.16, 0.035, 0.03) : hu < 0.55 ? vec3(0.04, 0.08, 0.05) : hu < 0.75 ? vec3(0.04, 0.05, 0.11) : vec3(0.17, 0.11, 0.06);
+            bc *= 0.6 + 0.6 * hash(vec2(bi, sh + 4.0));
+            float band = step(0.8, fract(hy / 4.0 + hash(vec2(bi, 1.0)))) * step(hy, bh - 3.0) * step(3.0, hy);
+            alb = mix(bc, vec3(0.35, 0.25, 0.1), band * 0.5);
+        }
+        return alb;
+    }
+
     vec3 room(vec3 P, vec3 N) {
         vec3 c = vec3(0.0);
         float d2 = dot(uSun - P, uSun - P);
@@ -1839,6 +1857,7 @@ static const char *FS_SCENE = GLSL(
                 float dm = smoothstep(0.35, 0.5, abs(sin(u.x * 0.25) * sin(u.y * 0.18)));
                 alb = vec3(0.022, 0.035, 0.028) * (0.85 + 0.25 * dm);
             }
+            if (N.x < -0.5 && P.y > -220.0 && P.y < 250.0 && h < 175.0) alb = books(P.y + 517.0, h);   /* more books on the right */
             if (N.y < -0.5) {                  /* the back wall: the window and the bookcase */
                 if (P.x > uWin.x - 12.0 && P.x < uWin.y + 12.0 && h > uWin.z - 12.0 && h < uWin.w + 14.0) {
                     alb = vec3(0.06, 0.04, 0.025);
@@ -1857,19 +1876,7 @@ static const char *FS_SCENE = GLSL(
                         alb = vec3(0.04, 0.03, 0.02) * (1.0 - glass);
                     }
                 } else if (P.x > -20.0 && P.x < 300.0 && h < 175.0) {
-                    float sh = floor((h + 76.0) / 36.0), hy = fract((h + 76.0) / 36.0) * 36.0;
-                    float bay = abs(fract((P.x + 20.0) / 80.0) - 0.5) * 80.0;
-                    alb = vec3(0.05, 0.028, 0.015);
-                    float bx = P.x + sh * 37.0;
-                    float bi = floor(bx / 3.4);
-                    float bh = 22.0 + 9.0 * hash(vec2(bi, sh));
-                    if (bay < 37.5 && hy > 2.5 && hy < bh && hash(vec2(bi, sh + 9.0)) > 0.1) {
-                        float hu = hash(vec2(bi, sh + 2.0));
-                        vec3 bc = hu < 0.3 ? vec3(0.16, 0.035, 0.03) : hu < 0.55 ? vec3(0.04, 0.08, 0.05) : hu < 0.75 ? vec3(0.04, 0.05, 0.11) : vec3(0.17, 0.11, 0.06);
-                        bc *= 0.6 + 0.6 * hash(vec2(bi, sh + 4.0));
-                        float band = step(0.8, fract(hy / 4.0 + hash(vec2(bi, 1.0)))) * step(hy, bh - 3.0) * step(3.0, hy);
-                        alb = mix(bc, vec3(0.35, 0.25, 0.1), band * 0.5);
-                    }
+                    alb = books(P.x, h);
                 }
             }
         }
@@ -2274,7 +2281,7 @@ static void camera_at(double t, const Sky *s, Cam *c) {
         break;
     }
     case S_LOW: {
-        float az = F + sgn * (0.45f + 0.5f * r1) + sgn * (u - 0.5f) * 0.22f, d = 92 - 10 * us;
+        float az = F + sgn * (0.75f + 0.55f * r1) + sgn * (u - 0.5f) * 0.22f, d = 92 - 10 * us;
         c->eye[0] = d * cosf(az); c->eye[1] = d * sinf(az); c->eye[2] = 4.5f + 2 * r2;
         c->tgt[0] = 0; c->tgt[1] = 0; c->tgt[2] = 19;
         c->fov = 28; c->ap = 1.1f;
