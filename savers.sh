@@ -6,10 +6,10 @@
 SAVERS=(pipes maze flightsim stir gauges contours clockwork nightsky soapfilm aquarium orrery atc voronoi pendulums bridge)
 
 # kept and buildable, but out of the rotation while they're being worked on
-BENCHED=(marbling ink lavalamp billiards algorithms netflow splitflap kalman clocktower neural orbits fdtd)
+BENCHED=(marbling ink lavalamp billiards algorithms netflow splitflap kalman clocktower neural orbits fdtd quantum)
 
 # savers that take --epoch/--layout/--output and treat all outputs as one wall
-SPANNING=(flightsim stir nightsky marbling splitflap gauges clockwork ink soapfilm orrery lavalamp atc billiards pendulums algorithms voronoi aquarium netflow kalman clocktower neural bridge orbits fdtd)
+SPANNING=(flightsim stir nightsky marbling splitflap gauges clockwork ink soapfilm orrery lavalamp atc billiards pendulums algorithms voronoi aquarium netflow kalman clocktower neural bridge orbits fdtd quantum)
 
 # the executable for a saver
 saver_bin() {
