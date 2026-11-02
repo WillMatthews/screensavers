@@ -48,6 +48,7 @@ static float opt_hour = -1;            /* --hour: force the local time of day (l
 static float opt_load = -1, opt_temp = -1;
 static double opt_away = -1;
 static const char *opt_focus;          /* --focus KIND: a close-up camera on one animal */
+static float opt_pose = -1e9f;         /* --pose YAW: with --focus, hold it side on for a portrait */
 static int opt_msaa = 4;
 static float opt_scale = 0;            /* internal resolution of the scene; 0: by the output's size */
 static int opt_overlay = 1;
@@ -100,13 +101,6 @@ static float tnoise(uint32_t key, double t) {
     long i = (long)fl;
     float a = hf(key, (uint32_t)i, 7) * 2 - 1, b = hf(key, (uint32_t)(i + 1), 7) * 2 - 1;
     return a + (b - a) * u;
-}
-static float tnoise_d(uint32_t key, double t) {   /* its derivative */
-    double fl = floor(t);
-    float f = (float)(t - fl), du = 30 * f * f * (f * (f - 2) + 1);
-    long i = (long)fl;
-    float a = hf(key, (uint32_t)i, 7) * 2 - 1, b = hf(key, (uint32_t)(i + 1), 7) * 2 - 1;
-    return (b - a) * du;
 }
 
 /* 2D value noise for building geometry */
@@ -1285,7 +1279,9 @@ static const char *COMMON = GLSL(
         vec2 a = texture(uCaus, uv).rg, b = texture(uCaus, uv * 1.005 + 0.001).rg;
         float k = smoothstep(0.015, 0.22, depth);
         float ca = mix(a.r, a.g, k), cb = mix(b.r, b.g, k);
-        return vec3(ca, mix(ca, cb, 0.5), cb);
+        /* the focused lines, without blowing out what they land on */
+        vec3 c = vec3(ca, mix(ca, cb, 0.5), cb);
+        return 0.3 + 0.7 * c / (1.0 + c * 0.22);
     }
     float shadow(vec3 P) {
         vec4 s = uShadowM * vec4(P - uL * 0.003, 1.0);
@@ -1689,7 +1685,6 @@ static const char *FS_ACCUM = GLSL(
 /* each frame: light the baked G-buffer */
 static const char *FS_RELIGHT = GLSL(
     in vec2 vUV;
-    uniform int uDbg;
     uniform sampler2D uG0, uG1, uG2;
     void main() {
         ivec2 p = ivec2(gl_FragCoord.xy);
@@ -1706,9 +1701,6 @@ static const char *FS_RELIGHT = GLSL(
             vec3 tr = exp(-uExt * g2.w);
             col = col * tr + uFog * fs * (1.0 - tr);
             o1 = vec4(P.z, mark, 0.0, 1.0);
-            if (uDbg == 1) col = vec3(shadow(P));
-            if (uDbg == 2) col = caustic(P) * 0.3;
-            if (uDbg == 3) col = fract(P * 10.0);
         }
         o0 = vec4(col, 1.0);
     });
@@ -2088,7 +2080,6 @@ static void build_fin(Mesh *m, int part, V3 b0, V3 b1, const V3 *outline, int no
 /* the top or bottom of the profile at s, in body units */
 static float ptop(const BodySpec *b, float s) { return prof_eval(b->prof, b->np, s, 0); }
 static float pbot(const BodySpec *b, float s) { return -prof_eval(b->prof, b->np, s, 1); }
-static float pwid(const BodySpec *b, float s) { return prof_eval(b->prof, b->np, s, 2); }
 
 /* paired fins on both sides: the outline given for the right side (z > 0) */
 static void build_pair(Mesh *m, int part, V3 b0, V3 b1, const V3 *outline, int no, int nu, int nv, float bulge) {
@@ -2173,11 +2164,11 @@ static void build_species(Mesh *m, int sp, int *body_ni) {
         build_pair(m, 5, bp(0.45f, -0.115f, 0.02f), bp(0.49f, -0.118f, 0.018f), pv, 3, 4, 3, 0.001f);
     } else if (sp == SP_ANGEL) {
         /* the tall swept sails, banded, with trailing tips */
-        V3 d[] = {bp(0.3f, 0.44f, 0), bp(0.35f, 0.72f, 0), bp(0.44f, 0.98f, 0), bp(0.6f, 1.18f, 0), bp(0.86f, 1.34f, 0),
-                  bp(0.9f, 1.02f, 0), bp(0.91f, 0.6f, 0), bp(0.94f, 0.16f, 0)};
+        V3 d[] = {bp(0.3f, 0.44f, 0), bp(0.35f, 0.72f, 0), bp(0.44f, 0.98f, 0), bp(0.64f, 1.2f, 0), bp(1.05f, 1.36f, 0),
+                  bp(0.95f, 1.02f, 0), bp(0.91f, 0.6f, 0), bp(0.94f, 0.16f, 0)};
         build_fin(m, 1, bp(0.3f, ptop(b, 0.3f) - 0.01f, 0), bp(0.9f, ptop(b, 0.9f) - 0.008f, 0), d, 8, 20, 9, z0, 0.004f);
-        V3 a[] = {bp(0.42f, -0.41f, 0), bp(0.47f, -0.68f, 0), bp(0.56f, -0.92f, 0), bp(0.7f, -1.12f, 0), bp(0.88f, -1.28f, 0),
-                  bp(0.9f, -0.98f, 0), bp(0.91f, -0.56f, 0), bp(0.94f, -0.14f, 0)};
+        V3 a[] = {bp(0.42f, -0.41f, 0), bp(0.47f, -0.68f, 0), bp(0.56f, -0.92f, 0), bp(0.72f, -1.14f, 0), bp(1.05f, -1.3f, 0),
+                  bp(0.95f, -0.98f, 0), bp(0.91f, -0.56f, 0), bp(0.94f, -0.14f, 0)};
         build_fin(m, 3, bp(0.4f, pbot(b, 0.4f) + 0.01f, 0), bp(0.9f, pbot(b, 0.9f) + 0.008f, 0), a, 8, 20, 9, z0, 0.004f);
         V3 c[] = {bp(1.0f, -0.075f, 0), bp(1.2f, -0.2f, 0), bp(1.5f, -0.36f, 0), bp(1.3f, -0.15f, 0), bp(1.24f, 0.0f, 0),
                   bp(1.3f, 0.15f, 0), bp(1.5f, 0.36f, 0), bp(1.2f, 0.2f, 0), bp(1.0f, 0.075f, 0)};
@@ -2271,8 +2262,6 @@ typedef struct {
 #define CH_BLEND 4.0
 static Sim sims[3];
 
-/* the shape of the day for the animals: 1 in daylight, 0 deep in the night */
-static float day_act(double wt) { (void)wt; return 1 - lit.night; }
 
 /* where a fish would like to be at time t: closed-form wandering, so every
  * instance (and every chapter's sim) agrees */
@@ -2754,10 +2743,10 @@ static const char *FS_FISH = GLSL(
             } else {
                 float sy = abs(y);
                 /* the long sails: grey, banded, darker at the trailing edge */
-                alb = mix(vec3(0.2, 0.21, 0.2), vec3(0.02), bar * 0.92);
+                alb = mix(vec3(0.34, 0.35, 0.33), vec3(0.02), bar * 0.92);
                 alb = mix(alb, vec3(0.04), 0.6 * smoothstep(0.5, 0.8, vUV.y) * (1.0 - smoothstep(0.86, 0.97, vUV.y)));
                 alb = mix(alb, vec3(0.03), 0.7 * (1.0 - smoothstep(0.0, 0.06, vUV.x)));
-                alpha = 0.7 + 0.2 * rays + 0.3 * bar - 0.3 * smoothstep(0.85, 1.0, vUV.y);
+                alpha = 0.5 + 0.2 * rays + 0.4 * bar - 0.25 * smoothstep(0.85, 1.0, vUV.y);
                 if (part == 4) { alpha = 0.12 + 0.2 * rays; alb = vec3(0.8); }
                 if (part == 2) { alpha = 0.3 + 0.3 * rays; alb = mix(vec3(0.5), vec3(0.12), 0.5 * rays); }
                 trans = 0.4;
@@ -2790,8 +2779,8 @@ static const char *FS_FISH = GLSL(
         } else {
             /* panda Corydoras: pale, a black mask, a black sail and a tail spot */
             if (part == 0) {
-                alb = vec3(0.84, 0.68, 0.56);
-                alb = mix(alb, vec3(0.9, 0.78, 0.7), smoothstep(-0.2, -0.7, yn));
+                alb = vec3(0.64, 0.42, 0.29);
+                alb = mix(alb, vec3(0.7, 0.52, 0.42), smoothstep(-0.2, -0.7, yn));
                 float mask = smoothstep(0.085, 0.06, abs(s - 0.165 + 0.15 * y)) * smoothstep(-0.07, -0.03, y);
                 float spot = smoothstep(1.0, 0.75, length(vec2((s - 0.915) / 0.075, (yn - 0.05) / 0.85)));
                 float dors = smoothstep(0.11, 0.06, abs(s - 0.39)) * smoothstep(0.75, 0.95, yn) * 0.8;
@@ -2801,8 +2790,8 @@ static const char *FS_FISH = GLSL(
                 float plate = 1.0 - smoothstep(0.0, 0.07, abs(fract(s * 21.0 + yn * 0.8) - 0.5) * 2.0 - 0.88);
                 alb *= 1.0 - 0.18 * max(seam, plate * smoothstep(0.25, 0.4, s) * (1.0 - smoothstep(0.85, 0.95, s)) * smoothstep(-0.8, -0.4, yn));
                 silver = 0.08;
-                irid = film(nv, vec3(0.2, 0.16, 0.2), vec3(0.08, 0.25, 0.18)) * 0.2;
-                spec = 0.4;
+                irid = film(nv, vec3(0.2, 0.16, 0.2), vec3(0.08, 0.25, 0.18)) * 0.12;
+                spec = 0.12;
             } else if (part == 7) {
                 alb = vec3(0.8, 0.72, 0.66);
             } else {
@@ -2839,7 +2828,6 @@ static const char *FS_FISH = GLSL(
             }
         }
         if (uPass == 1) { if (alpha < 0.5) discard; return; }
-        if (uFrame < -0.5 && part != 0) { alb = vec3(vUV, 0.0); alpha = 1.0; irid = vec3(0.0); silver = 0.0; }
         /* light: the lamp from above, a little wrapped (they are thin and
          * translucent), the water's glow mirrored in the silver and the
          * scales, and structural colour */
@@ -2928,7 +2916,7 @@ static void fish_upload(void) {
 /* what: 0 bodies, 1 fins, 2 both */
 static void fish_draw(int what) {
     set_common(p_fish);
-    glUniform1f(U(p_fish, "uFrame"), getenv("AQ_FINDBG") ? -1.0f : (float)(frame_no % 64));
+    glUniform1f(U(p_fish, "uFrame"), (float)(frame_no % 64));
     for (int sp = 0; sp < SP_N; sp++) {
         if (!nsp[sp]) continue;
         const BodySpec *b = &body_of[sp];
@@ -3662,14 +3650,6 @@ static void creatures_gl(void) {
     }
 }
 
-static void mesh_append(Mesh *dst, const Mesh *src) {
-    int off = dst->nv;
-    for (int i = 0; i < src->nv; i++) {
-        const float *v = src->v + (size_t)i * SV;
-        m_vert(dst, v3(v[0], v[1], v[2]), v3(v[3], v[4], v[5]), v[6], v[7], v[8], v[9], v[10], v[11]);
-    }
-    for (int k = 0; k + 2 < src->ni; k += 3) m_tri(dst, off + (int)src->ix[k], off + (int)src->ix[k + 1], off + (int)src->ix[k + 2]);
-}
 
 static void dyn_upload(int i, const Mesh *m) {
     glBindVertexArray(vao_dyn[i]);
@@ -3736,7 +3716,7 @@ static int creature_focus(const char *kind, V3 *at, float *size) {
             if (sc < bs) { bs = sc; best = i; }
         }
         if (best < 0) return 0;
-        if (getenv("AQ_SPEC")) {
+        if (opt_pose > -1000) {
             /* on top of the stone nearest the glass */
             int bs2 = 0;
             for (int i = 1; i < nstone; i++) if (stones[i].c.z - stones[i].ax.y < stones[bs2].c.z - stones[bs2].ax.y && stones[i].ax.y > 0.02f) bs2 = i;
@@ -3747,7 +3727,7 @@ static int creature_focus(const char *kind, V3 *at, float *size) {
                 float g = ground_at(stones[bs2].c.x, stones[bs2].c.z + dz);
                 if (g > topy) { topy = g; shrimp_spec_z = stones[bs2].c.z + dz; }
             }
-            shrimp_spec_yaw = (float)atof(getenv("AQ_SPEC")) * PI / 180;
+            shrimp_spec_yaw = opt_pose * PI / 180;
             eel_build(t_now);
             shrimp_build(t_now);
             dyn_upload(0, &dyn_mesh);
@@ -3768,9 +3748,9 @@ static int creature_focus(const char *kind, V3 *at, float *size) {
         if (sc > bs) { bs = sc; best = i; }
     }
     Agent *a = &shown[best];
-    if (getenv("AQ_SPEC")) {
-        /* a specimen pose for looking at the model: near the glass, side on, turned by AQ_SPEC degrees */
-        float yaw = (float)atof(getenv("AQ_SPEC")) * PI / 180;
+    if (opt_pose > -1000) {
+        /* --pose: a specimen pose for a portrait: near the glass, side on, turned by YAW degrees */
+        float yaw = opt_pose * PI / 180;
         a->p[0] = (X0 + X1) / 2; a->p[1] = sp == SP_CORY ? ground_at(a->p[0], 0.035f) + 0.03f : YW * 0.5f; a->p[2] = 0.035f;
         a->f[0] = cosf(yaw); a->f[1] = sp == SP_CORY ? -0.25f : 0; a->f[2] = sinf(yaw);
         a->roll = 0; a->bend = 0;
@@ -4139,7 +4119,7 @@ static void overlay_draw(double wt) {
     quad_v(tx - tw * 1.6f, ty + th + tw, 0, 0, none);
     int nth = tvn;
     /* its numbers */
-    float lv = mixf(0.35f, 1.0f, 1 - lit.night * 0.7f);
+    float lv = mixf(0.16f, 1.0f, 1 - lit.night);
     float ink[4] = {0.13f * lv, 0.15f * lv, 0.16f * lv, 0.9f};
     float y0 = ty + th * 0.08f, y1 = ty + th * 0.82f;
     for (int k = 0; k <= 7; k++) {
@@ -4562,6 +4542,7 @@ static void fullscreen(void) {
 
 /* everything that never moves: the G-buffer (supersampled by accumulating
  * jittered renders), its depth, and its shadow map */
+static double bake_ms;
 static void bake_static(void) {
     double t0 = now();
     t_now = 30;
@@ -4638,7 +4619,7 @@ static void bake_static(void) {
     setup_view();
     cur_pass = 0;
     glFinish();
-    if (getenv("AQ_VERBOSE")) fprintf(stderr, "aquarium: baked the still scene at %dx%d in %.0f ms\n", sw_, sh_, (now() - t0) * 1000);
+    bake_ms = (now() - t0) * 1000;
 }
 
 /* --bench: GPU time of each pass */
@@ -4674,21 +4655,6 @@ static void render(double t, double wt, GLuint target) {
     tq_begin(0);
     render_caustics(t);
     tq_end();
-    if (getenv("AQ_CDUMP")) {
-        static float px[CAUS_N * CAUS_N * 4];
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo_caus);
-        glReadPixels(0, 0, CAUS_N, CAUS_N, GL_RGBA, GL_FLOAT, px);
-        FILE *f = fopen(getenv("AQ_CDUMP"), "wb");
-        fprintf(f, "P6\n%d %d\n255\n", CAUS_N, CAUS_N);
-        double sum = 0;
-        for (int i = 0; i < CAUS_N * CAUS_N; i++) {
-            unsigned char c[3] = {(unsigned char)fminf(px[i * 4] * 80, 255), (unsigned char)fminf(px[i * 4 + 1] * 80, 255), 0};
-            sum += px[i * 4 + 1];
-            fwrite(c, 1, 3, f);
-        }
-        fclose(f);
-        fprintf(stderr, "caustics mean %.3f\n", sum / (CAUS_N * CAUS_N));
-    }
 
     /* the shadow map: the still one, then the animals */
     tq_begin(1);
@@ -4708,7 +4674,7 @@ static void render(double t, double wt, GLuint target) {
     /* the scene: the baked still part relit, then everything that moves */
     tq_begin(2);
     cur_pass = 0;
-    bind_scene_textures(getenv("AQ_SHS") ? tex_shadow_s : tex_shadow);
+    bind_scene_textures(tex_shadow);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_sdepth);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_main);
     glBlitFramebuffer(0, 0, sw_, sh_, 0, 0, sw_, sh_, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
@@ -4716,7 +4682,6 @@ static void render(double t, double wt, GLuint target) {
     glViewport(0, 0, sw_, sh_);
     glDisable(GL_DEPTH_TEST);
     set_common(p_relight);
-    glUniform1i(U(p_relight, "uDbg"), getenv("AQ_DBG") ? atoi(getenv("AQ_DBG")) : 0);
     for (int i = 0; i < 3; i++) {
         char nm[8];
         snprintf(nm, sizeof nm, "uG%d", i);
@@ -4768,7 +4733,7 @@ static void render(double t, double wt, GLuint target) {
     glUniform4fv(U(p_shafts, "uView"), 1, vr);
     glUniform3fv(U(p_shafts, "uCanCam"), 1, cc);
     glUniform1i(U(p_shafts, "uAux"), 3);
-    glUniform1f(U(p_shafts, "uShaftK"), (getenv("AQ_SK") ? atof(getenv("AQ_SK")) : 0.06f) * lit.shaft);
+    glUniform1f(U(p_shafts, "uShaftK"), 0.06f * lit.shaft);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, tex_shadow);
     glActiveTexture(GL_TEXTURE3);
@@ -4790,7 +4755,7 @@ static void render(double t, double wt, GLuint target) {
     glUniform1i(U(p_comp, "uAux"), 3);
     glUniform1i(U(p_comp, "uShafts"), 5);
     glUniform1f(U(p_comp, "uExpo"), 1.0f);
-    glUniform1f(U(p_comp, "uCA"), focus_on || getenv("AQ_NOCA") ? 0.0f : 1.0f);
+    glUniform1f(U(p_comp, "uCA"), focus_on ? 0.0f : 1.0f);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, tex_aux);
     glActiveTexture(GL_TEXTURE4);
@@ -4906,7 +4871,7 @@ static void usage(void) {
         "usage: aquarium [--window | --root | --layer] [--seed N] [--fps N] [--font FAMILY]\n"
         "                [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
         "                [--hour H] [--load 0..1] [--temp C] [--away SECONDS] [--no-overlay]\n"
-        "                [--msaa 0|2|4|8] [--scale S] [--focus tetra|angel|discus|cory|eel|shrimp|amano]\n"
+        "                [--msaa 0|2|4|8] [--scale S] [--focus tetra|angel|discus|cory|eel|shrimp|amano [--pose YAW]]\n"
         "                [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH]\n");
     exit(1);
 }
@@ -4986,6 +4951,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-temp") && i + 1 < argc) opt_temp = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-away") && i + 1 < argc) opt_away = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-focus") && i + 1 < argc) opt_focus = argv[++i];
+        else if (!strcmp(a, "-pose") && i + 1 < argc) opt_pose = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-msaa") && i + 1 < argc) opt_msaa = atoi(argv[++i]);
         else if (!strcmp(a, "-scale") && i + 1 < argc) opt_scale = clampf(strtof(argv[++i], NULL), 0.25f, 2.0f);
         else if (!strcmp(a, "-no-overlay")) opt_overlay = 0;
@@ -5073,28 +5039,6 @@ int main(int argc, char **argv) {
     caustics_init();
     rng = hash32(opt_seed) | 1;
     creatures_init();
-    if (getenv("AQ_SIMBENCH")) {
-        lighting(wall());
-        sim_init(&sims[0], 5);
-        double c0 = now();
-        for (int i = 0; i < 300; i++) sim_step(&sims[0], wall());
-        double c1 = now();
-        for (int i = 0; i < 300; i++) eel_build(i * 0.1);
-        double c2 = now();
-        for (int i = 0; i < 300; i++) shrimp_build(i * 0.1);
-        double c3 = now();
-        printf("sim step %.3f ms, eel %.3f ms, shrimp %.3f ms (%d fish, %d stones, %d branches, %d clumps)\n", (c1 - c0) / 300 * 1000,
-               (c2 - c1) / 300 * 1000, (c3 - c2) / 300 * 1000, nfish, nstone, nbr, nclump);
-        return 0;
-    }
-    if (getenv("AQ_EELLOG")) {
-        for (double t = 0; t < 900; t += 5) {
-            eel_build(t);
-            V3 h = eel_head_p;
-            printf("%5.0f head %.3f %.3f %.3f  sand %.3f ground %.3f  mode %d\n", t, h.x, h.y, h.z, sand_h(h.x, h.z), ground_at(h.x, h.z), ew.mode);
-        }
-        return 0;
-    }
     gl_init();
     setup_view();
 
@@ -5140,7 +5084,7 @@ int main(int argc, char **argv) {
         }
         printf("aquarium: %dx%d (scene %dx%d), %d frames: avg %.3f ms, worst %.3f ms per frame\n",
                W, H, sw_, sh_, opt_bench, sum / opt_bench, worst);
-        printf("aquarium: GL renderer: %s\n", (const char *)glGetString(GL_RENDERER));
+        printf("aquarium: GL renderer: %s; the still scene baked in %.0f ms\n", (const char *)glGetString(GL_RENDERER), bake_ms);
         for (int i = 0; i < 10; i++) printf("  %-10s %.3f ms\n", tq_name[i], tq_sum[i] / (tq_n ? tq_n : 1));
         printf("  cpu: sim %.3f ms, eel+shrimp+upload %.3f ms\n", cpu_ms[0] / cpu_ms[2], cpu_ms[1] / cpu_ms[2]);
         printf("  plants: swaying %d+%d+%d+%d, still %d+%d+%d+%d; scene %d verts %d tris\n",
