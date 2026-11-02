@@ -144,7 +144,7 @@ static int rn_poisson(Rng *r, double lam) {
 /* ---- small dense linear algebra, row-major doubles ---- */
 #define MX 6
 static void mm(const double *A, const double *B, double *C, int n, int m, int p) {
-    double T[MX * MX];
+    double T[MX * MX] = {0};
     for (int i = 0; i < n; i++)
         for (int j = 0; j < p; j++) {
             double s = 0;
@@ -155,7 +155,7 @@ static void mm(const double *A, const double *B, double *C, int n, int m, int p)
 }
 /* C (n x p) = A (n x m) * B^T, B is p x m */
 static void mmT(const double *A, const double *B, double *C, int n, int m, int p) {
-    double T[MX * MX];
+    double T[MX * MX] = {0};
     for (int i = 0; i < n; i++)
         for (int j = 0; j < p; j++) {
             double s = 0;
@@ -521,7 +521,6 @@ static void path_add(Path *p, int kind, double dur, double par) {
     p->s[p->n++] = (Seg){g->t0 + dur, o[0], o[1], o[5], o[4], 0, S_CV};
 }
 
-static double path_end(const Path *p) { return p->s[p->n - 1].t0; }
 
 /* ==================================================================== */
 /* ---- the acts ---- */
@@ -1071,7 +1070,7 @@ static void pf_init(void) {
     chart(0, "NIS", "\xcf\x87\xc2\xb2\xe2\x82\x81 95%", 1, 0.001f, 100);
     chart_bounds(0, 1, 10);
     chart_ser(0, S_(0, C_F1, ST_DOTS, "PF"));
-    chart(1, "POSITION ERROR", "m", 1, 30, 30000);
+    chart(1, "POSITION ERROR", "m", 1, 10, 30000);
     chart_ser(1, S_(1, C_F1, ST_LINE, "PF"));
     chart_ser(1, S_(2, C_F2, ST_LINE, "2\xcf\x83"));
     chart(2, "RANGE", "km, estimate \xc2\xb1 2\xcf\x83", 0, 0, 25);
@@ -1819,7 +1818,7 @@ static float textf(int s, float x, float y, int align, const float *c, float a, 
 }
 /* word-wrapped; returns the number of lines */
 static int text_wrap(int s, float x, float y, float maxw, float lh, const char *str, const float *c, float a, int draw) {
-    char line[512] = "", word[128];
+    char line[1200] = "", word[128];
     int lines = 0;
     const char *p = str;
     while (*p) {
@@ -1828,7 +1827,7 @@ static int text_wrap(int s, float x, float y, float maxw, float lh, const char *
         while (*p && *p != ' ' && n < 127) word[n++] = *p++;
         word[n] = 0;
         if (!n) break;
-        char tryl[640];
+        char tryl[1200];
         snprintf(tryl, sizeof tryl, "%s%s%s", line, line[0] ? " " : "", word);
         if (line[0] && text_w(s, tryl) > maxw) {
             if (draw) text(s, x, y + lines * lh, -1, line, c, a);
@@ -2411,6 +2410,7 @@ static void legend_line(float *y, float x, int col, int dot, const char *name) {
 }
 
 static void draw_plot(const Rect *r, double s, double rt) {
+    (void)rt;
     vr = *r;
     vr.x += 1; vr.y += 1; vr.w -= 2; vr.h -= 2;
     if (A.follow) {                     /* a camera that eases after the car */
@@ -2537,7 +2537,7 @@ static void draw_plot(const Rect *r, double s, double rt) {
             double x[4], P2[3];
             fdisp(&A.f[k], s, x, P2);
             draw_trail(&A.ft[k], A.fcol[k], 0.75f, 1.4f * U);
-            double lead = A.id == A_KF ? 2 : A.id == A_PF ? 600 : 15;
+            double lead = A.id == A_KF ? 2 : A.id == A_PF ? 300 : 15;
             draw_est(x, P2, A.fcol[k], k == 0 ? 1 : 0.85f, A.fname[k], lead, k == 0, k * 16 * U);
             if (A.id == A_UKF && k == 0) {   /* the sigma points of the predicted covariance */
                 Filt g = A.f[0];
@@ -2655,10 +2655,11 @@ static const char *mats_head(void) {
 }
 
 static void draw_mats(const Rect *r, double s) {
+    (void)s;
     Rect in = {r->x + 34 * U, r->y + 46 * U, r->w - 44 * U, r->h - 54 * U};
     double M[36];
     if (A.id == A_MTT) {
-        float cs = fminf(in.h / 6.0f, in.w * 0.55f / 8.0f);
+        float cs = fminf(fminf(in.h / 6.0f, in.w * 0.55f / 8.0f), 40 * U);
         int nr = A.cost_r, nc = A.cost_c;
         double C[48];
         char rl[6][8], cl[8][8];
@@ -2673,7 +2674,7 @@ static void draw_mats(const Rect *r, double s) {
         else text(s_small, in.x, in.y + cs, -1, "no confirmed track in this sector", pal[C_DIM], 1);
         if (A.last_trk >= 0 && A.last_trk < A.ntk) {
             const Track *k = &A.tk[A.last_trk];
-            float cs2 = fminf(in.h / 4.0f, in.w * 0.4f / 4.0f), x2 = in.x + in.w - cs2 * 4;
+            float cs2 = fminf(fminf(in.h / 4.0f, in.w * 0.4f / 4.0f), 48 * U), x2 = in.x + in.w - cs2 * 4;
             heat(x2, in.y, cs2, 4, 4, k->f.P, 0, LBL4, LBL4, NULL);
             textf(s_small, x2, in.y + cs2 * 4 + 14 * U, -1, pal[C_DIM], 1, "T%02d", k->id);
         }
@@ -2682,7 +2683,7 @@ static void draw_mats(const Rect *r, double s) {
     if (!A.finit && !(A.id == A_PF && A.nbrg)) return;
     const Filt *f = &A.f[0];
     int n = f->n > 6 ? 6 : f->n;
-    float cs = fminf(in.h / n, in.w * 0.58f / n);
+    float cs = fminf(fminf(in.h / n, in.w * 0.58f / n), 48 * U);
     memcpy(M, f->P, sizeof(double) * n * n);
     heat(in.x, in.y, cs, n, n, M, 0, n == 5 ? LBL5 : LBL4, n == 5 ? LBL5 : LBL4, NULL);
     float x2 = in.x + cs * n + 50 * U;
@@ -2711,7 +2712,7 @@ static void draw_mats(const Rect *r, double s) {
     }
     const Filt *g = A.id == A_IMM ? &A.mo[1] : f;
     int gn = g->n;
-    float cs2 = fminf(in.h / gn, (r->x + r->w - 12 * U - x2) / 2);
+    float cs2 = fminf(fminf(in.h / gn, (r->x + r->w - 12 * U - x2) / 2), 48 * U);
     heat(x2, in.y, cs2, gn, 2, g->K, 1, gn == 5 ? LBL5 : LBL4, A.id == A_KF ? LBLZ : LBLRB, NULL);
 }
 
@@ -3098,7 +3099,7 @@ static void draw_title(const Rect *r) {
     eq_s[0] = style(F_MATH, base); eq_s[1] = style(F_MATH, base * 0.7f);
     float widest = 1;
     for (int i = 0; i < ne; i++) widest = fmaxf(widest, eq(0, 0, EQS[A.id][i], pal[C_TEXT], 1, 0));
-    float avail = r->y + r->h - pad - y, sc = fminf(1, fminf(w / widest, avail / (ne * 1.75f * base)));
+    float avail = r->y + r->h - pad - y, sc = fminf(1.7f, fminf(w / widest, avail / (ne * 1.75f * base)));
     float px = fmaxf(base * sc, 9);
     eq_s[0] = style(F_MATH, px); eq_s[1] = style(F_MATH, px * 0.7f);
     float el = fminf(px * 2.0f, avail / ne);
@@ -3653,7 +3654,7 @@ int main(int argc, char **argv) {
         sim_to(opt_at);
         render(A.s, A.s / A.TS, t_wall0 + opt_at, fbo);      /* warm-up: static layer, glyphs */
         glFinish();
-        double sum = 0, worst = 0, gsum = 0, gworst = 0, csum = 0;
+        double sum = 0, worst = 0, gsum = 0, gworst = 0, csum = 0, rsum = 0;
         for (int i = 0; i < opt_bench; i++) {
             double f0 = now(), t = opt_at + (i + 1) / 30.0;
             sim_to(t);
@@ -3661,6 +3662,7 @@ int main(int argc, char **argv) {
             glBeginQuery(GL_TIME_ELAPSED, q);
             render(A.s, A.s / A.TS, t_wall0 + t, fbo);
             glEndQuery(GL_TIME_ELAPSED);
+            rsum += (now() - c0) * 1000;
             glFinish();
             GLuint64 ns = 0;
             glGetQueryObjectui64v(q, GL_QUERY_RESULT, &ns);
@@ -3670,8 +3672,8 @@ int main(int argc, char **argv) {
             if (ms > worst) worst = ms;
             if (gms > gworst) gworst = gms;
         }
-        printf("kalman: act %d, %dx%d, %d frames: GPU avg %.3f ms (worst %.3f); frame wall avg %.3f ms (worst %.3f), of which sim %.3f ms\n",
-               A.id + 1, W, H, opt_bench, gsum / opt_bench, gworst, sum / opt_bench, worst, csum / opt_bench);
+        printf("kalman: act %d, %dx%d, %d frames: GPU avg %.3f ms (worst %.3f); frame wall avg %.3f ms (worst %.3f): sim %.3f ms, drawing (CPU) %.3f ms\n",
+               A.id + 1, W, H, opt_bench, gsum / opt_bench, gworst, sum / opt_bench, worst, csum / opt_bench, rsum / opt_bench);
         printf("kalman: GL renderer: %s\n", (const char *)glGetString(GL_RENDERER));
         return 0;
     }
