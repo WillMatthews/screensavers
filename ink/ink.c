@@ -172,23 +172,32 @@ typedef struct {
 } Drop;
 typedef struct { int n; Drop d[MAXDROP]; } Scene;
 
+/* the inks come out of a shuffled bag holding each in proportion to its
+ * weight, so every scene has its main colours (not, by chance, all accent),
+ * and never the same twice running */
+static int bag[32], nbag, bagi;
 static int pick_ink(int avoid) {
-    float tot = 0;
-    for (int i = 0; i < 4; i++) if (i != avoid) tot += P->w[i];
-    float r = frand() * tot;
-    for (int i = 0; i < 4; i++) {
-        if (i == avoid) continue;
-        if ((r -= P->w[i]) <= 0) return i;
+    if (bagi >= nbag) {
+        nbag = bagi = 0;
+        for (int i = 0; i < 4; i++)
+            for (int k = (int)lroundf(P->w[i] * 4); k > 0 && nbag < 32; k--) bag[nbag++] = i;
+        for (int i = nbag - 1; i > 0; i--) {
+            int j = (int)(frand() * (i + 1)) % (i + 1), t = bag[i];
+            bag[i] = bag[j]; bag[j] = t;
+        }
     }
-    return avoid == 0 ? 1 : 0;
+    for (int i = bagi; i < nbag; i++)
+        if (bag[i] != avoid) { int t = bag[i]; bag[i] = bag[bagi]; bag[bagi] = t; break; }
+    return bag[bagi++];
 }
 
 static void gen_scene(int idx, Scene *s) {
     idx += scene_shift;
     rng = mix32(opt_seed * 2654435761U ^ (uint32_t)idx * 0x9E3779B9U ^ 0x1c4U);
     memset(s, 0, sizeof *s);
-    float mg = fmaxf(0.08f, 0.14f * (wall_r - wall_l)), t = 1.6f, lo = wall_l + mg, hi = wall_r - mg;
+    float tw = wall_r - wall_l, mg = fmaxf(0.08f, (tw < 1.0f ? 0.2f : 0.14f) * tw), t = 1.6f, lo = wall_l + mg, hi = wall_r - mg;
     int last = -1;
+    nbag = bagi = 0;
     float lastx = (lo + hi) / 2;
     while (t < SCENE - FADE - 28 && s->n < MAXDROP) {
         int pair = s->n > 0 && frand() < 0.22f;
@@ -208,12 +217,13 @@ static void gen_scene(int idx, Scene *s) {
             x = fminf(fmaxf(x, lo), hi);
             d->x = lastx = x;
             d->layer = s->n > 1 && frand() < 0.3f;
-            d->r = frange(0.018f, 0.03f) * (d->layer ? 0.85f : 1.0f);
+            /* a narrow (portrait) tank takes smaller drops, or one fills it */
+            d->r = frange(0.018f, 0.03f) * (d->layer ? 0.85f : 1.0f) * fminf(1.0f, fmaxf(0.65f, tw / 1.5f));
             d->speed = frange(0.26f, 0.36f);
             d->wob = frange(-0.18f, 0.18f);
         }
         /* a wider tank (a wall of outputs) gets them more often */
-        t += frange(7.0f, 17.0f) * (s->n < 3 ? 0.8f : 1.0f) * fminf(1.0f, 1.6f / (wall_r - wall_l));
+        t += frange(7.0f, 17.0f) * (s->n < 3 ? 0.8f : 1.0f) * fminf(1.0f, 1.6f / tw) * fmaxf(1.0f, 1.1f / tw);
     }
 }
 
@@ -496,8 +506,8 @@ static const char *FS_SHOW = GLSL(
         }
         vec3 sc = (c.x * uCol[0] + c.y * uCol[1] + c.z * uCol[2] + c.w * uCol[3]) / tot;
         /* faint old ink sinks back into the dark; dense new ink stands out */
-        float a = 1.0 - exp(-0.9 * tot * tot / (tot + 0.3));
-        float lt2 = exp(-sh * 0.03 * uFade);
+        float a = 1.0 - exp(-1.4 * tot * tot / (tot + 0.2));
+        float lt2 = exp(-sh * 0.02 * uFade);
         float thin = tot * exp(-tot * 1.2);
         float edge = clamp(length(vec2(dl - dr, dd - du)) * 1.5, 0.0, 1.0);
         vec3 l = sc * a * (0.1 + 2.6 * lt2 * (0.25 + 0.75 * lam)) + sc * thin * 0.6 * lt2 + sc * edge * a * 0.5 * lt2;
