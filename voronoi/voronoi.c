@@ -240,9 +240,12 @@ static void domain_init(int dw, int dh) {
         bx0 = by0 = 0; bx1 = dw; by1 = dh;
         fr[0] = fr[1] = 0; fr[2] = dw; fr[3] = dh;
     }
-    bw = bx1 - bx0; bh = by1 - by0;
     int cells = opt_cells < 20 ? 20 : opt_cells;
     sp = sqrt(fr[2] * fr[3] / cells);
+    /* relax over a margin past the screens, so the boundary row of a
+     * centroidal tessellation (squashed against the edge) is out of sight */
+    bx0 -= 1.5 * sp; by0 -= 1.5 * sp; bx1 += 1.5 * sp; by1 += 1.5 * sp;
+    bw = bx1 - bx0; bh = by1 - by0;
     N0 = (int)lround(bw * bh / (sp * sp));
     if (N0 < 8) N0 = 8;
 }
@@ -546,9 +549,10 @@ static double poly_clip_ac(double *x, double *y, int n, double *cx, double *cy) 
 #define ERA_TICKS 400
 #define RING 8
 #define NFAR 8
-enum { K_START, K_DISSOLVE, K_RIPPLE, K_SWIRL, K_WIND, K_CELLS, K_TEXT_TIME, K_TEXT_HOST };
-static const char *kind_name[] = {"start", "dissolve", "ripple", "swirl", "wind", "cells", "text (time)", "text (host)"};
-static int kind_len(int k) { return k <= K_DISSOLVE ? 80 : k >= K_TEXT_TIME ? 120 : 100; }
+enum { K_START, K_DISSOLVE, K_RIPPLE, K_SWIRL, K_WIND, K_CELLS, K_TEXT_TIME, K_TEXT_HOST, K_UNTEXT };
+#define NCYC 5
+static const char *kind_name[] = {"start", "dissolve", "ripple", "swirl", "wind", "cells", "text (time)", "text (host)", "untext"};
+static int kind_len(int k) { return k <= K_DISSOLVE ? 80 : k == K_UNTEXT ? 50 : k >= K_TEXT_TIME ? 70 : 100; }
 static int kind_dist(int k) {
     switch (k) {
     case K_DISSOLVE: return 14;
@@ -556,13 +560,16 @@ static int kind_dist(int k) {
     case K_SWIRL: return 12;
     case K_WIND: return 14;
     case K_CELLS: return 12;
+    case K_TEXT_TIME: case K_TEXT_HOST: return 10;
+    case K_UNTEXT: return 12;
     default: return 0;
     }
 }
 
-/* an era: a dissolve into a fresh scatter, then three cycles in a seeded
- * order, one of which writes text; 80 + 120 + 100 + 100 ticks */
-static void era_plan(long era, int kind[4]) {
+/* an era: a dissolve into a fresh scatter, then two disturbances and a
+ * piece of text (written, then dissolved) in a seeded order;
+ * 80 + 100 + 100 + 70 + 50 ticks */
+static void era_plan(long era, int kind[NCYC]) {
     Rng r = rng_for((uint64_t)era, 7, 0);
     kind[0] = era ? K_DISSOLVE : K_START;
     int tp = 1 + (int)(rnd(&r) * 3);
@@ -572,8 +579,11 @@ static void era_plan(long era, int kind[4]) {
         int t = mo[i]; mo[i] = mo[j]; mo[j] = t;
     }
     int mi = 0;
-    for (int c = 1; c < 4; c++)
-        kind[c] = c == tp ? (((era + (opt_seed & 1)) & 1) ? K_TEXT_HOST : K_TEXT_TIME) : mo[mi++];
+    for (int c = 1; c < NCYC; c++) {
+        if (c == tp) kind[c] = ((era + (opt_seed & 1)) & 1) ? K_TEXT_HOST : K_TEXT_TIME;
+        else if (c == tp + 1) kind[c] = K_UNTEXT;
+        else kind[c] = mo[mi++];
+    }
 }
 
 typedef struct { long era, start; int ci, kind, len, dist; } Where;
@@ -581,12 +591,12 @@ static Where locate(long k) {
     Where w;
     if (k < 0) k = 0;
     w.era = k / ERA_TICKS;
-    int kinds[4];
+    int kinds[NCYC];
     era_plan(w.era, kinds);
     long s = w.era * ERA_TICKS;
-    for (int c = 0; c < 4; c++) {
+    for (int c = 0; c < NCYC; c++) {
         int L = kind_len(kinds[c]);
-        if (k < s + L || c == 3) {
+        if (k < s + L || c == NCYC - 1) {
             w.ci = c; w.kind = kinds[c]; w.len = L; w.dist = kind_dist(kinds[c]); w.start = s;
             break;
         }
@@ -601,6 +611,7 @@ static struct {
     double *x, *y;
     uint32_t *key;                     /* colour */
     unsigned char *alive;
+    unsigned char *extra;              /* budded to write text: fused away after */
 } S;
 static double *ring_x[RING], *ring_y[RING];
 static long sim_k = -1;                /* the last tick computed */
@@ -634,10 +645,10 @@ static int *g_ofs, *g_cnt, *g_nb;      /* neighbour lists (CSR) */
 static double *g_pts, *g_ax, *g_ay, *g_a, *g_mx, *g_my, *g_m;
 
 static void sim_alloc(void) {
-    S.cap = 2 * N0 + 256;
+    S.cap = 3 * N0 + 256;
     int c = S.cap;
     S.x = calloc(c, sizeof(double)); S.y = calloc(c, sizeof(double));
-    S.key = calloc(c, sizeof(uint32_t)); S.alive = calloc(c, 1);
+    S.key = calloc(c, sizeof(uint32_t)); S.alive = calloc(c, 1); S.extra = calloc(c, 1);
     for (int i = 0; i < RING; i++) { ring_x[i] = calloc(c, sizeof(double)); ring_y[i] = calloc(c, sizeof(double)); }
     pl_tx = calloc(c, sizeof(double)); pl_ty = calloc(c, sizeof(double)); pl_dl = calloc(c, sizeof(double));
     pl_twin = calloc(c, sizeof(int)); pl_mode = calloc(c, 1);
@@ -665,6 +676,7 @@ static void gen_scatter(long era) {
 static void sim_reset(long era) {
     gen_scatter(era);
     S.n = N0;
+    memset(S.extra, 0, S.cap);
     for (int i = 0; i < N0; i++) { S.x[i] = qx[i]; S.y[i] = qy[i]; S.key[i] = qk[i]; S.alive[i] = 1; }
 }
 
@@ -706,7 +718,7 @@ static int walk_nearest(int i, double x, double y) {
 
 /* one Lloyd step (weighted by the text density at weight wt); returns the
  * largest move */
-static double lloyd(double wt) {
+static double lloyd(double wt, double alpha) {
     int m = triangulate(S.x, S.y);
     double vx[MAXV + 8], vy[MAXV + 8];
     int nb[MAXV], o = 0;
@@ -736,7 +748,8 @@ static double lloyd(double wt) {
         double nx = (g_a[i] * g_ax[i] + g_mx[i]) / mass, ny = (g_a[i] * g_ay[i] + g_my[i]) / mass;
         double mv = hypot(nx - S.x[s], ny - S.y[s]);
         if (mv > worst) worst = mv;
-        S.x[s] = nx; S.y[s] = ny;
+        nx = S.x[s] + alpha * (nx - S.x[s]); ny = S.y[s] + alpha * (ny - S.y[s]);
+        S.x[s] = fmin(fmax(nx, bx0 + 0.25), bx1 - 0.25); S.y[s] = fmin(fmax(ny, by0 + 0.25), by1 - 0.25);
     }
     return worst;
 }
@@ -766,7 +779,7 @@ static void fonts_init(void) {
     char spec[256];
     snprintf(spec, sizeof spec, "%s:weight=medium", opt_font);
     face_cap = load_face(spec);
-    snprintf(spec, sizeof spec, "%s:weight=black", opt_font);
+    snprintf(spec, sizeof spec, "%s:weight=bold", opt_font);
     face_big = load_face(spec);
 }
 
@@ -826,12 +839,15 @@ static void build_mask(int kind, long cycle_start) {
         struct tm tm;
         localtime_r(&tt, &tm);
         strftime(buf, sizeof buf, "%H:%M", &tm);
-        if (box[2] < box[3] * 1.1) {   /* portrait: the hours over the minutes */
+        /* the hours over the minutes, unless the box is very wide: big
+         * figures are what make it legible in cells */
+        if (box[2] < box[3] * 2.4) {
             strftime(l0, sizeof l0, "%H", &tm); strftime(l1, sizeof l1, "%M", &tm);
             lines[0] = l0; lines[1] = l1; nl = 2;
         } else lines[0] = buf;
     } else {
         snprintf(buf, sizeof buf, "%s", opt_text ? opt_text : host);
+        for (char *c = buf; *c; c++) *c = (char)toupper((unsigned char)*c);
         lines[0] = buf;
     }
     /* measure at 100 px, then fit */
@@ -843,7 +859,7 @@ static void build_mask(int kind, long cycle_start) {
             if (cv[y * cw + x] > 60) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
     free(cv);
     if (x1 <= x0) { mk_n = 0; return; }
-    double fit = fmin(box[2] * 0.84 / (x1 - x0 + 1), box[3] * (nl > 1 ? 0.72 : 0.56) / (y1 - y0 + 1)) / gs;
+    double fit = fmin(box[2] * 0.9 / (x1 - x0 + 1), box[3] * (nl > 1 ? 0.8 : 0.66) / (y1 - y0 + 1)) / gs;
     int px = (int)(100 * fit);
     if (px < 8) px = 8;
     cv = set_text(lines, nl, px, &cw, &ch);
@@ -851,19 +867,12 @@ static void build_mask(int kind, long cycle_start) {
     for (int y = 0; y < ch; y++)
         for (int x = 0; x < cw; x++)
             if (cv[y * cw + x] > 60) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
-    /* ink centre onto the box centre, in grid cells; a little blur */
+    /* ink centre onto the box centre, in grid cells */
     double ox = box[0] + box[2] / 2 - (x0 + x1 + 1) * 0.5 * gs, oy = box[1] + box[3] / 2 - (y0 + y1 + 1) * 0.5 * gs;
     mk_n = 0; mk_sum = 0;
     for (int y = 0; y < ch; y++)
         for (int x = 0; x < cw; x++) {
-            int acc = 0, nn = 0;
-            for (int dy = -1; dy <= 1; dy++)
-                for (int dx = -1; dx <= 1; dx++) {
-                    int X = x + dx, Y = y + dy;
-                    if (X >= 0 && Y >= 0 && X < cw && Y < ch) acc += cv[Y * cw + X] * (dx || dy ? 1 : 4);
-                    nn += dx || dy ? 1 : 4;
-                }
-            double v = acc / (255.0 * nn);
+            double v = cv[y * cw + x] / 255.0;
             if (v < 0.02) continue;
             double wx = ox + (x + 0.5) * gs, wy = oy + (y + 0.5) * gs;
             if (wx < bx0 || wx > bx1 || wy < by0 || wy > by1) continue;
@@ -877,18 +886,12 @@ static void build_mask(int kind, long cycle_start) {
         }
     free(cv);
     /* the weight that pulls about 62% of the sites into the letters */
-    double f = 0.62, tm2 = mk_sum * gs * gs;
+    double f = 0.66, tm2 = mk_sum * gs * gs;
     cy.W = tm2 > 0 ? f * bw * bh / ((1 - f) * tm2) : 0;
 }
 
-/* the text weight's schedule over a text cycle's relaxation (ticks) */
-static double text_w(double r) {
-    if (r < 0) return 0;
-    if (r < 8) return ease(r / 8);
-    if (r < 66) return 1;
-    if (r < 80) return 1 - ease((r - 66) / 14);
-    return 0;
-}
+/* the text weight over a text cycle's relaxation (ticks) */
+static double text_w(double r) { return r < 0 ? 0 : ease(r / 4); }
 
 /* ---- disturbances ---- */
 static int alloc_slot(void) {
@@ -1023,6 +1026,70 @@ static void plan_cells(Rng *r) {
     free(used); free(lst);
 }
 
+/* write the text: cells under it bud children, sampled from the density
+ * and placed left to right, until the letters hold ~5x the density */
+static void plan_text(Rng *r) {
+    if (!mk_n) return;
+    double area = mk_sum * gs * gs, st = sp * 0.32;
+    int nb = (int)(area / (st * st) - area / (sp * sp));
+    int room = S.cap - S.n - 8;
+    if (nb > room) nb = room;
+    if (nb > (int)(1.6 * N0)) nb = (int)(1.6 * N0);
+    if (nb < 0) nb = 0;
+    double *cum = malloc(sizeof(double) * mk_n), acc = 0, xmin = 1e300, xmax = -1e300;
+    for (int q = 0; q < mk_n; q++) {
+        cum[q] = acc += mk_w[q];
+        xmin = fmin(xmin, mk_x[q]); xmax = fmax(xmax, mk_x[q]);
+    }
+    int n0 = S.n;
+    unsigned char *old = malloc(n0);
+    memcpy(old, S.alive, n0);
+    for (int b = 0; b < nb; b++) {
+        double u = rnd(r) * acc;
+        int lo = 0, hi = mk_n - 1;
+        while (lo < hi) { int mid = (lo + hi) / 2; if (cum[mid] < u) lo = mid + 1; else hi = mid; }
+        double x = mk_x[lo] + (rnd(r) - 0.5) * gs, y = mk_y[lo] + (rnd(r) - 0.5) * gs;
+        int par = -1;
+        double bd = 1e300;
+        for (int s = 0; s < n0; s++)
+            if (old[s]) {
+                double d = (S.x[s] - x) * (S.x[s] - x) + (S.y[s] - y) * (S.y[s] - y);
+                if (d < bd) { bd = d; par = s; }
+            }
+        int c = alloc_slot();
+        if (c < 0 || par < 0) break;
+        S.alive[c] = 1; S.extra[c] = 1;
+        S.x[c] = S.x[par]; S.y[c] = S.y[par];
+        S.key[c] = (uint32_t)(rnd(r) * 4294967296.0);
+        pl_mode[c] = M_BIRTH; pl_twin[c] = par; pl_kA[c] = S.key[par]; pl_kB[c] = S.key[c];
+        pl_tx[c] = x; pl_ty[c] = y;
+        pl_dl[c] = 0.45 * clamp01((x - xmin) / (xmax - xmin + 1e-9));
+    }
+    free(cum); free(old);
+    /* hold the letters at the density just made: a centroidal tessellation
+     * puts sites at the square root of the density, so the weight goes as
+     * the fourth power of the spacing ratio */
+    cy.W = 1.15 * pow(sp / st, 4);
+}
+
+/* and dissolve it: each budded cell fuses into its nearest original */
+static void plan_untext(void) {
+    for (int s = 0; s < S.n; s++) {
+        if (!S.alive[s] || !S.extra[s]) continue;
+        int k = -1;
+        double bd = 1e300;
+        for (int o = 0; o < S.n; o++)
+            if (S.alive[o] && !S.extra[o]) {
+                double d = (S.x[o] - S.x[s]) * (S.x[o] - S.x[s]) + (S.y[o] - S.y[s]) * (S.y[o] - S.y[s]);
+                if (d < bd) { bd = d; k = o; }
+            }
+        if (k < 0) continue;
+        pl_mode[s] = M_DEATH; pl_twin[s] = k; pl_kA[s] = S.key[s]; pl_kB[s] = S.key[k];
+        pl_tx[s] = S.x[k]; pl_ty[s] = S.y[k];
+        pl_dl[s] = 0.45 * clamp01(vnoise(S.x[s] / (sp * 3), S.y[s] / (sp * 3), 55) * 1.6 - 0.3);
+    }
+}
+
 static void begin_cycle(Where w, int j) {
     cy.w = w;
     cy.planned = 0; cy.settled = 0; cy.W = 0;
@@ -1074,6 +1141,13 @@ static void begin_cycle(Where w, int j) {
     case K_CELLS:
         plan_cells(&r);
         break;
+    case K_TEXT_TIME:
+    case K_TEXT_HOST:
+        plan_text(&r);
+        break;
+    case K_UNTEXT:
+        plan_untext();
+        break;
     }
     (void)diag;
     cy.planned = 1;
@@ -1118,6 +1192,9 @@ static void dist_pos(int s, double tau, double *ox, double *oy) {
     }
     case K_DISSOLVE:
     case K_CELLS:
+    case K_TEXT_TIME:
+    case K_TEXT_HOST:
+    case K_UNTEXT:
         if (pl_mode[s] != M_NONE) {
             double e = ease((tau - pl_dl[s]) / (1 - 0.45));
             double tx = pl_tx[s], ty = pl_ty[s];
@@ -1144,7 +1221,7 @@ static void finalize(void) {
         if (!S.alive[s]) continue;
         S.x[s] = nx[s]; S.y[s] = ny[s];
         S.key[s] = pl_kB[s];
-        if (pl_mode[s] == M_DEATH) S.alive[s] = 0;
+        if (pl_mode[s] == M_DEATH) S.alive[s] = S.extra[s] = 0;
     }
 }
 
@@ -1166,7 +1243,10 @@ static void sim_step(long k) {
         int r = j - w.dist;
         double wt = cy.W * text_w(r), wp = cy.W * text_w(r - 1);
         if (!cy.settled || wt != wp) {
-            double mv = lloyd(wt);
+            /* over-relaxed while text forms and fades: plain Lloyd is
+             * slow to move sites any distance */
+            int text = w.kind == K_TEXT_TIME || w.kind == K_TEXT_HOST;
+            double mv = lloyd(wt, text ? 1.3 : w.kind == K_UNTEXT && r < 30 ? 1.5 : 1.0);
             cy.settled = mv < 0.002 * sp && wt == wp;
         }
         snapshot(k);
@@ -1229,11 +1309,14 @@ static void frame_positions(double t) {
     int want_dual = rnd(&r) < 0.3, want_cen = rnd(&r) < 0.45, want_area = rnd(&r) < 0.3;
     double fade = ramp(ct, 0, 4) * (1 - ramp(ct, cl - 3, cl));
     double relax0 = w.dist * TICK;
-    f_dual_on = want_dual ? fade : 0;
+    f_dual_on = want_dual && w.kind < K_TEXT_TIME ? fade : 0;
     f_cen_on = want_cen ? ramp(ct, relax0 + 0.5, relax0 + 3) * (1 - ramp(ct, cl - 3, cl)) : 0;
     f_text_on = 0;
     if (w.kind == K_TEXT_TIME || w.kind == K_TEXT_HOST) {
-        f_text_on = text_w(T - w.start - w.dist - 4);
+        f_text_on = ramp(ct, 0.5, 4);
+        f_cen_on = 0;
+    } else if (w.kind == K_UNTEXT) {
+        f_text_on = 1 - ramp(ct, 1, w.dist * TICK + 2);
         f_cen_on = 0;
     }
     f_area_on = fmax(want_area ? fade : 0, f_text_on);
@@ -1244,7 +1327,7 @@ static void frame_positions(double t) {
             if (!S.alive[s]) continue;
             dist_pos(s, tau, &fx_[s], &fy_[s]);
             fcx[s] = fx_[s]; fcy[s] = fy_[s];
-            double e = (cy.w.kind == K_DISSOLVE || cy.w.kind == K_CELLS) ? ease((tau - pl_dl[s]) / (1 - 0.45)) : 0;
+            double e = pl_mode[s] != M_NONE ? ease((tau - pl_dl[s]) / (1 - 0.45)) : 0;
             fkA[s] = (float)(pl_kA[s] * (1.0 / 4294967296.0));
             fkB[s] = (float)(pl_kB[s] * (1.0 / 4294967296.0));
             fmix[s] = (float)e;
@@ -1269,38 +1352,51 @@ static void frame_positions(double t) {
 /* ==== GL ==== */
 #define GLSL(...) #__VA_ARGS__
 
+/* one instance per fan triangle of a cell (site, vertex j, vertex j+1),
+ * carrying the bisector lines of its edge and the two either side, so the
+ * fragment shader needs no lookups */
 static const char *VS_CELL = "#version 330 core\n" GLSL(
-    layout(location = 0) in vec2 aPos;
-    layout(location = 1) in int aSite;
+    layout(location = 0) in vec4 aP01;
+    layout(location = 1) in vec2 aP2;
+    layout(location = 2) in vec4 aSite;
+    layout(location = 3) in vec4 aKey;
+    layout(location = 4) in vec4 aE0;
+    layout(location = 5) in vec4 aE1;
+    layout(location = 6) in vec4 aE2;
+    layout(location = 7) in vec4 aE3;
+    layout(location = 8) in vec4 aE4;
+    layout(location = 9) in vec4 aE5;
+    layout(location = 10) in vec4 aE6;
+    layout(location = 11) in vec4 aE7;
     uniform vec3 uView;
     uniform vec2 uRes;
     out vec2 vW;
-    flat out int vSite;
+    flat out vec4 vSite, vKey, vE0, vE1, vE2, vE3, vE4, vE5, vE6, vE7;
     void main() {
-        vW = aPos; vSite = aSite;
-        vec2 px = (aPos - uView.xy) * uView.z;
+        vec2 w = gl_VertexID == 0 ? aP01.xy : gl_VertexID == 1 ? aP01.zw : aP2;
+        vW = w; vSite = aSite; vKey = aKey;
+        vE0 = aE0; vE1 = aE1; vE2 = aE2; vE3 = aE3; vE4 = aE4; vE5 = aE5; vE6 = aE6; vE7 = aE7;
+        vec2 px = (w - uView.xy) * uView.z;
         gl_Position = vec4(px.x / uRes.x * 2.0 - 1.0, 1.0 - px.y / uRes.y * 2.0, 0.0, 1.0);
     });
 
 static const char *FS_CELL = "#version 330 core\n" GLSL(
-    uniform samplerBuffer uSites;
-    uniform isamplerBuffer uNb;
     uniform int uStyle;
     uniform float uSp, uPx, uArea, uCen, uTime;
     uniform vec3 uLight;
     in vec2 vW;
-    flat in int vSite;
+    flat in vec4 vSite, vKey, vE0, vE1, vE2, vE3, vE4, vE5, vE6, vE7;
     out vec4 o;
 
     float h21(vec2 p) { p = fract(p * vec2(234.34, 435.345)); p += dot(p, p + 34.23); return fract(p.x * p.y); }
-    float vn(vec2 p) {
-        vec2 i = floor(p), f = fract(p);
-        f = f * f * (3.0 - 2.0 * f);
-        return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y);
-    }
-    float fbm(vec2 p) { return 0.5 * vn(p) + 0.25 * vn(p * 2.03 + 17.1) + 0.125 * vn(p * 4.01 + 31.7) + 0.0625 * vn(p * 8.03 + 5.3); }
+    /* noise from the baked tile (see bake_noise): value noise with one
+     * lattice cell per unit, fbm, and a second value noise for warps */
+    uniform sampler2D uNoise;
+    float vn(vec2 p) { return texture(uNoise, p * (1.0 / 64.0)).g; }
+    float vn2(vec2 p) { return texture(uNoise, p * (1.0 / 64.0)).b; }
+    float fbm(vec2 p) { return texture(uNoise, p * (1.0 / 16.0)).r; }
     float kh(float k, float salt) { return fract(sin(k * 1271.13 + salt * 311.7) * 43758.5453); }
-    vec2 warp(vec2 p, float s, float a) { return p + a * (vec2(vn(p / s), vn(p / s + 71.3)) - 0.5) * 2.0; }
+    vec2 warp(vec2 p, float s, float a) { vec4 t = texture(uNoise, p / (s * 64.0)); return p + a * (t.gb - 0.5) * 2.0; }
 
     /* stained glass: a background of blues and teals that drifts across the
      * window, and jewel accents by key */
@@ -1308,15 +1404,15 @@ static const char *FS_CELL = "#version 330 core\n" GLSL(
         float f = vn(s / (uSp * 7.0) + 3.7), g = vn(s / (uSp * 11.0) + 9.1);
         vec3 bg = mix(vec3(0.05, 0.14, 0.55), vec3(0.03, 0.38, 0.47), smoothstep(0.3, 0.7, f));
         bg = mix(bg, vec3(0.25, 0.08, 0.50), smoothstep(0.68, 0.9, g));
-        vec3 c = bg * (0.7 + 0.55 * kh(k, 2.0));
-        if (k < 0.10) c = vec3(0.70, 0.05, 0.08);
-        else if (k < 0.17) c = vec3(0.95, 0.62, 0.08);
-        else if (k < 0.22) c = vec3(0.06, 0.48, 0.18);
-        else if (k < 0.25) c = vec3(0.85, 0.83, 0.68);
-        else if (k < 0.28) c = vec3(0.55, 0.12, 0.42);
+        vec3 c = bg * (0.6 + 0.6 * kh(k, 2.0));
+        if (k < 0.06) c = vec3(0.62, 0.04, 0.07);
+        else if (k < 0.10) c = vec3(0.88, 0.52, 0.06);
+        else if (k < 0.13) c = vec3(0.05, 0.40, 0.15);
+        else if (k < 0.145) c = vec3(0.62, 0.62, 0.50);
+        else if (k < 0.16) c = vec3(0.45, 0.10, 0.36);
         return c;
     }
-    vec3 giraffeCol(float k) { return mix(vec3(0.42, 0.20, 0.07), vec3(0.70, 0.40, 0.15), kh(k, 3.0)); }
+    vec3 giraffeCol(float k) { return mix(vec3(0.45, 0.22, 0.08), vec3(0.62, 0.34, 0.12), kh(k, 3.0)); }
     vec3 crackleCol(float k) { return vec3(0.63, 0.74, 0.66) + (kh(k, 4.0) - 0.5) * vec3(0.05, 0.05, 0.045); }
     vec3 washCol(float k) {
         float h = kh(k, 6.0);
@@ -1332,7 +1428,7 @@ static const char *FS_CELL = "#version 330 core\n" GLSL(
     }
     /* small cells hot, large ones cool */
     vec3 areaRamp(float t) {
-        if (uStyle == 0) return t < 0.5 ? mix(vec3(0.04, 0.10, 0.45), vec3(0.70, 0.06, 0.10), t * 2.0) : mix(vec3(0.70, 0.06, 0.10), vec3(1.0, 0.72, 0.15), t * 2.0 - 1.0);
+        if (uStyle == 0) return t < 0.45 ? mix(vec3(0.03, 0.08, 0.38), vec3(0.06, 0.22, 0.55), t / 0.45) : t < 0.75 ? mix(vec3(0.06, 0.22, 0.55), vec3(0.75, 0.08, 0.10), (t - 0.45) / 0.3) : mix(vec3(0.75, 0.08, 0.10), vec3(1.0, 0.74, 0.18), (t - 0.75) / 0.25);
         if (uStyle == 1) return mix(vec3(0.36, 0.16, 0.05), vec3(0.85, 0.52, 0.20), t);
         if (uStyle == 2) return mix(vec3(0.42, 0.56, 0.50), vec3(0.80, 0.86, 0.76), t);
         if (uStyle == 3) return mix(vec3(0.06, 0.20, 0.44), vec3(0.40, 0.66, 0.92), t);
@@ -1341,34 +1437,33 @@ static const char *FS_CELL = "#version 330 core\n" GLSL(
     }
 
     void main() {
-        vec4 t0 = texelFetch(uSites, vSite * 3), t1 = texelFetch(uSites, vSite * 3 + 1), t2 = texelFetch(uSites, vSite * 3 + 2);
-        vec2 s = t0.xy, p = vW;
-        int twin = int(t0.z);
+        vec4 t1 = vec4(vKey.xy, vSite.w, vSite.z);
+        vec2 s = vSite.xy, p = vW;
         float aa = 0.5 * uPx;
 
         /* each style's wall: half width, corner rounding, a warp for organic edges */
         float hw, k = 0.0;
         vec2 q = p;
-        if (uStyle == 0) hw = max(0.07 * uSp, 1.6 * uPx);
-        else if (uStyle == 1) { hw = 0.085 * uSp; k = 0.14 * uSp; q = warp(p, 0.45 * uSp, 0.06 * uSp); aa *= 2.5; }
+        if (uStyle == 0) hw = max(0.08 * uSp, 1.6 * uPx);
+        else if (uStyle == 1) { hw = 0.05 * uSp; k = 0.09 * uSp; q = warp(p, 0.45 * uSp, 0.045 * uSp); aa *= 2.5; }
         else if (uStyle == 2) { hw = max(0.009 * uSp, 0.55 * uPx); q = warp(warp(p, 0.3 * uSp, 0.035 * uSp), 0.07 * uSp, 0.012 * uSp); }
         else if (uStyle == 3) hw = max(0.009 * uSp, 0.6 * uPx);
         else if (uStyle == 4) { hw = (max(0.011 * uSp, 0.7 * uPx)) * (0.75 + 0.5 * vn(p / (0.5 * uSp))); q = warp(p, 0.4 * uSp, 0.012 * uSp); }
         else { hw = 0.06 * uSp; k = 0.075 * uSp; }
+        /* the thick walls scale with the cell, so a tiny cell in a letter
+         * is still mostly glass, honey or hide */
+        float cs = clamp(sqrt(max(vSite.z, 0.0)), 0.35, 1.3);
+        if (uStyle == 0 || uStyle == 1 || uStyle == 5) { hw = max(hw * cs, 1.2 * uPx); k *= cs; }
 
-        int nb0 = int(t2.x), nbc = int(t2.y);
+        vec4 E[8] = vec4[8](vE0, vE1, vE2, vE3, vE4, vE5, vE6, vE7);
         float dmin = 1e9, cov = 0.0, dcov = 1e9, sm = 1e9, ss = 0.0;
         vec2 gmin = vec2(0.0), gcov = vec2(0.0, -1.0), sg = vec2(0.0);
-        for (int i = 0; i < nbc; i++) {
-            int n = texelFetch(uNb, nb0 + i).r;
-            vec4 u0 = texelFetch(uSites, n * 3);
-            vec2 dv = s - u0.xy;
-            float L = length(dv);
-            if (L < 1e-5) continue;
-            vec2 nr = dv / L;
-            float d = dot(q - 0.5 * (s + u0.xy), nr);
-            float a = twin == n ? t0.w : (int(u0.z) == vSite ? u0.w : 1.0);
-            if (d < dmin) { dmin = d; gmin = nr; }
+        for (int i = 0; i < 8; i++) {
+            vec2 nr = E[i].xy;
+            float d = dot(q, nr) - E[i].z, a = E[i].w;
+            /* interior shading ignores a line still fading in */
+            float da = d + (1.0 - a) * 0.6 * uSp;
+            if (da < dmin) { dmin = da; gmin = nr; }
             float c = a * (1.0 - smoothstep(hw - aa, hw + aa, abs(d)));
             if (c > cov) { cov = c; dcov = d; gcov = nr; }
             if (k > 0.0) {
@@ -1380,35 +1475,35 @@ static const char *FS_CELL = "#version 330 core\n" GLSL(
         float Ds = ss > 0.0 ? sm - k * log(ss) : 1e9;
         vec2 G = ss > 0.0 ? normalize(sg + 1e-6) : gmin;
 
-        float area = t1.w, tA = clamp(0.5 - 0.42 * log2(max(area, 1e-3)), 0.0, 1.0);
+        float area = t1.w, tA = clamp(0.3 - 0.5 * log2(max(area, 1e-3)), 0.0, 1.0);
         vec3 fill = mix(cellCol(t1.x, s), cellCol(t1.y, s), t1.z);
         vec3 col, ink = vec3(0.0);
-        vec2 cen = t2.zw;
+        vec2 cen = vKey.zw;
+        if (uTime < 0.0) { o = vec4(fill * (1.0 - cov) + 0.001 * Ds, 1.0); return; }
 
         if (uStyle == 0) {                       /* stained glass */
             vec3 g = mix(fill, areaRamp(tA), uArea * 0.9);
             vec2 dl = p - uLight.xy;
-            float bl = 0.42 + 0.85 * exp(-dot(dl, dl) / (uLight.z * uLight.z)) + 0.3 * (fbm(p / (uSp * 6.0)) - 0.5);
+            float bl = 0.30 + 0.95 * exp(-dot(dl, dl) / (uLight.z * uLight.z)) + 0.35 * (fbm(p / (uSp * 6.0)) - 0.5);
             float kk = t1.z < 0.5 ? t1.x : t1.y;
             float ham = 0.80 + 0.40 * fbm((p + kk * 913.0) / (uSp * 0.16));
             float ang = kh(kk, 9.0) * 6.283;
             vec2 sd = vec2(cos(ang), sin(ang));
             float streak = vn(vec2(dot(p, sd) / (uSp * 0.9), dot(p, vec2(-sd.y, sd.x)) / (uSp * 0.03)) + kk * 77.0);
-            float edge = smoothstep(hw, hw + 0.3 * uSp, dmin);
-            col = g * bl * ham * (0.85 + 0.25 * streak) * (0.42 + 0.58 * edge);
-            col += g * g * 0.7 * bl * edge * edge;
-            col += vec3(0.9, 0.85, 0.7) * pow(max(bl - 0.9, 0.0), 2.0) * 0.4 * edge;
+            float edge = smoothstep(hw, hw + 0.3 * uSp * cs, dmin);
+            col = g * bl * ham * (0.85 + 0.25 * streak) * (0.35 + 0.65 * edge);
+            col += g * g * 0.35 * bl * bl * edge * edge;
             float u = clamp(abs(dcov) / hw, 0.0, 1.0);
             vec3 N = normalize(vec3(gcov * u * 1.4, sqrt(max(1.0 - u * u, 0.0)) + 0.08));
             vec3 Ld = normalize(vec3(-0.45, -0.6, 0.66));
             float dif = max(dot(N, Ld), 0.0), spec = pow(max(reflect(-Ld, N).z, 0.0), 20.0);
-            vec3 lead = vec3(0.085, 0.085, 0.095) * (0.3 + 1.1 * dif) + vec3(0.6, 0.6, 0.62) * spec * 0.45;
+            vec3 lead = vec3(0.075, 0.075, 0.085) * (0.25 + 1.3 * dif) + vec3(0.75, 0.74, 0.70) * spec * 0.55;
             lead *= 0.85 + 0.3 * vn(p / (uSp * 0.05));
             col = mix(col, lead, cov);
             ink = vec3(1.0, 0.86, 0.45);
         } else if (uStyle == 1) {                /* giraffe */
             vec3 pt = mix(fill, areaRamp(tA), uArea * 0.85);
-            pt *= 0.82 + 0.22 * smoothstep(hw, hw + 0.35 * uSp, Ds);
+            pt *= 0.82 + 0.22 * smoothstep(hw, hw + 0.35 * uSp * cs, Ds);
             pt *= 0.9 + 0.16 * vn(vec2(p.x / (uSp * 0.012), p.y / (uSp * 0.05)));
             vec3 net = vec3(0.93, 0.86, 0.70) * (0.93 + 0.08 * vn(p / (uSp * 0.08)));
             float m = smoothstep(hw - aa, hw + aa, Ds);
@@ -1420,17 +1515,8 @@ static const char *FS_CELL = "#version 330 core\n" GLSL(
             float halo = exp(-max(abs(dmin), 0.0) / (0.05 * uSp));
             gl = mix(gl, gl * vec3(0.78, 0.76, 0.62), 0.45 * halo);
             /* fine crazing: a smaller cellular net */
-            vec2 cp = warp(p, 0.1 * uSp, 0.02 * uSp) / (0.3 * uSp), ci = floor(cp);
-            float f1 = 9.0, f2 = 9.0;
-            for (int yy = -1; yy <= 1; yy++)
-                for (int xx = -1; xx <= 1; xx++) {
-                    vec2 c = ci + vec2(xx, yy);
-                    vec2 r = c + vec2(h21(c), h21(c + 19.7)) - cp;
-                    float dd = dot(r, r);
-                    if (dd < f1) { f2 = f1; f1 = dd; } else if (dd < f2) f2 = dd;
-                }
-            float cz = sqrt(f2) - sqrt(f1);
-            gl *= 1.0 - 0.13 * (1.0 - smoothstep(0.0, 0.05, cz)) * smoothstep(0.3, 0.6, vn(p / (uSp * 1.3)));
+            float cz = texture(uNoise, p / (0.3 * uSp * 16.0)).a;
+            gl *= 1.0 - 0.13 * (1.0 - smoothstep(0.0, 0.08, cz)) * smoothstep(0.3, 0.6, vn(p / (uSp * 1.3)));
             gl += vec3(0.07) * pow(fbm(p / (uSp * 8.0) + 3.0), 3.0);
             col = mix(gl, vec3(0.15, 0.12, 0.09), cov);
             ink = vec3(0.35, 0.18, 0.10);
@@ -1458,17 +1544,17 @@ static const char *FS_CELL = "#version 330 core\n" GLSL(
             ink = vec3(0.70, 0.16, 0.10);
         } else {                                 /* honeycomb */
             float kk = t1.z < 0.5 ? t1.x : t1.y;
-            float depth = smoothstep(hw, hw + 0.5 * uSp, Ds);
-            vec3 honey = mix(vec3(1.0, 0.74, 0.22), vec3(0.62, 0.28, 0.03), pow(depth, 0.7));
-            honey += vec3(0.30, 0.16, 0.0) * exp(-dot(p - s, p - s) / (0.08 * uSp * uSp)) * 0.6;
-            float rim = (1.0 - smoothstep(hw, hw + 0.16 * uSp, Ds)) * max(dot(G, normalize(vec2(0.6, 0.8))), 0.0);
-            honey += vec3(1.0, 0.92, 0.65) * rim * 0.55;
+            float depth = smoothstep(hw, hw + 0.5 * uSp * cs, Ds);
+            vec3 honey = mix(vec3(0.92, 0.58, 0.12), vec3(0.42, 0.16, 0.01), pow(depth, 0.6));
+            honey += vec3(0.45, 0.22, 0.0) * exp(-dot(p - s, p - s) / (0.05 * uSp * uSp)) * 0.5;
+            float rim = (1.0 - smoothstep(hw, hw + 0.16 * uSp * cs, Ds)) * max(dot(G, normalize(vec2(0.6, 0.8))), 0.0);
+            honey += vec3(1.0, 0.90, 0.60) * rim * 0.4;
             float capped = step(kh(kk, 5.0), 0.16 + 0.6 * uArea * tA);
             vec3 cap = vec3(0.94, 0.80, 0.47) * (0.82 + 0.22 * depth) * (0.95 + 0.08 * vn(p / (uSp * 0.06)));
             vec3 cell = mix(honey, cap, capped);
             cell = mix(cell, cell * vec3(0.55, 0.40, 0.30), step(0.94, kh(kk, 8.0)) * (1.0 - capped));
             float u = clamp(Ds / hw, 0.0, 1.0);
-            vec3 wax = vec3(0.98, 0.87, 0.55) * (0.78 + 0.25 * (1.0 - u * u)) * (0.95 + 0.08 * vn(p / (uSp * 0.04)));
+            vec3 wax = vec3(0.90, 0.74, 0.40) * (0.70 + 0.32 * (1.0 - u * u)) * (0.95 + 0.08 * vn(p / (uSp * 0.04)));
             float m = smoothstep(hw - aa, hw + aa, Ds);
             col = mix(wax, cell, m);
             ink = vec3(0.30, 0.13, 0.02);
@@ -1552,7 +1638,58 @@ static const char *FS_TEXT = "#version 330 core\n" GLSL(
 
 static GLuint prog_cell, prog_line, prog_text;
 static GLuint vao_cell, vbo_cell, vao_line, vbo_line, vao_text, vbo_text;
-static GLuint tbo_site, tex_site, tbo_nb, tex_nb, tex_atlas;
+static GLuint tex_atlas, tex_noise;
+
+/* a tileable 512x512 noise tile: R fbm (16 lattice cells across, 4
+ * octaves), G and B value noise (64 cells), A the F2 - F1 distance of a
+ * jittered cellular net (16 cells), for crazing */
+#define NT 512
+static double tile_vn(double x, double y, int L, uint32_t salt) {
+    double fx = floor(x), fy = floor(y);
+    int ix = (int)fx, iy = (int)fy;
+    double u = x - fx, v = y - fy;
+    u = u * u * (3 - 2 * u); v = v * v * (3 - 2 * v);
+    int x0 = ((ix % L) + L) % L, y0 = ((iy % L) + L) % L, x1 = (x0 + 1) % L, y1 = (y0 + 1) % L;
+    double a = lat(x0, y0, salt), b = lat(x1, y0, salt), c = lat(x0, y1, salt), d = lat(x1, y1, salt);
+    return (a + (b - a) * u) + ((c + (d - c) * u) - (a + (b - a) * u)) * v;
+}
+static void bake_noise(void) {
+    unsigned char *t = malloc(NT * NT * 4);
+    for (int y = 0; y < NT; y++)
+        for (int x = 0; x < NT; x++) {
+            double u = (double)x / NT, v = (double)y / NT, f = 0, amp = 0.5, norm = 0;
+            for (int o = 0; o < 4; o++) {
+                int L = 16 << o;
+                f += amp * tile_vn(u * L, v * L, L, 900 + o);
+                norm += amp; amp *= 0.5;
+            }
+            f /= norm;
+            f = 0.5 + (f - 0.5) * 1.6;
+            double g = tile_vn(u * 64, v * 64, 64, 911), b = tile_vn(u * 64, v * 64, 64, 913);
+            double cx = u * 16, cy2 = v * 16, f1 = 9, f2 = 9;
+            int ix = (int)floor(cx), iy = (int)floor(cy2);
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) {
+                    int jx = ix + dx, jy = iy + dy, wx = ((jx % 16) + 16) % 16, wy = ((jy % 16) + 16) % 16;
+                    double px = jx + 0.15 + 0.7 * lat(wx, wy, 920), py = jy + 0.15 + 0.7 * lat(wx, wy, 921);
+                    double d = hypot(px - cx, py - cy2);
+                    if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) f2 = d;
+                }
+            unsigned char *o = t + 4 * (y * NT + x);
+            o[0] = (unsigned char)(clamp01(f) * 255); o[1] = (unsigned char)(g * 255); o[2] = (unsigned char)(b * 255);
+            o[3] = (unsigned char)(clamp01(f2 - f1) * 255);
+        }
+    glGenTextures(1, &tex_noise);
+    glBindTexture(GL_TEXTURE_2D, tex_noise);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, NT, NT, 0, GL_RGBA, GL_UNSIGNED_BYTE, t);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    free(t);
+}
+#define TRI_FLOATS 46                  /* per fan triangle: see VS_CELL */
 
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
@@ -1706,10 +1843,16 @@ static void gl_init(void) {
     glGenBuffers(1, &vbo_cell);
     glBindVertexArray(vao_cell);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_cell);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 12, (void *)0);
-    glVertexAttribIPointer(1, 1, GL_INT, 12, (void *)8);
-    glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(1);
+    {
+        static const int sz[12] = {4, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4};
+        int off = 0;
+        for (int i = 0; i < 12; i++) {
+            glVertexAttribPointer(i, sz[i], GL_FLOAT, GL_FALSE, TRI_FLOATS * 4, (void *)(intptr_t)(off * 4));
+            glVertexAttribDivisor(i, 1);
+            glEnableVertexAttribArray(i);
+            off += sz[i];
+        }
+    }
     glGenVertexArrays(1, &vao_line);
     glGenBuffers(1, &vbo_line);
     glBindVertexArray(vao_line);
@@ -1730,10 +1873,7 @@ static void gl_init(void) {
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
     glEnableVertexAttribArray(2);
-    glGenBuffers(1, &tbo_site);
-    glGenTextures(1, &tex_site);
-    glGenBuffers(1, &tbo_nb);
-    glGenTextures(1, &tex_nb);
+    bake_noise();
     glGenTextures(1, &tex_atlas);
     glBindTexture(GL_TEXTURE_2D, tex_atlas);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -1754,65 +1894,91 @@ static void view_update(void) {
         v_sc = W / span[span_me][2];
         v_ox = span[span_me][0]; v_oy = span[span_me][1];
     } else {
-        v_sc = fmax(W / bw, H / bh);
-        v_ox = bx0 + (bw - W / v_sc) / 2; v_oy = by0 + (bh - H / v_sc) / 2;
+        v_sc = fmax(W / fr[2], H / fr[3]);
+        v_ox = fr[0] + (fr[2] - W / v_sc) / 2; v_oy = fr[1] + (fr[3] - H / v_sc) / 2;
     }
 }
 
 /* ---- per-frame geometry ---- */
-static float *site_buf;
-static int *nb_buf, *slot2i;
 static float *tri_buf, *line_buf;
-static int n_tri_v, n_lines;
+static int *slot2i;
+static int n_tri, n_lines;
 static double t_tri;                   /* CPU ms spent triangulating this frame */
+
+/* the edge alpha between compact sites i and n: a division or fusion fades
+ * the line between the pair */
+static float edge_alpha(int si, int n, int m) {
+    if (n >= m) return 1;
+    int sn = g_slot[n];
+    if (ftw[si] == sn) return fea[si];
+    if (ftw[sn] == si) return fea[sn];
+    return 1;
+}
 
 static void frame_geometry(void) {
     double t0 = now();
     int m = triangulate(fx_, fy_);
     int c = S.cap + NFAR;
-    if (!site_buf) {
-        site_buf = malloc(sizeof(float) * 12 * c);
-        nb_buf = malloc(sizeof(int) * ((size_t)c * 8 + MAXV));
+    if (!tri_buf) {
         slot2i = malloc(sizeof(int) * c);
-        tri_buf = malloc(sizeof(float) * 3 * 3 * ((size_t)c * 8 + MAXV));
+        tri_buf = malloc(sizeof(float) * TRI_FLOATS * ((size_t)c * 8 + MAXV));
         line_buf = malloc(sizeof(float) * 5 * 3 * c);
     }
-    for (int s = 0; s < S.n; s++) slot2i[s] = -1;
-    for (int i = 0; i < m; i++) slot2i[g_slot[i]] = i;
     double vx0 = v_ox - sp, vy0 = v_oy - sp, vx1 = v_ox + W / v_sc + sp, vy1 = v_oy + H / v_sc + sp;
     double mean = bw * bh / N0;
-    double vx[MAXV + 8], vy[MAXV + 8], cx, cyy;
-    int nb[MAXV], o = 0;
-    n_tri_v = 0;
+    double vx[MAXV + 8], vy[MAXV + 8], cx, cyy, ex[MAXV][4];
+    int nb[MAXV];
+    n_tri = 0;
     for (int i = 0; i < m; i++) {
         int s = g_slot[i], k = cell_of(i, vx, vy, nb);
-        float *sb = site_buf + 12 * i;
-        sb[0] = (float)fx_[s]; sb[1] = (float)fy_[s];
-        sb[2] = (float)(ftw[s] >= 0 ? slot2i[ftw[s]] : -1); sb[3] = fea[s];
-        sb[4] = fkA[s]; sb[5] = fkB[s]; sb[6] = fmix[s]; sb[7] = 1;
-        sb[8] = (float)o; sb[9] = 0; sb[10] = (float)fcx[s]; sb[11] = (float)fcy[s];
-        if (!k) continue;
+        if (k < 3) continue;
         double x0 = 1e300, x1 = -1e300, y0 = 1e300, y1 = -1e300;
         for (int j = 0; j < k; j++) {
             x0 = fmin(x0, vx[j]); x1 = fmax(x1, vx[j]); y0 = fmin(y0, vy[j]); y1 = fmax(y1, vy[j]);
         }
         if (x1 < vx0 || x0 > vx1 || y1 < vy0 || y0 > vy1) continue;
-        int cnt = 0;
-        for (int j = 0; j < k; j++)
-            if (nb[j] < m) nb_buf[o + cnt++] = nb[j];
-        sb[9] = (float)cnt;
-        o += cnt;
+        double sx = fx_[s], sy = fy_[s];
+        /* edge j runs from vertex j to j+1, shared with neighbour nb[j+1] */
         for (int j = 0; j < k; j++) {
-            int j2 = j + 1 == k ? 0 : j + 1;
-            float *tb = tri_buf + 3 * n_tri_v;
-            tb[0] = (float)fx_[s]; tb[1] = (float)fy_[s]; ((int *)tb)[2] = i;
-            tb[3] = (float)vx[j]; tb[4] = (float)vy[j]; ((int *)tb)[5] = i;
-            tb[6] = (float)vx[j2]; tb[7] = (float)vy[j2]; ((int *)tb)[8] = i;
-            n_tri_v += 3;
+            int n = nb[j + 1 == k ? 0 : j + 1];
+            double nx = sx - g_pts[2 * n], ny = sy - g_pts[2 * n + 1], L = hypot(nx, ny);
+            if (L < 1e-9) { ex[j][0] = 0; ex[j][1] = 1; ex[j][2] = -1e9; ex[j][3] = 0; continue; }
+            nx /= L; ny /= L;
+            ex[j][0] = nx; ex[j][1] = ny;
+            ex[j][2] = nx * (sx + g_pts[2 * n]) * 0.5 + ny * (sy + g_pts[2 * n + 1]) * 0.5;
+            ex[j][3] = edge_alpha(s, n, m);
         }
         double tx[MAXV + 8], ty[MAXV + 8];
         memcpy(tx, vx, sizeof(double) * k); memcpy(ty, vy, sizeof(double) * k);
-        sb[7] = (float)(poly_clip_ac(tx, ty, k, &cx, &cyy) / mean);
+        float area = (float)(poly_clip_ac(tx, ty, k, &cx, &cyy) / mean);
+        for (int j = 0; j < k; j++) {
+            int j2 = j + 1 == k ? 0 : j + 1;
+            float *tb = tri_buf + TRI_FLOATS * n_tri++;
+            tb[0] = (float)sx; tb[1] = (float)sy; tb[2] = (float)vx[j]; tb[3] = (float)vy[j];
+            tb[4] = (float)vx[j2]; tb[5] = (float)vy[j2];
+            tb[6] = (float)sx; tb[7] = (float)sy; tb[8] = area; tb[9] = fmix[s];
+            tb[10] = fkA[s]; tb[11] = fkB[s]; tb[12] = (float)fcx[s]; tb[13] = (float)fcy[s];
+            /* a cell of up to eight edges passes them all; a bigger one the
+             * eight nearest this wedge (the edge itself first) */
+            int pick[8];
+            if (k > 8) {
+                double wx = (sx + vx[j] + vx[j2]) / 3, wy = (sy + vy[j] + vy[j2]) / 3, dd[MAXV];
+                for (int q = 0; q < k; q++) dd[q] = ex[q][0] * wx + ex[q][1] * wy - ex[q][2];
+                dd[j] = -1e300;
+                for (int e = 0; e < 8; e++) {
+                    int bi = 0;
+                    for (int q = 1; q < k; q++) if (dd[q] < dd[bi]) bi = q;
+                    pick[e] = bi; dd[bi] = 1e300;
+                }
+            }
+            for (int e = 0; e < 8; e++) {
+                int off = (e + 1) / 2 * (e & 1 ? 1 : -1), jj = k > 8 ? pick[e] : ((j + off) % k + k) % k;
+                int dup = e >= k;
+                float *eb = tb + 14 + 4 * e;
+                eb[0] = (float)ex[jj][0]; eb[1] = (float)ex[jj][1]; eb[2] = (float)ex[jj][2];
+                eb[3] = dup ? 0.0f : (float)ex[jj][3];
+            }
+        }
     }
     n_lines = 0;
     if (f_dual_on > 0 || palettes[pal].name[0] == 'b') {
@@ -1827,12 +1993,8 @@ static void frame_geometry(void) {
             lb[0] = (float)ax; lb[1] = (float)ay; lb[2] = (float)bx; lb[3] = (float)by; lb[4] = 1;
         }
     }
-    glBindBuffer(GL_TEXTURE_BUFFER, tbo_site);
-    glBufferData(GL_TEXTURE_BUFFER, sizeof(float) * 12 * m, site_buf, GL_STREAM_DRAW);
-    glBindBuffer(GL_TEXTURE_BUFFER, tbo_nb);
-    glBufferData(GL_TEXTURE_BUFFER, sizeof(int) * (o + 1), nb_buf, GL_STREAM_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_cell);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 3 * n_tri_v, tri_buf, GL_STREAM_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * TRI_FLOATS * n_tri, tri_buf, GL_STREAM_DRAW);
     if (n_lines) {
         glBindBuffer(GL_ARRAY_BUFFER, vbo_line);
         glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 5 * n_lines, line_buf, GL_STREAM_DRAW);
@@ -1860,21 +2022,15 @@ static void render(double t, double wall, GLuint target) {
     glUniform1f(U(prog_cell, "uPx"), (float)(1.0 / v_sc));
     glUniform1f(U(prog_cell, "uArea"), (float)f_area_on);
     glUniform1f(U(prog_cell, "uCen"), (float)(palettes[pal].name[0] == 'b' ? fmax(f_cen_on, 0.6 * (1 - f_text_on)) : f_cen_on));
-    glUniform1f(U(prog_cell, "uTime"), (float)fmod(t, 1000.0));
+    glUniform1f(U(prog_cell, "uTime"), getenv("VPROBE") ? -1.0f : (float)fmod(t, 1000.0));
     /* the light behind the glass drifts slowly across the front screen */
     glUniform3f(U(prog_cell, "uLight"), (float)(fr[0] + fr[2] * (0.5 + 0.3 * cos(t * 0.011))),
                 (float)(fr[1] + fr[3] * (0.4 + 0.25 * sin(t * 0.017))), (float)(0.75 * fmax(fr[2], fr[3])));
-    glUniform1i(U(prog_cell, "uSites"), 0);
-    glUniform1i(U(prog_cell, "uNb"), 1);
+    glUniform1i(U(prog_cell, "uNoise"), 0);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_BUFFER, tex_site);
-    glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32F, tbo_site);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_BUFFER, tex_nb);
-    glTexBuffer(GL_TEXTURE_BUFFER, GL_R32I, tbo_nb);
-    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex_noise);
     glBindVertexArray(vao_cell);
-    glDrawArrays(GL_TRIANGLES, 0, n_tri_v);
+    glDrawArraysInstanced(GL_TRIANGLES, 0, 3, n_tri);
 
     double dual = palettes[pal].name[0] == 'b' ? fmax(f_dual_on, 0.5) : f_dual_on;
     if (n_lines && dual > 0) {
@@ -2030,10 +2186,10 @@ static void save_ppm(const char *path) {
 
 static void print_schedule(void) {
     for (long e = 0; e < 3; e++) {
-        int kinds[4];
+        int kinds[NCYC];
         era_plan(e, kinds);
         long s = e * ERA_TICKS;
-        for (int c = 0; c < 4; c++) {
+        for (int c = 0; c < NCYC; c++) {
             int d = kind_dist(kinds[c]), L = kind_len(kinds[c]);
             printf("%7.1f s  era %ld cycle %d: %-11s  (disturbance %4.1f s, relaxing from %6.1f s, %5.1f s long)\n",
                    s * TICK, e, c, kind_name[kinds[c]], d * TICK, (s + d) * TICK, L * TICK);
