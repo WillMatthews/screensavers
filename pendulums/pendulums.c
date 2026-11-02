@@ -1,7 +1,61 @@
 /*
  * pendulums — chaos made visible.
  *
- * (description at the end of the file is filled in below)
+ * Scenes, one after another (each with its own masses, lengths, starting
+ * angles and palette, hashed from --seed and the scene's number):
+ *
+ *   FAN     800-2000 double pendulums hung from one pivot, started from rest
+ *           at angles a hair apart (as little as 1e-13 rad between
+ *           neighbours, found by bisection so the fan frays 13-22 s in).
+ *           At first they swing as one white line (every colour of the
+ *           palette added together); the ensemble then disperses into a
+ *           gradient ribbon and blooms into chaos. Rods are fine translucent
+ *           lines, bobs small glowing discs, and the lower bobs leave trails
+ *           in a decaying HDR buffer: luminous ribbons, shorter comet tails
+ *           once it's chaos. After a while every pendulum glides into the
+ *           next scene's starting fan and is let go. Variants: low energy
+ *           (quasi-periodic: the ribbon shears but never shatters) and a
+ *           sweep of energies (order at one end of the fan, chaos at the
+ *           other).
+ *   MAP     the chaos map on the GPU: every cell a pendulum started from rest
+ *           at (θ1, θ2) across the screen, RK4 in a fragment shader on
+ *           ping-pong float textures, coloured by when it first flips over;
+ *           the fractal grows in real time, then faster and faster, around
+ *           the lemon of energies too low ever to flip (drawn as a contour).
+ *   PHASE   one double pendulum beside its Poincaré section (θ1 = 0, ω1 > 0),
+ *           built up by 220 hidden pendulums on the same energy surface
+ *           running at 9x; each has a shadow 1e-8 away whose divergence
+ *           (Benettin) marks it chaotic (the sea's quiet tint) or regular
+ *           (its own hue: the islands). The featured pendulum's own
+ *           crossings are ringed; the allowed region's boundary is drawn.
+ *
+ * Physics: g = 1, time in sqrt(l/g); the standard equations of motion from
+ * the Lagrangian, classical RK4 in double at 180 steps per real second,
+ * from t = 0 of each scene (fast-forwarded for --at or a late start), so
+ * the state depends only on seed, epoch and time. --check verifies the
+ * equations against a mass-matrix solve, measures energy drift and
+ * Lyapunov exponents, and that 1 and 8 threads integrate bit-identically.
+ * The caption shows time, time away (swaylock's start), and the scene's
+ * numbers: the starting spread δθ0, the measured Lyapunov exponent λ from
+ * a sparkline of log(neighbour separation), and the energy error |ΔE|.
+ *
+ * Palettes: spectrum, ember, ice, neon (rotating), and ink (dark on paper;
+ * only with --palette ink). --scene fixes the scene kind, --variant the
+ * fan's, --count the number of pendulums, --load scales it by CPU load.
+ *
+ * Spanning: run one instance per monitor with the same --seed and --epoch,
+ * --layout (every output's logical rect) and --output = this one's index.
+ * The output under the middle of the layout shows the fan (with the
+ * clock); a portrait output the phase portrait; the rest, left to right,
+ * the chaos map (marking the fan's starting angles) and the phase portrait
+ * in turn. All share the scene timeline.
+ *
+ * Same plumbing as gauges and flightsim: Xlib + GLX for --window / --root,
+ * a native wlr-layer-shell surface over EGL for --layer (swaylock-plugin),
+ * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame
+ * offscreen, --bench N to time N frames.
+ *
+ * Keys (window mode): q / Escape quit.
  */
 #define _GNU_SOURCE
 #define GL_GLEXT_PROTOTYPES
@@ -1320,7 +1374,7 @@ static void bobs(const Phys *p, double a1, double a2, double w1, double w2, doub
 static int disp_n(void) { return morph_step >= 0 && fan_step >= morph_step && have_nxt ? nxt.n : ens_n; }
 static int disp_src(int j, int dn) { return dn == ens_n ? j : (int)((double)j * (ens_n - 1) / (dn > 1 ? dn - 1 : 1) + 0.5); }
 static double morph_s(long step) {
-    if (morph_step < 0 || step < morph_step) return 0;
+    if (morph_step < 0 || step < morph_step || !have_nxt) return 0;
     return smooth((double)(step - morph_step) / (MORPH * HZ));
 }
 static void disp_angles(int j, int i, double s, double a1, double a2, double *o1, double *o2) {
@@ -1615,17 +1669,38 @@ static double lyapunov(void) {
 static int last_role_drawn = -1;
 static double scene_el;                /* seconds into the current scene */
 
-static void scene_enter(int k) {
-    scene_make(k, &cur);
-    have_cur = 1;
-    scene_make(k + 1, &nxt);
+/* the next scene is worked out (its fray timing searched for) on a thread
+ * of its own while this one plays, so a scene change never stalls a frame;
+ * it is needed only once the morph begins */
+static pthread_t nxt_thread;
+static int nxt_pending;
+static Scene nxt_tmp;
+static void *nxt_worker(void *arg) {
+    scene_make((int)(intptr_t)arg, &nxt_tmp);
+    return NULL;
+}
+static void nxt_wait(void) {
+    if (!nxt_pending) return;
+    pthread_join(nxt_thread, NULL);
+    nxt = nxt_tmp;
     have_nxt = 1;
+    nxt_pending = 0;
+}
+
+static void scene_enter(int k) {
+    nxt_wait();
+    if (have_nxt && nxt.k == k) cur = nxt;
+    else scene_make(k, &cur);
+    have_cur = 1;
+    have_nxt = 0;
+    if (pthread_create(&nxt_thread, NULL, nxt_worker, (void *)(intptr_t)(k + 1)) == 0) nxt_pending = 1;
+    else { scene_make(k + 1, &nxt); have_nxt = 1; }
     int ty = role == SC_CYCLE ? cur.type : role;
     morph_step = -1;
     feat_cross = 0;
     if (ty == SC_FAN) {
         ens_begin(&cur, cur.n);
-        int nty = role == SC_CYCLE ? nxt.type : role;
+        int nty = role == SC_CYCLE ? scene_type(k + 1) : role;
         if (nty == SC_FAN) morph_step = (long)((cur.dur - MORPH) * HZ);
     } else if (ty == SC_PHASE) {
         Scene one = cur;
@@ -1663,6 +1738,7 @@ static void sim_to(double el, long keep_from_step) {
     scene_el = el - cur.t0;
     long target = (long)floor(scene_el * HZ);
     int ty = cur_type();
+    if (ty == SC_FAN && morph_step >= 0 && target >= morph_step) nxt_wait();
     if (ty == SC_FAN) ens_advance(&cur, target, keep_from_step);
     else if (ty == SC_PHASE) {
         ens_advance(&cur, target, keep_from_step);
