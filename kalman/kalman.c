@@ -1505,7 +1505,7 @@ static void rts_init(void) {
     A.follow = 1; A.follow_w = 300; A.follow_b = 14; A.follow_f = 2;
     A.nf = 1;
     f_init(&A.f[0], M_CV, 3.0, 0); A.fname[0] = "FILTER"; A.fcol[0] = C_F2;
-    chart(0, "POSITION \xcf\x83", "m, \xe2\x88\x9a" "trace of the x, y block", 1, 0.5f, 100);
+    chart(0, "POSITION \xcf\x83", "m", 1, 0.5f, 100);
     chart_ser(0, S_(0, C_F2, ST_LINE, "filter"));
     chart_ser(0, S_(1, C_F3, ST_LINE, "lag 8 s"));
     chart_ser(0, S_(2, C_F1, ST_LINE, "smoothed"));
@@ -2087,7 +2087,7 @@ static void nu_init(void) {
     chart(0, "NIS", "\xcf\x87\xc2\xb2\xe2\x82\x82 95%", 1, 0.01f, 1e4f);
     chart_bounds(0, 2, 10);
     for (int i = 0; i < NNF; i++) chart_ser(0, S_(i, NF_COL[i], ST_DOTS, NF_NAME[i]));
-    chart(1, "\xe2\x80\x96P \xe2\x88\x92 P_ref\xe2\x80\x96 / \xe2\x80\x96P_ref\xe2\x80\x96", "float32 against float64", 1, 1e-9f, 1e3f);
+    chart(1, "\xe2\x80\x96\xce\x94P\xe2\x80\x96 / \xe2\x80\x96P\xe2\x80\x96", "float32 against float64", 1, 1e-9f, 1e3f);
     for (int i = 0; i < NNF; i++) chart_ser(1, S_(3 + i, NF_COL[i], ST_LINE, NF_NAME[i]));
     chart(2, "POSITION ERROR", "mm", 1, 0.01f, 1e5f);
     chart_ser(2, S_(6, C_TRUTH, ST_LINE, "float64"));
@@ -3145,6 +3145,11 @@ static double nice_step(double range, int want) {
 static void chart_static(const Rect *r, const Chart *c) {
     char head[160];
     snprintf(head, sizeof head, "%s%s%s", c->title, c->note && c->note[0] ? "  \xc2\xb7  " : "", c->note ? c->note : "");
+    /* the note gives way to the legend when the panel is narrow */
+    float lgw = 0;
+    for (int i = 0; i < c->ns; i++)
+        if (c->s[i]->name && c->s[i]->name[0]) lgw += text_w(s_small, c->s[i]->name) + 24 * U;
+    if (text_w(s_head, head) + lgw + 30 * U > r->w) snprintf(head, sizeof head, "%s", c->title);
     frame(r, head);
     Rect in = chart_in(r, c->bars);
     const float *gc = pal[C_GRID], *dc = pal[C_DIM];
@@ -4675,7 +4680,7 @@ static void nu_plot(double s) {
         int n = 0;
         for (int i = NU.txn - 1; i >= 0 && n < 240; i -= 1) {
             if ((i + 1) * NU_DT > s) continue;
-            if ((i + 1) * NU_DT < s - 3) break;
+            if ((i + 1) * NU_DT < s - 0.8) break;
             P[2 * n] = WX(NU.tx[i][0]); P[2 * n + 1] = WY(NU.tx[i][1]); n++;
         }
         poly(P, n, 0, 1.1f * U, pal[C_TRUTH], 0.35f, NULL);
@@ -4764,7 +4769,7 @@ static void nu_mats(const Rect *r) {
     double S[16];
     for (int i = 0; i < 16; i++) S[i] = NU.P[NF_SQRT][i];
     const double *M[3] = {NU.Pd[NF_NAIVE], NU.Pr, S};
-    static const char *nm[3] = {"naive float32 P", "float64 P", "square root S, P = SS\xe1\xb5\x80"};
+    static const char *nm[3] = {"naive float32 P", "float64 P", "S, where P = SS\xe1\xb5\x80"};
     static const int col[3] = {C_WARN, C_TRUTH, C_F1};
     for (int i = 0; i < 3; i++) {
         float x = in.x + i * (4 * cs + gap);
