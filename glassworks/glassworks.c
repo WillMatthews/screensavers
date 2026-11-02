@@ -1439,7 +1439,7 @@ static const char *FS_SCENE = "#version 330 core\n" COMMON GLSL(
                     sky = vec3(0.45, 0.28, 0.1) * (0.3 + 0.7 * hash12(lw + 2.0));
             }
             sky *= 0.85 + 0.3 * pane;
-            emis = sky * wm * 1.6;
+            emis = sky * wm * 1.0;
             alb = vec3(0.02) * (1.0 - wm); rough = 0.8;
         } else if (m == 13) {                      /* rubber hose, lamp cords */
             alb = vec3(0.07, 0.025, 0.02); rough = 0.55;
@@ -1707,7 +1707,7 @@ static const char *FS_VOL = "#version 330 core\n" COMMON GLSL(
             li += uHgCol * 0.6 / (d2 + 0.02);
             float ml = moonlit(p);
             c = dot(rd, -uMoonDir);
-            li += uMoonCol * ml * (0.4 + 2.0 * pow(max(c, 0.0), 6.0)) * 3.0;
+            li += uMoonCol * ml * (0.4 + 2.0 * pow(max(c, 0.0), 6.0)) * 1.1;
             sc += tr * dens * dt * li;
             tr *= exp(-dens * dt * 0.6);
         }
@@ -2706,10 +2706,12 @@ static void role_cam(double t, const Frame *F, Cam *cm) {
     V3 pc = follow(t);
     cm->exposure = 1.0f;
     if (role == R_GALLERY) {
-        int v = (int)(hu(id, 1) * 3);
+        float hv = hu(id, 1);
+        int v = hv < 0.45f ? 0 : hv < 0.8f ? 1 : 2;
         float zc = SH_Z0 + 0.9f + (SH_Z1 - SH_Z0 - 1.8f) * hu(id, 2);
         if (v == 0) {          /* along a shelf, against the moonlit glass */
-            int sh = (int)(hu(id, 3) * 3.99f);
+            static const int full[3] = {1, 2, 0};
+            int sh = full[(int)(hu(id, 3) * 2.99f)];
             cm->eye = v3(SH_X - 0.95f, shelf_y(sh) + 0.2f, zc + 0.55f - 0.5f * q);
             cm->at = v3(SH_X - 0.15f, shelf_y(sh) + 0.1f, zc - 0.45f - 0.5f * q);
             cm->vfov = 34; cm->aperture = 0.012f;
