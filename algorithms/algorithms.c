@@ -47,13 +47,17 @@
  *
  * Everything is drawn as signed-distance quads (crisp at any size) and
  * freetype text (Inter and a mono, from fontconfig). Palettes: spectral,
- * mono, terminal, paper (light), sunset, viridis (--palette NAME, or one is
- * picked from the seed).
+ * mono, terminal, sunset, viridis, each act taking the next in a shuffled
+ * cycle (the ground crossfading between acts), or --palette NAME to keep one
+ * (paper, a light theme, only this way).
  *
  * Same plumbing as gauges and flightsim: Xlib + GLX for --window / --root, a
  * native wlr-layer-shell surface over EGL for --layer (swaylock-plugin),
  * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen,
- * --bench N to time N frames. --check verifies every algorithm and exits.
+ * --bench N to time N frames (wall clock and GPU). --check verifies every
+ * algorithm and exits; --schedule N prints the first N acts; --list names
+ * everything that --sort, --form, --input, --maze, --solve, --grid and
+ * --palette accept (forcing what plays, for previews).
  *
  * Keys (window mode): q / Escape quit.
  */
@@ -88,7 +92,7 @@
 #define TAU (2 * PI)
 
 static int W = 1280, H = 800;
-static int opt_root, opt_layer, opt_bench, opt_check, opt_list;
+static int opt_root, opt_layer, opt_bench, opt_check, opt_list, opt_schedule;
 static float opt_fps = 60;
 static const char *opt_font = "Inter";
 static const char *opt_mono = "JetBrainsMono Nerd Font Mono,JetBrains Mono,DejaVu Sans Mono";
@@ -228,6 +232,21 @@ static void hex(const char *h, float *rgb) {
     for (int i = 0; i < 3; i++) rgb[i] = ((v >> (16 - 8 * i)) & 255) / 255.0f;
 }
 
+/* --palette pins one; otherwise every act takes the next of the dark ones */
+static int pal_fixed = -1, pal_cur = -1;
+
+static void set_palette(int k) {
+    if (k == pal_cur) return;
+    pal_cur = k;
+    const PalDef *p = &PALS[k];
+    pal.name = p->name;
+    pal.light = p->light;
+    hex(p->bg, pal.bg); hex(p->bg2, pal.bg2); hex(p->fg, pal.fg); hex(p->dim, pal.dim);
+    hex(p->faint, pal.faint); hex(p->hi, pal.hi); hex(p->hot, pal.hot); hex(p->path, pal.path);
+    pal.nramp = p->nramp;
+    for (int i = 0; i < p->nramp; i++) hex(p->ramp[i], pal.ramp[i]);
+}
+
 static void choose_palette(void) {
     int k = -1;
     for (int i = 0; i < NPAL; i++)
@@ -238,14 +257,7 @@ static void choose_palette(void) {
         fprintf(stderr, "\n");
         exit(1);
     }
-    if (k < 0) k = (int)(hash3(opt_seed, 3, 5) % NPAL);
-    const PalDef *p = &PALS[k];
-    pal.name = p->name;
-    pal.light = p->light;
-    hex(p->bg, pal.bg); hex(p->bg2, pal.bg2); hex(p->fg, pal.fg); hex(p->dim, pal.dim);
-    hex(p->faint, pal.faint); hex(p->hi, pal.hi); hex(p->hot, pal.hot); hex(p->path, pal.path);
-    pal.nramp = p->nramp;
-    for (int i = 0; i < p->nramp; i++) hex(p->ramp[i], pal.ramp[i]);
+    pal_fixed = k;
 }
 
 /* the value ramp at t in [0, 1] */
@@ -1203,6 +1215,7 @@ typedef struct {
     double T;                           /* sorting time, or maze generation time */
     int gen, solve, grid, density;
     double Ts;                          /* maze solving time */
+    int pal;
 } Act;
 
 /* act-local timeline of a sort */
@@ -1225,7 +1238,7 @@ static int find_sort(const char *s) {
 }
 
 static int is_recent(int alg) {
-    for (int i = 0; i < 6; i++) if (recent_alg[i] == alg + 1) return 1;
+    for (int i = 0; i < 6; i++) if (recent_alg[i] && !strcmp(SORTS[recent_alg[i] - 1].name, SORTS[alg].name)) return 1;
     return 0;
 }
 static void push_recent(int alg) {
@@ -1347,6 +1360,8 @@ static Act next_act(int k, double t0) {
         }
         a.alg = a.algs[0];
         a.n = opt_n > 0 ? opt_n : cls == CL_QUAD ? (a.form == F_BARS ? 96 : 140) : (a.form == F_BARS ? 320 : 480);
+        for (int i = 0; i < span_n; i++)
+            if (SORTS[a.algs[i]].pow2) a.n = pow2_floor(a.n);    /* the networks want a power of two */
         a.input = pick_input(&r, a.alg, a.form);
         if (a.input == I_FEW && a.form == F_IMAGE) a.input = I_RANDOM;
         a.T = cls == CL_QUAD ? 56 : 44;
@@ -1380,6 +1395,14 @@ static Act next_act(int k, double t0) {
         maze_params(&a, &r, spanning());
     }
     a.pic = rint_(&r, 3);
+    if (pal_fixed >= 0) a.pal = pal_fixed;
+    else {
+        /* the dark palettes in a shuffled cycle, never the same twice running */
+        int prev = k ? sched[k - 1].pal : -1;
+        uint32_t tries = 0;
+        do a.pal = (int)(hash3(opt_seed, (uint32_t)k, 0x9a1 + tries++) % NPAL);
+        while (PALS[a.pal].light || a.pal == prev);
+    }
     return a;
 }
 
@@ -1671,7 +1694,7 @@ static void g_kruskal(void) {
     }
     uf = malloc((size_t)G.nc * sizeof(int)); ufn = malloc((size_t)G.nc * sizeof(int));
     ufnext = malloc((size_t)G.nc * sizeof(int)); uftail = malloc((size_t)G.nc * sizeof(int));
-    for (int i = 0; i < G.nc; i++) { uf[i] = i; ufn[i] = 1; ufnext[i] = -1; uftail[i] = i; gst[i] = 1; }
+    for (int i = 0; i < G.nc; i++) { uf[i] = i; ufn[i] = 1; ufnext[i] = -1; uftail[i] = i; gstate(i, 1, 0); }
     for (int e = 0; e < ne; e++) {
         int a = uf_find(ea[e]), b = uf_find(eb[e]);
         if (a == b) continue;
@@ -2376,10 +2399,10 @@ static void picture(int kind, uint32_t s, float x, float y, float asp, float *o)
         /* interference of two ring systems */
         float ax = 0.33f * asp, ay = 0.45f, bx = 0.70f * asp, by = 0.58f;
         float d1 = hypotf(x * asp - ax, y - ay), d2 = hypotf(x * asp - bx, y - by);
-        float t = 0.5f + 0.5f * sinf(d1 * 46) * cosf(d2 * 38);
-        float band = fmodf(d1 * 3.2f + d2 * 1.4f, 1.0f);
+        float t = 0.5f + 0.5f * sinf(d1 * 22) * cosf(d2 * 17);
+        float band = fmodf(d1 * 2.4f + d2 * 1.1f, 1.0f);
         ramp(band, o);
-        mix3(o, deep, (1 - t) * 0.55f, o);
+        mix3(o, deep, (1 - t) * 0.3f, o);
     } else {
         /* a warped flow of colour with contour lines */
         float px = x * asp * 2.2f, py = y * 2.2f;
@@ -3430,17 +3453,27 @@ static void flush_text(void) {
 /* el: seconds into the programme; wt: wall-clock time */
 static void render(double el, double wt, GLuint target) {
     if (L.w != W || L.h != H) layout();
-    int ai;
-    const Act *a = act_at(el, &ai);
+    int ai, an;
+    Act act = *act_at(el, &ai);
+    const Act *a = &act;
+    int next_pal = act_at(a->t0 + a->dur + 1e-3, &an)->pal;
+    set_palette(a->pal);
     if (cur.index != ai || cur.w != W || cur.h != H) build_act(a, ai);
     double tau = el - a->t0;
+    /* the ground shifts to the next act's palette as this one fades */
+    float bgk = smooth((float)(a->dur - FADE), (float)a->dur, (float)tau), bg[3], bg2[3];
+    {
+        float nb[3], nb2[3];
+        hex(PALS[next_pal].bg, nb); hex(PALS[next_pal].bg2, nb2);
+        mix3(pal.bg, nb, bgk, bg); mix3(pal.bg2, nb2, bgk, bg2);
+    }
     fade_a = smooth(0, 0.9f, (float)tau) * (1 - smooth((float)(a->dur - FADE), (float)a->dur, (float)tau));
     glBindFramebuffer(GL_FRAMEBUFFER, target);
     glViewport(0, 0, W, H);
     glDisable(GL_BLEND);
     glUseProgram(prog_bg);
-    glUniform3fv(U(prog_bg, "uBg"), 1, pal.bg);
-    glUniform3fv(U(prog_bg, "uBg2"), 1, pal.bg2);
+    glUniform3fv(U(prog_bg, "uBg"), 1, bg);
+    glUniform3fv(U(prog_bg, "uBg2"), 1, bg2);
     glUniform2f(U(prog_bg, "uRes"), (float)W, (float)H);
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -3451,7 +3484,7 @@ static void render(double el, double wt, GLuint target) {
     flush_prims();
     flush_text();
     if (fade_a < 1) {
-        box(0, 0, (float)W, (float)H, 0, pal.bg, 1 - fade_a);
+        box(0, 0, (float)W, (float)H, 0, bg, 1 - fade_a);
         flush_prims();
     }
     draw_clock(wt);
@@ -3692,7 +3725,7 @@ static void usage(void) {
         "                  [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH]\n"
         "                  [--kind sort|race|triptych|maze] [--sort NAME] [--form NAME] [--input NAME] [--n N]\n"
         "                  [--maze NAME] [--solve NAME] [--grid square|hex|theta]\n"
-        "                  [--check] [--list]\n");
+        "                  [--check] [--list] [--schedule ACTS]\n");
     exit(1);
 }
 
@@ -3759,6 +3792,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-check")) opt_check = 1;
         else if (!strcmp(a, "-list")) opt_list = 1;
+        else if (!strcmp(a, "-schedule") && i + 1 < argc) opt_schedule = atoi(argv[++i]);
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-font") && i + 1 < argc) opt_font = argv[++i];
@@ -3798,6 +3832,23 @@ int main(int argc, char **argv) {
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
     int offscreen = opt_shot || opt_bench > 0;
     choose_palette();
+    if (opt_schedule > 0) {
+        /* the programme: when each act starts, and what it is */
+        for (int k = 0; k < opt_schedule; k++) {
+            int ai;
+            const Act *a = act_at(k ? sched[k - 1].t0 + sched[k - 1].dur : 0, &ai);
+            char what[160];
+            if (a->kind == K_MAZE) snprintf(what, sizeof what, "%s on %s, then %s", GENS[a->gen].key, GRIDS[a->grid], SOLS[a->solve].key);
+            else if (a->kind == K_RACE) {
+                int o = 0;
+                o += snprintf(what + o, sizeof what - o, "%s", SORTS[a->algs[0]].key);
+                for (int i = 1; i < span_n; i++) o += snprintf(what + o, sizeof what - o, " vs %s", SORTS[a->algs[i]].key);
+                snprintf(what + o, sizeof what - o, " (%s)", FORMS[a->form]);
+            } else snprintf(what, sizeof what, "%s as %s, n = %d, %s", SORTS[a->alg].key, FORMS[a->form], a->n, INPUTS[a->input]);
+            printf("%7.1f s  %-8s  %-8s  %s\n", a->t0, KINDS[a->kind], PALS[a->pal].name, what);
+        }
+        return 0;
+    }
     fonts_init();
 
     /* --epoch: when the programme started, shared by every instance; a --shot
