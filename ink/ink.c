@@ -884,7 +884,7 @@ static void step_slice(Slice *s, int layer, double t) {
     glUniform2f(U(prog_dye, "uVN"), (float)s->nx, (float)s->ny);
     double ls = t;
     float decay = 1.0f / 50.0f;
-    if (ls > SCENE - FADE) decay += 0.5f;
+    if (ls > SCENE - FADE) decay += 0.15f;
     glUniform1f(U(prog_dye, "uDecay"), decay);
     glUniform1f(U(prog_dye, "uSink"), 1.2f);
     glUniform1f(U(prog_dye, "uSinkY"), (0.02f - s->dom[1]) / (s->dom[3] - s->dom[1]));
