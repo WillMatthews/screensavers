@@ -1324,6 +1324,7 @@ static const char *COMMON_FS = GLSL(
     layout(location = 0) out vec4 o0;
     layout(location = 1) out vec4 o1;
     layout(location = 2) out vec4 o2;
+    float g_alpha = 1.0;
     void emit(vec3 P, vec3 G, vec3 sunp, float spec, vec3 amb, float mark, bool outside) {
         if (uPass == 2) {
             float d = outside ? 0.0 : length(P - G);
@@ -1339,7 +1340,7 @@ static const char *COMMON_FS = GLSL(
             col = (sunp + spec) * uSun * trd * caustic(P) * shadow(P) + amb * uAmbTop;
             col = water(col, P, G);
         }
-        o0 = vec4(col, 1.0);
+        o0 = vec4(col, g_alpha);
         o1 = vec4(outside ? -1.0 : P.z, mark, 0.0, 1.0);
     }
     /* the usual split for a surface of albedo alb */
@@ -1510,7 +1511,7 @@ static const char *VS_LEAF = GLSL(
         if (type == 2 || type == 9) return pow(max(sin(3.1416 * pow(v, 0.8)), 0.0), 0.9);
         if (type == 4) return 1.0 - smoothstep(0.93, 1.0, v) * 0.7;
         if (type == 5) return 1.0 - 0.8 * v;
-        if (type == 6) return sqrt(max(1.0 - pow(2.0 * v - 1.0, 2.0), 0.0));
+        if (type == 6) return 1.0;
         if (type == 11) return pow(max(sin(3.1416 * pow(v, 0.85)), 0.0), 0.7);
         return 1.0;
     }
@@ -1570,16 +1571,18 @@ static const char *FS_LEAF = GLSL(
         /* coverage: soft edges; moss is feathery */
         float a = 1.0 - smoothstep(0.75, 1.0, abs(u));
         if (type == 7) {
-            float fr = abs(fract(u * 2.5 + v * 3.0 + seed * 7.0) - 0.5) * 2.0;
-            float fr2 = abs(fract(-u * 2.5 + v * 3.0 + seed * 3.0) - 0.5) * 2.0;
-            float strand = max(1.0 - smoothstep(0.1, 0.35, abs(u) * 0.2 + fr * 0.3), 1.0 - smoothstep(0.12, 0.3, fr2 * 0.4));
-            a *= strand * (1.0 - smoothstep(0.7, 1.0, length(vec2(u, v * 2.0 - 1.0))));
+            /* a moss sprig: a wiry stem with fine side shoots, tapering */
+            float w = (1.0 - v) * 0.95;
+            float stem = 1.0 - smoothstep(0.06, 0.14, abs(u));
+            float br = 1.0 - smoothstep(0.1, 0.24, abs(fract(v * 6.0 - abs(u) * 1.3 + seed * 3.0) - 0.5));
+            a = max(stem, br * (1.0 - smoothstep(w - 0.1, w, abs(u)))) * (1.0 - smoothstep(0.9, 1.0, v));
         }
+        if (type == 6) a = 1.0 - smoothstep(0.8, 1.0, length(vec2(u, v * 2.0 - 1.0)));
         if (a < 0.5) discard;
         if (uPass == 1) return;
         vec3 N = normalize(vN);
         if (!gl_FrontFacing) N = -N;
-        vec3 alb; float spec = 0.15, rough = 24.0, trans = 0.5;
+        vec3 alb; float spec = 0.05, rough = 24.0, trans = 0.5;
         float var = hue * 0.08;
         if (type == 0) {
             alb = mix(vec3(0.22, 0.45, 0.1), vec3(0.78, 0.36, 0.30), smoothstep(0.55, 1.0, hf));
@@ -1903,8 +1906,8 @@ static const struct { float h; Lighting l; } light_keys[] = {
     {0.0f, {{0.09f, 0.16f, 0.36f}, {0.012f, 0.026f, 0.06f}, {0.003f, 0.007f, 0.016f}, {0.004f, 0.011f, 0.026f}, 1.0f, 0.25f, 0.5f}},
     {6.5f, {{0.09f, 0.16f, 0.36f}, {0.012f, 0.026f, 0.06f}, {0.003f, 0.007f, 0.016f}, {0.004f, 0.011f, 0.026f}, 1.0f, 0.25f, 0.5f}},
     {7.5f, {{1.10f, 0.72f, 0.42f}, {0.10f, 0.10f, 0.10f}, {0.03f, 0.035f, 0.035f}, {0.035f, 0.05f, 0.05f}, 0.35f, 0.6f, 0.9f}},
-    {9.0f, {{1.7f, 1.62f, 1.48f}, {0.30f, 0.42f, 0.42f}, {0.08f, 0.12f, 0.11f}, {0.04f, 0.14f, 0.13f}, 0.0f, 1.0f, 1.0f}},
-    {17.0f, {{1.7f, 1.62f, 1.48f}, {0.30f, 0.42f, 0.42f}, {0.08f, 0.12f, 0.11f}, {0.04f, 0.14f, 0.13f}, 0.0f, 1.0f, 1.0f}},
+    {9.0f, {{1.7f, 1.62f, 1.48f}, {0.33f, 0.42f, 0.38f}, {0.08f, 0.12f, 0.11f}, {0.04f, 0.14f, 0.13f}, 0.0f, 1.0f, 1.0f}},
+    {17.0f, {{1.7f, 1.62f, 1.48f}, {0.33f, 0.42f, 0.38f}, {0.08f, 0.12f, 0.11f}, {0.04f, 0.14f, 0.13f}, 0.0f, 1.0f, 1.0f}},
     {19.0f, {{2.2f, 1.55f, 0.95f}, {0.22f, 0.24f, 0.26f}, {0.06f, 0.07f, 0.065f}, {0.06f, 0.09f, 0.095f}, 0.05f, 0.85f, 1.2f}},
     {21.5f, {{0.75f, 0.42f, 0.30f}, {0.06f, 0.07f, 0.09f}, {0.015f, 0.02f, 0.025f}, {0.016f, 0.025f, 0.035f}, 0.6f, 0.5f, 0.9f}},
     {22.5f, {{0.09f, 0.16f, 0.36f}, {0.012f, 0.026f, 0.06f}, {0.003f, 0.007f, 0.016f}, {0.004f, 0.011f, 0.026f}, 1.0f, 0.25f, 0.5f}},
@@ -1981,13 +1984,992 @@ static void solid_attribs(void) {
 static GLuint p_solid;
 
 /* ==================================================================== */
-/* ---- creatures (stub) ---- */
-static void creatures_init(void) {}
-static void creatures_gl(void) {}
-static void creatures_update(double t, double wt) { (void)t; (void)wt; }
-static void creatures_draw(int pass) { (void)pass; }
-static void creatures_draw_translucent(void) {}
-static int creature_focus(const char *kind, V3 *at, float *size) { (void)kind; (void)at; (void)size; return 0; }
+/* ---- the fish: bodies ----
+ * Each species is one mesh in body units (standard length 1: snout at
+ * x = 0.4, the base of the tail at x = -0.6), lofted from a table of
+ * cross-sections along the spine, with its fins as membranes stretched on
+ * rays. Instances are bent in the vertex shader by a travelling wave, so
+ * they swim. Parts: 0 body, 1 dorsal, 2 caudal, 3 anal, 4 pectoral,
+ * 5 pelvic, 6 adipose, 7 barbel. */
+enum { SP_TETRA, SP_ANGEL, SP_DISCUS, SP_CORY, SP_N };
+typedef struct { float s, top, bot, w; } Prof;
+
+static float prof_eval(const Prof *p, int n, float s, int which) {
+    if (s <= p[0].s) return (&p[0].top)[which];
+    if (s >= p[n - 1].s) return (&p[n - 1].top)[which];
+    int i = 0;
+    while (i < n - 2 && p[i + 1].s < s) i++;
+    float t = (s - p[i].s) / (p[i + 1].s - p[i].s);
+    float y0 = (&p[i > 0 ? i - 1 : 0].top)[which], y1 = (&p[i].top)[which], y2 = (&p[i + 1].top)[which];
+    float y3 = (&p[i + 2 < n ? i + 2 : n - 1].top)[which];
+    float t2 = t * t, t3 = t2 * t;
+    /* monotone-safe cubic (Catmull-Rom can overshoot near the snout) */
+    float h = y1 + (y2 - y1) * (t * t * (3 - 2 * t));
+    float cr = 0.5f * (2 * y1 + (y2 - y0) * t + (2 * y0 - 5 * y1 + 4 * y2 - y3) * t2 + (-y0 + 3 * y1 - 3 * y2 + y3) * t3);
+    return fmaxf(mixf(h, cr, 0.6f), 0);
+}
+
+typedef struct {
+    const Prof *prof; int np;
+    float et, eb, ez;                   /* superellipse exponents: top, belly, sides */
+    float eye_s, eye_y, eye_r;
+} BodySpec;
+
+static void build_body(Mesh *m, const BodySpec *b) {
+    const int ns = 52, na = 36;
+    int v0 = m->nv, i0 = m->ni;
+    for (int i = 0; i <= ns; i++) {
+        float f = (float)i / ns;
+        float s = 0.5f - 0.5f * cosf(PI * f);
+        s = mixf(s, f, 0.35f);
+        float top = prof_eval(b->prof, b->np, s, 0), bot = prof_eval(b->prof, b->np, s, 1), w = prof_eval(b->prof, b->np, s, 2);
+        for (int j = 0; j <= na; j++) {
+            float a = (float)j / na * TAU, ca = cosf(a), sa = sinf(a);
+            float y = sa >= 0 ? top * powf(sa, b->et) : -bot * powf(-sa, b->eb);
+            float z = w * (ca >= 0 ? 1 : -1) * powf(fabsf(ca), b->ez);
+            /* the eye bulges a little from the head */
+            float de = sqrtf((s - b->eye_s) * (s - b->eye_s) + (y - b->eye_y) * (y - b->eye_y)) / b->eye_r;
+            if (de < 1.3f && fabsf(z) > 1e-4f) z += (z > 0 ? 1 : -1) * b->eye_r * 0.22f * fmaxf(0, 1 - de * de / 1.69f);
+            float yn = y >= 0 ? (top > 1e-5f ? y / top : 0) : (bot > 1e-5f ? y / bot : 0);
+            m_vert(m, v3(0.4f - s, y, z), v3(0, 0, 0), s, (float)j / na, 0, s, yn, z >= 0 ? 1.0f : -1.0f);
+        }
+    }
+    for (int i = 0; i < ns; i++)
+        for (int j = 0; j < na; j++) {
+            int a = v0 + i * (na + 1) + j, bb = a + 1, c = a + na + 1, d = c + 1;
+            m_tri(m, a, bb, c); m_tri(m, bb, d, c);
+        }
+    m_normals(m, v0, i0);
+    /* make them point out: the winding above faces in for this parametrisation */
+    {
+        int k = v0 + (ns / 2) * (na + 1);   /* a vertex on the right side, mid-body */
+        if (vdot(m_nrm(m, k), v3(0, 0, 1)) < 0)
+            for (int i = v0; i < m->nv; i++) m_setn(m, i, vmul(m_nrm(m, i), -1));
+    }
+    /* the snout's ring is one point: give it the forward normal */
+    for (int j = 0; j <= na; j++) m_setn(m, v0 + j, v3(1, 0, 0));
+}
+
+/* body-unit point from (s, y, z) */
+static V3 bp(float s, float y, float z) { return v3(0.4f - s, y, z); }
+
+/* a fin: rays from points along its base to points along its outline
+ * (a polyline, sampled evenly by length); median fins lie in z = 0 */
+static void build_fin(Mesh *m, int part, V3 b0, V3 b1, const V3 *outline, int no, int nu, int nv, V3 pivot, float bulge) {
+    /* outline arclength */
+    float L[32];
+    L[0] = 0;
+    for (int i = 1; i < no; i++) L[i] = L[i - 1] + vlen(vsub(outline[i], outline[i - 1]));
+    int v0 = m->nv, i0 = m->ni;
+    for (int j = 0; j <= nv; j++)
+        for (int i = 0; i <= nu; i++) {
+            float u = (float)i / nu, v = (float)j / nv;
+            V3 base = vlerp(b0, b1, u);
+            float tl = u * L[no - 1];
+            int k = 0;
+            while (k < no - 2 && L[k + 1] < tl) k++;
+            float f = (tl - L[k]) / fmaxf(L[k + 1] - L[k], 1e-6f);
+            V3 edge = vlerp(outline[k], outline[k + 1], f);
+            V3 p = vlerp(base, edge, v);
+            /* membranes billow a little between the rays */
+            p.z += bulge * sinf(PI * v) * sinf(u * PI * 9) * 0.3f + bulge * sinf(PI * v * 0.5f);
+            m_vert(m, p, v3(0, 0, 1), u, v, (float)part, pivot.x, pivot.y, pivot.z);
+        }
+    for (int j = 0; j < nv; j++)
+        for (int i = 0; i < nu; i++) {
+            int a = v0 + j * (nu + 1) + i, b = a + 1, c = a + nu + 1, d = c + 1;
+            m_tri(m, a, b, c); m_tri(m, b, d, c);
+        }
+    m_normals(m, v0, i0);
+}
+
+/* the top or bottom of the profile at s, in body units */
+static float ptop(const BodySpec *b, float s) { return prof_eval(b->prof, b->np, s, 0); }
+static float pbot(const BodySpec *b, float s) { return -prof_eval(b->prof, b->np, s, 1); }
+static float pwid(const BodySpec *b, float s) { return prof_eval(b->prof, b->np, s, 2); }
+
+/* paired fins on both sides: the outline given for the right side (z > 0) */
+static void build_pair(Mesh *m, int part, V3 b0, V3 b1, const V3 *outline, int no, int nu, int nv, float bulge) {
+    for (int side = -1; side <= 1; side += 2) {
+        V3 o[16];
+        for (int i = 0; i < no; i++) o[i] = v3(outline[i].x, outline[i].y, outline[i].z * side);
+        V3 a = v3(b0.x, b0.y, b0.z * side), b = v3(b1.x, b1.y, b1.z * side);
+        V3 pv = vlerp(a, b, 0.5f);
+        build_fin(m, part, a, b, o, no, nu, nv, pv, bulge * side);
+    }
+}
+
+/* a thin tube in body units, for barbels and the angelfish's feelers */
+static void build_feeler(Mesh *m, int part, const V3 *pts, int np, float r0, float r1) {
+    int v0 = m->nv;
+    const int ns = 6;
+    V3 prev_n = v3(0, 0, 0);
+    for (int i = 0; i < np; i++) {
+        V3 tan = vnorm(vsub(pts[i < np - 1 ? i + 1 : i], pts[i > 0 ? i - 1 : i]));
+        V3 nn = i == 0 ? vperp(tan) : vnorm(vsub(prev_n, vmul(tan, vdot(prev_n, tan))));
+        prev_n = nn;
+        V3 bn = vcross(tan, nn);
+        float r = mixf(r0, r1, (float)i / (np - 1));
+        for (int s = 0; s <= ns; s++) {
+            float a = (float)s / ns * TAU;
+            V3 d = vadd(vmul(nn, cosf(a)), vmul(bn, sinf(a)));
+            m_vert(m, vmad(pts[i], d, r), d, (float)i / (np - 1), (float)s / ns, (float)part, 0, 0, 0);
+        }
+    }
+    for (int i = 0; i < np - 1; i++)
+        for (int s = 0; s < ns; s++) {
+            int a = v0 + i * (ns + 1) + s, b = a + 1, c = a + ns + 1, d = c + 1;
+            m_tri(m, a, c, b); m_tri(m, b, c, d);
+        }
+}
+
+/* -- the species -- */
+static const Prof prof_tetra[] = {
+    {0, 0, 0, 0}, {0.02f, 0.018f, 0.02f, 0.016f}, {0.06f, 0.045f, 0.05f, 0.032f}, {0.13f, 0.078f, 0.088f, 0.044f},
+    {0.24f, 0.108f, 0.12f, 0.05f}, {0.37f, 0.124f, 0.13f, 0.049f}, {0.5f, 0.114f, 0.118f, 0.044f}, {0.62f, 0.092f, 0.094f, 0.036f},
+    {0.74f, 0.068f, 0.068f, 0.026f}, {0.85f, 0.05f, 0.05f, 0.018f}, {0.94f, 0.044f, 0.044f, 0.013f}, {1.0f, 0.046f, 0.046f, 0.011f}};
+static const Prof prof_angel[] = {
+    {0, 0, 0, 0}, {0.035f, 0.05f, 0.035f, 0.02f}, {0.09f, 0.15f, 0.11f, 0.034f}, {0.17f, 0.28f, 0.22f, 0.048f},
+    {0.27f, 0.39f, 0.34f, 0.056f}, {0.38f, 0.44f, 0.41f, 0.058f}, {0.5f, 0.41f, 0.39f, 0.053f}, {0.62f, 0.32f, 0.3f, 0.044f},
+    {0.75f, 0.2f, 0.19f, 0.032f}, {0.88f, 0.105f, 0.1f, 0.021f}, {1.0f, 0.078f, 0.074f, 0.015f}};
+static const Prof prof_discus[] = {
+    {0, 0, 0, 0}, {0.03f, 0.075f, 0.055f, 0.022f}, {0.08f, 0.19f, 0.15f, 0.038f}, {0.15f, 0.31f, 0.27f, 0.052f},
+    {0.25f, 0.41f, 0.37f, 0.064f}, {0.38f, 0.46f, 0.43f, 0.07f}, {0.5f, 0.46f, 0.43f, 0.068f}, {0.62f, 0.41f, 0.39f, 0.06f},
+    {0.74f, 0.31f, 0.3f, 0.046f}, {0.86f, 0.18f, 0.17f, 0.03f}, {0.95f, 0.1f, 0.1f, 0.02f}, {1.0f, 0.08f, 0.08f, 0.015f}};
+static const Prof prof_cory[] = {
+    {0, 0, 0, 0}, {0.03f, 0.055f, 0.035f, 0.05f}, {0.1f, 0.15f, 0.075f, 0.105f}, {0.2f, 0.235f, 0.105f, 0.135f},
+    {0.3f, 0.275f, 0.115f, 0.138f}, {0.42f, 0.265f, 0.115f, 0.125f}, {0.55f, 0.215f, 0.105f, 0.1f}, {0.68f, 0.158f, 0.088f, 0.075f},
+    {0.8f, 0.11f, 0.07f, 0.05f}, {0.92f, 0.08f, 0.058f, 0.03f}, {1.0f, 0.07f, 0.055f, 0.024f}};
+
+static BodySpec body_of[SP_N] = {
+    {prof_tetra, 12, 1.0f, 1.0f, 1.0f, 0.1f, 0.022f, 0.047f},
+    {prof_angel, 11, 1.0f, 1.0f, 0.8f, 0.115f, 0.075f, 0.052f},
+    {prof_discus, 12, 1.0f, 1.0f, 0.8f, 0.12f, 0.075f, 0.05f},
+    {prof_cory, 11, 0.95f, 0.4f, 0.9f, 0.16f, 0.115f, 0.052f},
+};
+
+static void build_species(Mesh *m, int sp, int *body_ni) {
+    m->nv = m->ni = 0;
+    const BodySpec *b = &body_of[sp];
+    build_body(m, b);
+    *body_ni = m->ni;
+    V3 z0 = v3(0, 0, 0);
+    if (sp == SP_TETRA) {
+        V3 d[] = {bp(0.44f, 0.115f, 0), bp(0.47f, 0.25f, 0), bp(0.55f, 0.24f, 0), bp(0.63f, 0.16f, 0), bp(0.62f, 0.095f, 0)};
+        build_fin(m, 1, bp(0.44f, ptop(b, 0.44f) - 0.005f, 0), bp(0.6f, ptop(b, 0.6f) - 0.005f, 0), d, 5, 9, 5, z0, 0.002f);
+        V3 ad[] = {bp(0.8f, 0.07f, 0), bp(0.83f, 0.1f, 0), bp(0.87f, 0.095f, 0), bp(0.87f, 0.06f, 0)};
+        build_fin(m, 6, bp(0.8f, ptop(b, 0.8f) - 0.004f, 0), bp(0.87f, ptop(b, 0.87f) - 0.004f, 0), ad, 4, 4, 2, z0, 0);
+        V3 a[] = {bp(0.55f, -0.115f, 0), bp(0.58f, -0.22f, 0), bp(0.7f, -0.17f, 0), bp(0.84f, -0.12f, 0), bp(0.86f, -0.06f, 0)};
+        build_fin(m, 3, bp(0.55f, pbot(b, 0.55f) + 0.005f, 0), bp(0.86f, pbot(b, 0.86f) + 0.004f, 0), a, 5, 16, 5, z0, 0.002f);
+        V3 c[] = {bp(1.0f, -0.045f, 0), bp(1.14f, -0.13f, 0), bp(1.3f, -0.2f, 0), bp(1.25f, -0.1f, 0), bp(1.14f, 0.0f, 0),
+                  bp(1.25f, 0.1f, 0), bp(1.3f, 0.2f, 0), bp(1.14f, 0.13f, 0), bp(1.0f, 0.045f, 0)};
+        build_fin(m, 2, bp(0.97f, -0.045f, 0), bp(0.97f, 0.045f, 0), c, 9, 18, 6, z0, 0.003f);
+        V3 pc[] = {bp(0.25f, -0.06f, 0.06f), bp(0.31f, -0.09f, 0.1f), bp(0.38f, -0.1f, 0.085f), bp(0.36f, -0.07f, 0.065f)};
+        build_pair(m, 4, bp(0.23f, -0.045f, 0.052f), bp(0.25f, -0.07f, 0.05f), pc, 4, 6, 4, 0.002f);
+        V3 pv[] = {bp(0.47f, -0.13f, 0.025f), bp(0.53f, -0.19f, 0.04f), bp(0.58f, -0.16f, 0.03f)};
+        build_pair(m, 5, bp(0.45f, -0.115f, 0.02f), bp(0.49f, -0.118f, 0.018f), pv, 3, 4, 3, 0.001f);
+    } else if (sp == SP_ANGEL) {
+        /* the tall swept sails, banded, with trailing tips */
+        V3 d[] = {bp(0.3f, 0.44f, 0), bp(0.35f, 0.72f, 0), bp(0.44f, 0.98f, 0), bp(0.6f, 1.18f, 0), bp(0.86f, 1.34f, 0),
+                  bp(0.9f, 1.02f, 0), bp(0.91f, 0.6f, 0), bp(0.94f, 0.16f, 0)};
+        build_fin(m, 1, bp(0.3f, ptop(b, 0.3f) - 0.01f, 0), bp(0.9f, ptop(b, 0.9f) - 0.008f, 0), d, 8, 20, 9, z0, 0.004f);
+        V3 a[] = {bp(0.42f, -0.41f, 0), bp(0.47f, -0.68f, 0), bp(0.56f, -0.92f, 0), bp(0.7f, -1.12f, 0), bp(0.88f, -1.28f, 0),
+                  bp(0.9f, -0.98f, 0), bp(0.91f, -0.56f, 0), bp(0.94f, -0.14f, 0)};
+        build_fin(m, 3, bp(0.4f, pbot(b, 0.4f) + 0.01f, 0), bp(0.9f, pbot(b, 0.9f) + 0.008f, 0), a, 8, 20, 9, z0, 0.004f);
+        V3 c[] = {bp(1.0f, -0.075f, 0), bp(1.2f, -0.2f, 0), bp(1.5f, -0.36f, 0), bp(1.3f, -0.15f, 0), bp(1.24f, 0.0f, 0),
+                  bp(1.3f, 0.15f, 0), bp(1.5f, 0.36f, 0), bp(1.2f, 0.2f, 0), bp(1.0f, 0.075f, 0)};
+        build_fin(m, 2, bp(0.97f, -0.075f, 0), bp(0.97f, 0.075f, 0), c, 9, 20, 7, z0, 0.004f);
+        V3 pc[] = {bp(0.28f, -0.04f, 0.07f), bp(0.36f, -0.08f, 0.11f), bp(0.44f, -0.08f, 0.09f), bp(0.42f, -0.03f, 0.07f)};
+        build_pair(m, 4, bp(0.26f, -0.02f, 0.055f), bp(0.27f, -0.07f, 0.055f), pc, 4, 6, 4, 0.003f);
+        /* the pelvic feelers: long threads hanging down and back */
+        for (int side = -1; side <= 1; side += 2) {
+            V3 th[6];
+            for (int i = 0; i < 6; i++) {
+                float f = i / 5.0f;
+                th[i] = bp(0.3f + 0.28f * f * f, pbot(b, 0.3f) - 0.62f * f, 0.015f * side + 0.02f * f * side);
+            }
+            build_feeler(m, 5, th, 6, 0.006f, 0.0025f);
+        }
+    } else if (sp == SP_DISCUS) {
+        /* the fringe of fin round the back of the disc */
+        V3 d[8], a[8];
+        for (int i = 0; i < 8; i++) {
+            float s = mixf(0.22f, 1.04f, i / 7.0f);
+            float ext = 0.1f + 0.05f * sinf(PI * i / 7.0f);
+            d[i] = bp(s + 0.03f, ptop(b, fminf(s, 1)) + ext * (1 - 0.6f * smooth(0.8f, 1.05f, s)), 0);
+            a[i] = bp(s + 0.03f, pbot(b, fminf(s, 1)) - ext * (1 - 0.6f * smooth(0.8f, 1.05f, s)), 0);
+        }
+        build_fin(m, 1, bp(0.2f, ptop(b, 0.2f) - 0.01f, 0), bp(0.97f, ptop(b, 0.97f) - 0.008f, 0), d, 8, 22, 4, z0, 0.002f);
+        build_fin(m, 3, bp(0.36f, pbot(b, 0.36f) + 0.01f, 0), bp(0.97f, pbot(b, 0.97f) + 0.008f, 0), a, 8, 20, 4, z0, 0.002f);
+        V3 c[7];
+        for (int i = 0; i < 7; i++) {
+            float an = mixf(-1.1f, 1.1f, i / 6.0f);
+            c[i] = bp(1.0f + 0.2f * cosf(an), 0.17f * sinf(an), 0);
+        }
+        build_fin(m, 2, bp(0.97f, -0.08f, 0), bp(0.97f, 0.08f, 0), c, 7, 14, 5, z0, 0.003f);
+        V3 pc[] = {bp(0.3f, 0.0f, 0.08f), bp(0.38f, -0.03f, 0.115f), bp(0.45f, -0.04f, 0.09f), bp(0.43f, 0.0f, 0.075f)};
+        build_pair(m, 4, bp(0.27f, 0.02f, 0.06f), bp(0.28f, -0.04f, 0.06f), pc, 4, 6, 4, 0.003f);
+        V3 pv[] = {bp(0.35f, -0.44f, 0.02f), bp(0.42f, -0.56f, 0.03f), bp(0.45f, -0.46f, 0.02f)};
+        build_pair(m, 5, bp(0.33f, -0.42f, 0.015f), bp(0.37f, -0.43f, 0.015f), pv, 3, 4, 3, 0.001f);
+    } else {
+        /* Corydoras: a tall spined dorsal, an adipose spine, stout pectorals, barbels */
+        V3 d[] = {bp(0.3f, 0.3f, 0), bp(0.34f, 0.52f, 0), bp(0.42f, 0.46f, 0), bp(0.48f, 0.3f, 0)};
+        build_fin(m, 1, bp(0.3f, ptop(b, 0.3f) - 0.01f, 0), bp(0.48f, ptop(b, 0.48f) - 0.01f, 0), d, 4, 7, 5, z0, 0.002f);
+        V3 ad[] = {bp(0.74f, 0.15f, 0), bp(0.77f, 0.2f, 0), bp(0.83f, 0.16f, 0), bp(0.84f, 0.1f, 0)};
+        build_fin(m, 6, bp(0.74f, ptop(b, 0.74f) - 0.004f, 0), bp(0.84f, ptop(b, 0.84f) - 0.004f, 0), ad, 4, 3, 2, z0, 0);
+        V3 a[] = {bp(0.66f, -0.1f, 0), bp(0.7f, -0.19f, 0), bp(0.8f, -0.15f, 0), bp(0.84f, -0.07f, 0)};
+        build_fin(m, 3, bp(0.66f, pbot(b, 0.66f) + 0.004f, 0), bp(0.84f, pbot(b, 0.84f) + 0.004f, 0), a, 4, 7, 4, z0, 0.001f);
+        V3 c[] = {bp(1.0f, -0.055f, 0), bp(1.18f, -0.15f, 0), bp(1.32f, -0.2f, 0), bp(1.22f, -0.07f, 0), bp(1.15f, 0.0f, 0),
+                  bp(1.22f, 0.08f, 0), bp(1.32f, 0.22f, 0), bp(1.18f, 0.16f, 0), bp(1.0f, 0.065f, 0)};
+        build_fin(m, 2, bp(0.97f, -0.055f, 0), bp(0.97f, 0.065f, 0), c, 9, 16, 6, z0, 0.003f);
+        V3 pc[] = {bp(0.22f, -0.1f, 0.2f), bp(0.32f, -0.12f, 0.26f), bp(0.4f, -0.11f, 0.2f), bp(0.36f, -0.09f, 0.15f)};
+        build_pair(m, 4, bp(0.18f, -0.07f, 0.12f), bp(0.21f, -0.1f, 0.12f), pc, 4, 6, 3, 0.003f);
+        V3 pv[] = {bp(0.5f, -0.13f, 0.08f), bp(0.58f, -0.15f, 0.1f), bp(0.62f, -0.12f, 0.06f)};
+        build_pair(m, 5, bp(0.47f, -0.11f, 0.05f), bp(0.52f, -0.11f, 0.05f), pv, 3, 4, 3, 0.001f);
+        for (int side = -1; side <= 1; side += 2)
+            for (int k = 0; k < 2; k++) {
+                V3 th[4];
+                for (int i = 0; i < 4; i++) {
+                    float f = i / 3.0f;
+                    th[i] = bp(0.02f + 0.02f * k - 0.03f * f, -0.03f - 0.08f * f - 0.02f * k, (0.02f + 0.03f * k + 0.04f * f) * side);
+                }
+                build_feeler(m, 7, th, 4, 0.008f, 0.004f);
+            }
+    }
+}
+
+/* ==================================================================== */
+/* ---- who lives here ---- */
+typedef struct {
+    int sp;
+    float size;                         /* standard length, m */
+    uint32_t seed;
+    float pref_y, pref_z;               /* where in the water it likes to be */
+    float slot[3];                      /* a school's member: its place in the school */
+} Fish;
+#define MAXFISH 96
+static Fish fish[MAXFISH];
+static int nfish, nsp[SP_N], sp_first[SP_N];
+
+/* the simulated state of a fish */
+typedef struct {
+    float p[3], v[3];
+    float f[3];                         /* heading */
+    float roll, bend, phase, amp, pph, pamp, pitch_bias;
+    float yaw_rate;
+} Agent;
+typedef struct {
+    int chapter;                        /* -1: free */
+    double t;                           /* the time of cur */
+    Agent prev[MAXFISH], cur[MAXFISH];
+} Sim;
+#define SIM_DT (1.0 / 30)
+#define CH_T 30.0                       /* chapters: each sim runs from (k - 1) CH_T, shown from k CH_T */
+#define CH_BLEND 5.0
+static Sim sims[3];
+
+/* the shape of the day for the animals: 1 in daylight, 0 deep in the night */
+static float day_act(double wt) { (void)wt; return 1 - lit.night; }
+
+/* where a fish would like to be at time t: closed-form wandering, so every
+ * instance (and every chapter's sim) agrees */
+static V3 school_centre(double t, float night) {
+    float w = tank_w();
+    double ts = t * (1 - 0.6f * night);
+    float x = (X0 + X1) / 2 + w * 0.36f * (0.72f * sinf((float)fmod(ts * 0.021 + 1.3, TAU)) + 0.28f * tnoise(opt_seed + 11, ts / 17.0));
+    float y = YW * (0.52f + 0.12f * sinf((float)fmod(ts * 0.047, TAU)) + 0.06f * tnoise(opt_seed + 12, ts / 9.0));
+    float z = TD * (0.36f + 0.1f * sinf((float)fmod(ts * 0.033 + 2.0, TAU)) + 0.06f * tnoise(opt_seed + 13, ts / 11.0));
+    y = mixf(y, YW * 0.3f, night);
+    return v3(x, y, z);
+}
+
+static V3 fish_target(int i, double t, float night) {
+    Fish *F = &fish[i];
+    uint32_t k = F->seed;
+    float w = tank_w();
+    if (F->sp == SP_TETRA) {
+        V3 c = school_centre(t, night);
+        float spread = 1 + 0.6f * night;
+        V3 o = v3(F->slot[0] * spread, F->slot[1] * spread, F->slot[2] * spread);
+        o.x += 0.025f * tnoise(k, t / 3.1);
+        o.y += 0.012f * tnoise(k + 1, t / 2.7);
+        o.z += 0.02f * tnoise(k + 2, t / 3.7);
+        return vadd(c, o);
+    }
+    if (F->sp == SP_CORY) {
+        /* a loose group working along the front of the sand */
+        double ts = t * (1 - 0.7f * night);
+        float gx = (X0 + X1) / 2 + w * 0.34f * tnoise(opt_seed + 31, ts / 41.0);
+        float gz = TD * (0.17f + 0.08f * tnoise(opt_seed + 32, ts / 23.0));
+        float x = gx + F->slot[0] + 0.03f * tnoise(k, ts / 7.0);
+        float z = clampf(gz + F->slot[2] + 0.02f * tnoise(k + 1, ts / 6.0), 0.035f, TD * 0.5f);
+        float y = ground_at(x, z) + F->size * 0.12f;
+        /* now and then one darts up for a gulp of air */
+        double per = 230 + 140 * hf(k, 5, 5);
+        double ph = fmod(t + per * hf(k, 6, 6), per);
+        if (night < 0.5f && ph < 7) {
+            float f = (float)(ph / 7);
+            float up = sinf(PI * f);
+            y = mixf(y, YW - 0.012f, powf(up, 0.6f));
+        }
+        return v3(x, y, z);
+    }
+    /* angelfish and discus: slow wandering over the midwater */
+    double ts = t * (1 - 0.6f * night);
+    float sc = F->sp == SP_DISCUS ? 0.7f : 1.0f;
+    float x = (X0 + X1) / 2 + w * 0.42f * sc * tnoise(k, ts / 23.0) + w * 0.12f * tnoise(k + 9, ts / 7.0);
+    float y = F->pref_y + YW * 0.12f * tnoise(k + 1, ts / 13.0);
+    float z = F->pref_z + TD * 0.12f * tnoise(k + 2, ts / 17.0);
+    y = mixf(y, YW * 0.35f, night * 0.6f);
+    return v3(x, y, z);
+}
+
+typedef struct { float cruise, vmax, amax, turn, lam; } SpecMotion;
+static const SpecMotion motion[SP_N] = {
+    {0.055f, 0.32f, 1.6f, 6.0f, 0.95f},
+    {0.035f, 0.14f, 0.45f, 1.6f, 1.2f},
+    {0.03f, 0.12f, 0.35f, 1.3f, 1.2f},
+    {0.03f, 0.18f, 0.9f, 3.5f, 0.95f},
+};
+
+static void sim_init(Sim *S, int chapter) {
+    S->chapter = chapter;
+    double t0 = (chapter - 1) * CH_T;
+    S->t = t0;
+    float night = lit.night;
+    for (int i = 0; i < nfish; i++) {
+        Agent *a = &S->cur[i];
+        memset(a, 0, sizeof *a);
+        V3 p = fish_target(i, t0, night), p2 = fish_target(i, t0 + 0.5, night);
+        V3 v = vmul(vsub(p2, p), 2);
+        a->p[0] = p.x; a->p[1] = p.y; a->p[2] = p.z;
+        a->v[0] = v.x; a->v[1] = v.y; a->v[2] = v.z;
+        V3 f = vlen(v) > 1e-4f ? vnorm(v) : v3(hf(fish[i].seed, 3, 3) < 0.5f ? 1 : -1, 0, 0);
+        f.y *= 0.3f;
+        f = vnorm(f);
+        a->f[0] = f.x; a->f[1] = f.y; a->f[2] = f.z;
+        a->phase = hf(fish[i].seed, 4, 4) * TAU;
+        a->pph = hf(fish[i].seed, 5, 4) * TAU;
+        a->amp = 0.05f;
+        S->prev[i] = *a;
+    }
+}
+
+/* push away from the glass, the surface, the ground, stones, wood, plants */
+static V3 avoid(V3 p, float r) {
+    V3 a = v3(0, 0, 0);
+    float m = 0.035f + r;
+    if (p.x < X0 + m) a.x += (X0 + m - p.x) * 30;
+    if (p.x > X1 - m) a.x -= (p.x - X1 + m) * 30;
+    if (p.z < 0.02f + r) a.z += (0.02f + r - p.z) * 40;
+    if (p.z > TD - 0.03f - r) a.z -= (p.z - TD + 0.03f + r) * 40;
+    if (p.y > YW - 0.02f - r) a.y -= (p.y - YW + 0.02f + r) * 40;
+    float g = ground_at(p.x, p.z) + 0.012f + r * 0.5f;
+    if (p.y < g) a.y += (g - p.y) * 60;
+    for (int i = 0; i < nstone; i++) {
+        V3 d = vsub(p, stones[i].c);
+        float rr = fmaxf(stones[i].ax.x, stones[i].ax.z) * 1.2f + r + 0.01f;
+        float l = vlen(d);
+        if (l < rr && l > 1e-5f) a = vmad(a, d, (rr - l) / l * 25);
+    }
+    for (int bi = 0; bi < nbr; bi++) {
+        const Branch *b = &br[bi];
+        for (int k = 0; k < b->n - 1; k += 2) {
+            V3 s0 = b->p[k], s1 = b->p[k + 2 < b->n ? k + 2 : b->n - 1];
+            V3 sd = vsub(s1, s0);
+            float tt = clampf(vdot(vsub(p, s0), sd) / fmaxf(vdot(sd, sd), 1e-8f), 0, 1);
+            V3 d = vsub(p, vmad(s0, sd, tt));
+            float rr = b->r0 + r + 0.015f, l = vlen(d);
+            if (l < rr && l > 1e-5f) a = vmad(a, d, (rr - l) / l * 25);
+        }
+    }
+    for (int i = 0; i < nclump; i++) {
+        const Clump *c = &clumps[i];
+        if (p.y > ground_at(c->x, c->z) + c->h) continue;
+        float dx = p.x - c->x, dz = p.z - c->z, l = sqrtf(dx * dx + dz * dz), rr = c->r + r;
+        if (l < rr && l > 1e-5f) { a.x += dx / l * (rr - l) * 12; a.z += dz / l * (rr - l) * 12; }
+    }
+    return a;
+}
+
+static void sim_step(Sim *S, double wt) {
+    float dt = (float)SIM_DT;
+    double t = S->t + SIM_DT;
+    float night = lit.night;
+    float act = 0.6f + 0.8f * cpu_load(wt);
+    memcpy(S->prev, S->cur, sizeof(Agent) * (size_t)nfish);
+    for (int i = 0; i < nfish; i++) {
+        Fish *F = &fish[i];
+        const SpecMotion *M = &motion[F->sp];
+        Agent *a = &S->cur[i];
+        V3 p = v3(a->p[0], a->p[1], a->p[2]), v = v3(a->v[0], a->v[1], a->v[2]);
+        V3 tg = fish_target(i, t, night), tg2 = fish_target(i, t + 0.25, night);
+        V3 tv = vmul(vsub(tg2, tg), 4);
+        float kp = F->sp == SP_TETRA ? 1.1f : F->sp == SP_CORY ? 1.6f : 0.6f;
+        V3 vd = vadd(tv, vmul(vsub(tg, p), kp));
+        V3 acc = vmul(vsub(vd, v), 1.8f);
+        /* schooling: keep apart, match the neighbours' heading */
+        if (F->sp == SP_TETRA || F->sp == SP_CORY) {
+            V3 sep = v3(0, 0, 0), ali = v3(0, 0, 0);
+            int na = 0;
+            float rs = F->sp == SP_TETRA ? 0.022f : 0.035f;
+            for (int j = sp_first[F->sp]; j < sp_first[F->sp] + nsp[F->sp]; j++) {
+                if (j == i) continue;
+                Agent *b = &S->cur[j];
+                V3 d = vsub(p, v3(b->p[0], b->p[1], b->p[2]));
+                float l2 = vdot(d, d);
+                if (l2 < rs * rs && l2 > 1e-10f) sep = vmad(sep, d, (rs - sqrtf(l2)) / sqrtf(l2) * 40);
+                if (l2 < 0.07f * 0.07f) { ali = vadd(ali, v3(b->v[0], b->v[1], b->v[2])); na++; }
+            }
+            acc = vadd(acc, sep);
+            if (na) acc = vmad(acc, vsub(vmul(ali, 1.0f / na), v), 0.8f);
+        } else {
+            /* the big fish give each other room */
+            for (int j = 0; j < nfish; j++) {
+                if (j == i || fish[j].sp == SP_TETRA || fish[j].sp == SP_CORY) continue;
+                Agent *b = &S->cur[j];
+                V3 d = vsub(p, v3(b->p[0], b->p[1], b->p[2]));
+                float l = vlen(d), rr = (F->size + fish[j].size) * 0.9f;
+                if (l < rr && l > 1e-5f) acc = vmad(acc, d, (rr - l) / l * 6);
+            }
+        }
+        acc = vadd(acc, avoid(p, F->size * (F->sp == SP_ANGEL ? 0.6f : 0.4f)));
+        /* darts: a sudden burst now and then, more when the machine is busy */
+        if (F->sp == SP_TETRA) {
+            double slot = floor(t / 1.7 + hf(F->seed, 7, 7));
+            float r = hf(F->seed, (uint32_t)(int64_t)slot, 8);
+            float ft = (float)(t / 1.7 + hf(F->seed, 7, 7) - slot);
+            if (r < 0.05f * act * (1 - night) && ft < 0.22f) {
+                V3 dir = vnorm(vadd(v3(a->f[0], a->f[1] * 0.3f, a->f[2]), v3(hf(F->seed, (uint32_t)slot, 9) - 0.5f, 0, hf(F->seed, (uint32_t)slot, 10) - 0.5f)));
+                acc = vmad(acc, dir, 9.0f * (1 - ft / 0.22f));
+            }
+        }
+        float al = vlen(acc), amax = M->amax * (1 + 3 * (F->sp == SP_TETRA));
+        if (al > amax) acc = vmul(acc, amax / al);
+        v = vmad(v, acc, dt);
+        float sp = vlen(v), vmax = M->vmax * (1 - 0.5f * night);
+        if (sp > vmax) { v = vmul(v, vmax / sp); sp = vmax; }
+        v = vmul(v, 1 - 0.15f * dt);
+        p = vmad(p, v, dt);
+        /* heading: turn toward the velocity at a limited rate; hovering, keep it */
+        V3 f = v3(a->f[0], a->f[1], a->f[2]);
+        V3 want = sp > 0.008f ? vnorm(v) : f;
+        if (F->sp == SP_CORY && night < 0.5f && sp < 0.05f) {
+            /* grazing: nose down into the sand */
+            want = vnorm(v3(want.x, -0.45f, want.z));
+        }
+        float maxp = F->sp == SP_CORY ? 0.9f : 0.5f;
+        if (want.y > maxp) want = vnorm(v3(want.x, maxp, want.z));
+        if (want.y < -maxp) want = vnorm(v3(want.x, -maxp, want.z));
+        /* yaw: heading angle in the horizontal, turned at a limited rate */
+        float psi = atan2f(f.z, f.x), psw = atan2f(want.z, want.x);
+        float dpsi = fmodf(psw - psi + 3 * PI, TAU) - PI;
+        float maxt = M->turn * dt * (sp > 0.02f ? 1 : 0.5f);
+        float dyaw = clampf(dpsi, -maxt, maxt);
+        psi += dyaw;
+        float py = mixf(f.y, want.y, clampf(dt * 2.5f, 0, 1));
+        float ch = sqrtf(fmaxf(1 - py * py, 0));
+        f = v3(cosf(psi) * ch, py, sinf(psi) * ch);
+        a->yaw_rate = mixf(a->yaw_rate, dyaw / dt, 0.2f);
+        a->f[0] = f.x; a->f[1] = f.y; a->f[2] = f.z;
+        a->p[0] = p.x; a->p[1] = p.y; a->p[2] = p.z;
+        a->v[0] = v.x; a->v[1] = v.y; a->v[2] = v.z;
+        /* the swimming: tail beat from the speed along the heading */
+        float fwd = fmaxf(vdot(v, f), 0);
+        float bl = fwd / F->size;
+        float freq = (F->sp == SP_TETRA ? 2.5f : 1.4f) + (F->sp == SP_TETRA ? 2.2f : 1.6f) * bl;
+        float ta = vlen(acc);
+        if (freq > 14) freq = 14;
+        a->phase += TAU * freq * dt;
+        if (a->phase > 1000) a->phase -= 160 * PI;
+        float amp = 0.035f + 0.05f * clampf(bl / 3, 0, 1) + 0.02f * clampf(ta / 2, 0, 1);
+        a->amp = mixf(a->amp, amp, 0.15f);
+        a->bend = mixf(a->bend, clampf(a->yaw_rate * 0.07f, -0.3f, 0.3f), 0.25f);
+        a->roll = mixf(a->roll, clampf(a->yaw_rate * fwd * 1.5f, -0.35f, 0.35f), 0.1f);
+        /* pectorals scull when hovering, fold when cruising */
+        float hover = 1 - clampf(bl / 1.5f, 0, 1);
+        a->pph += TAU * (1.2f + 2.5f * hover + 0.5f * bl) * dt;
+        if (a->pph > 1000) a->pph -= 160 * PI;
+        a->pamp = mixf(a->pamp, 0.15f + 0.55f * hover, 0.1f);
+    }
+    S->t = t;
+}
+
+static void sim_advance(Sim *S, double t, double wt) {
+    int n = 0;
+    while (S->t + SIM_DT <= t && n < 100000) { sim_step(S, wt); n++; }
+}
+
+static Sim *sim_get(int chapter) {
+    for (int i = 0; i < 3; i++) if (sims[i].chapter == chapter) return &sims[i];
+    /* reuse the oldest */
+    int o = 0;
+    for (int i = 1; i < 3; i++) if (sims[i].chapter < sims[o].chapter) o = i;
+    sim_init(&sims[o], chapter);
+    return &sims[o];
+}
+
+static float ang_mix(float a, float b, float w) {
+    float d = fmodf(b - a, TAU);
+    if (d > PI) d -= TAU;
+    if (d < -PI) d += TAU;
+    return a + d * w;
+}
+
+/* the agents as shown at time t */
+static Agent shown[MAXFISH];
+static void agents_at(double t, double wt) {
+    int k = (int)floor(t / CH_T);
+    if (k < 0) k = 0;
+    double into = t - k * CH_T;
+    Sim *cur = sim_get(k);
+    Sim *old = into < CH_BLEND && k > 0 ? sim_get(k - 1) : NULL;
+    /* warm the next chapter's sim alongside */
+    Sim *next = sim_get(k + 1);
+    sim_advance(cur, t, wt);
+    if (old) sim_advance(old, t, wt);
+    sim_advance(next, t, wt);
+    float w = old ? smooth(0, (float)CH_BLEND, (float)into) : 1;
+    for (int i = 0; i < nfish; i++) {
+        Agent A[2];
+        Sim *src[2] = {cur, old};
+        for (int s = 0; s < (old ? 2 : 1); s++) {
+            Sim *S = src[s];
+            float f = clampf((float)((t - (S->t - SIM_DT)) / SIM_DT), 0, 1);
+            Agent *p = &S->prev[i], *c = &S->cur[i], *o = &A[s];
+            *o = *c;
+            for (int k2 = 0; k2 < 3; k2++) { o->p[k2] = mixf(p->p[k2], c->p[k2], f); o->f[k2] = mixf(p->f[k2], c->f[k2], f); }
+            o->phase = mixf(p->phase, c->phase, f);
+            o->pph = mixf(p->pph, c->pph, f);
+        }
+        Agent *o = &shown[i];
+        *o = A[0];
+        if (old) {
+            for (int k2 = 0; k2 < 3; k2++) { o->p[k2] = mixf(A[1].p[k2], A[0].p[k2], w); o->f[k2] = mixf(A[1].f[k2], A[0].f[k2], w); }
+            o->phase = ang_mix(A[1].phase, A[0].phase, w);
+            o->pph = ang_mix(A[1].pph, A[0].pph, w);
+            o->amp = mixf(A[1].amp, A[0].amp, w);
+            o->bend = mixf(A[1].bend, A[0].bend, w);
+            o->roll = mixf(A[1].roll, A[0].roll, w);
+            o->pamp = mixf(A[1].pamp, A[0].pamp, w);
+        }
+    }
+}
+
+static void roster(void) {
+    float w = tank_w();
+    nfish = 0;
+    int counts[SP_N];
+    counts[SP_TETRA] = (int)clampf(roundf(34 * w / 0.9f), 18, 64);
+    counts[SP_ANGEL] = w > 1.2f ? 4 : 3;
+    counts[SP_DISCUS] = 2;
+    counts[SP_CORY] = (int)clampf(roundf(6 * w / 0.9f), 5, 9);
+    const float size[SP_N] = {0.03f, 0.08f, 0.11f, 0.038f};
+    for (int sp = 0; sp < SP_N; sp++) {
+        sp_first[sp] = nfish;
+        nsp[sp] = counts[sp];
+        for (int i = 0; i < counts[sp] && nfish < MAXFISH; i++) {
+            Fish *F = &fish[nfish++];
+            F->sp = sp;
+            F->seed = hash32(opt_seed * 977u + (uint32_t)nfish * 7919u);
+            F->size = size[sp] * frange(0.88f, 1.1f);
+            F->pref_y = YW * frange(0.4f, 0.7f);
+            F->pref_z = TD * frange(0.3f, 0.55f);
+            if (sp == SP_DISCUS) { F->pref_y = YW * frange(0.35f, 0.55f); F->pref_z = TD * frange(0.35f, 0.5f); }
+            /* a member's place: an ellipsoid stretched along the school */
+            float r = 0.022f * cbrtf((float)counts[sp]);
+            V3 o;
+            do o = v3(frange(-1, 1), frange(-1, 1), frange(-1, 1)); while (vdot(o, o) > 1);
+            if (sp == SP_TETRA) { F->slot[0] = o.x * r * 1.9f; F->slot[1] = o.y * r * 0.7f; F->slot[2] = o.z * r * 1.1f; }
+            else { F->slot[0] = o.x * 0.09f; F->slot[1] = 0; F->slot[2] = o.z * 0.05f; }
+        }
+    }
+    for (int i = 0; i < 3; i++) sims[i].chapter = -1000;
+}
+
+/* ---- the fish shaders ---- */
+static const char *VS_FISH = GLSL(
+    layout(location = 0) in vec3 aP;
+    layout(location = 1) in vec3 aN;
+    layout(location = 2) in vec2 aUV;
+    layout(location = 3) in float aMat;
+    layout(location = 4) in vec3 aAux;
+    layout(location = 5) in vec4 iA;    /* position, length */
+    layout(location = 6) in vec4 iB;    /* heading, roll */
+    layout(location = 7) in vec4 iC;    /* tail phase, amplitude, bend, pectoral phase */
+    layout(location = 8) in vec4 iD;    /* pectoral amplitude, seed, colour fade, - */
+    uniform float uLam;
+    uniform float uEnv0;
+    uniform int uSpec;
+    out vec3 vP; out vec3 vN; out vec3 vG; out vec3 vRest; out vec3 vAux; out vec2 vUV;
+    flat out vec4 vInst;
+    flat out float vPart;
+    vec3 rot(vec3 v, vec3 k, float a) { float c = cos(a), s = sin(a); return v * c + cross(k, v) * s + k * dot(k, v) * (1.0 - c); }
+    float lat_at(float s, float A, float ph, float bend) {
+        float env = uEnv0 + (1.0 - uEnv0) * pow(clamp((s - 0.12) / 0.88, 0.0, 1.0), 1.6);
+        if (s > 1.0) env = 1.0 + (s - 1.0) * 1.3;
+        return A * env * sin(ph - 6.2831853 * s / uLam) + bend * (s - 0.38) * (s - 0.38);
+    }
+    void main() {
+        vec3 p = aP, n = aN;
+        int part = int(aMat + 0.5);
+        float A = iC.y, ph = iC.x, bend = iC.z;
+        if (part == 4) {
+            /* pectorals row about their base: forward and back, feathering */
+            vec3 pv = aAux;
+            float side = pv.z > 0.0 ? 1.0 : -1.0;
+            float ang = iD.x * sin(iC.w + (side > 0.0 ? 0.0 : 0.5)) * 0.9 - 0.35 * (1.0 - iD.x);
+            vec3 ax = normalize(vec3(0.2, 1.0, 0.3 * side));
+            p = pv + rot(p - pv, ax, ang * side);
+            n = rot(n, ax, ang * side);
+        }
+        float s = 0.4 - p.x;
+        float lat = lat_at(s, A, ph, bend);
+        float dl = (lat_at(s + 0.01, A, ph, bend) - lat_at(s - 0.01, A, ph, bend)) / 0.02;
+        if (part == 1 || part == 3 || part == 6) lat += aUV.y * aUV.y * 0.02 * sin(ph * 0.6 - aUV.x * 7.0 + iD.y * 6.0);
+        if (part == 2) lat += aUV.y * 0.012 * sin(ph - 1.5 - aUV.x * 3.0);
+        if (part == 5) lat += aUV.y * aUV.y * 0.03 * sin(ph * 0.5 - 1.0);
+        if (part == 5 && uSpec == 1) lat += aUV.x * aUV.x * 0.08 * sin(ph * 0.3 + iD.y * 3.0);
+        float th = atan(dl);
+        float c = cos(th), sn = sin(th);
+        vec3 q = vec3(p.x + p.z * sn, p.y, lat + p.z * c);
+        vec3 nq = vec3(n.x * c + n.z * sn, n.y, -n.x * sn + n.z * c);
+        vec3 F = normalize(iB.xyz);
+        vec3 R = normalize(cross(F, vec3(0.0, 1.0, 0.0)));
+        vec3 Up = cross(R, F);
+        float r = iB.w;
+        vec3 U2 = Up * cos(r) + R * sin(r), R2 = R * cos(r) - Up * sin(r);
+        vec3 P = iA.xyz + iA.w * (q.x * F + q.y * U2 + q.z * R2);
+        vP = P;
+        vN = normalize(nq.x * F + nq.y * U2 + nq.z * R2);
+        vRest = aP; vAux = aAux; vUV = aUV;
+        vInst = iD; vPart = float(part);
+        gl_Position = place(P, vG);
+    });
+
+static const char *FS_FISH = GLSL(
+    in vec3 vP; in vec3 vN; in vec3 vG; in vec3 vRest; in vec3 vAux; in vec2 vUV;
+    flat in vec4 vInst;
+    flat in float vPart;
+    uniform int uSpec;
+    uniform vec3 uEye;
+    uniform float uFrame;
+    /* structural colour: what a reflecting layer does as the angle changes */
+    vec3 film(float t, vec3 a, vec3 b) { return mix(b, a, smoothstep(0.1, 0.85, t)); }
+    /* overlapping scales: a darker rim at the back edge of each */
+    float scales(float s, float y, float n) {
+        vec2 q = vec2(s * n, y * n * 0.3);
+        q.y += 0.5 * floor(q.x);
+        vec2 f = fract(q) - vec2(0.2, 0.5);
+        return smoothstep(0.3, 0.55, length(f * vec2(1.3, 1.0)));
+    }
+    void main() {
+        int part = int(vPart + 0.5);
+        vec3 N = normalize(vN);
+        if (!gl_FrontFacing) N = -N;
+        vec3 V = normalize(vG - vP);
+        float s = 0.4 - vRest.x, y = vRest.y;
+        float yn = vAux.y;
+        float seed = vInst.y, fade = vInst.z;
+        vec3 alb = vec3(0.5), irid = vec3(0.0);
+        float spec = 0.3, rough = 60.0, alpha = 1.0, silver = 0.0, trans = 0.0;
+        float nv = clamp(dot(N, V), 0.0, 1.0);
+        float rays = 0.0;
+        if (part != 0 && part != 7) {
+            float nr = part == 2 ? 18.0 : part == 4 ? 7.0 : part == 5 ? 4.0 : 12.0;
+            float rd = abs(fract(vUV.x * nr) - 0.5) * 2.0;
+            rays = smoothstep(0.55, 0.95, rd) * (1.0 - 0.5 * vUV.y);
+        }
+        if (uSpec == 0) {
+            /* neon tetra: olive back, the electric line, red behind, silver belly */
+            if (part == 0) {
+                float yc = 0.14 + 0.36 * smoothstep(0.5, 0.86, s);
+                float hw = 0.2 * (1.0 - 0.5 * smoothstep(0.6, 0.86, s)) * smoothstep(0.05, 0.16, s);
+                float blue = smoothstep(hw, hw * 0.5, abs(yn - yc)) * smoothstep(0.08, 0.14, s) * (1.0 - smoothstep(0.82, 0.87, s));
+                float red = smoothstep(0.36, 0.5, s) * (1.0 - smoothstep(0.96, 1.0, s)) * smoothstep(yc - hw * 0.4, yc - hw * 1.1, yn) * smoothstep(-0.98, -0.8, yn);
+                vec3 back = mix(vec3(0.3, 0.27, 0.15), vec3(0.11, 0.1, 0.06), smoothstep(0.6, 0.95, yn));
+                vec3 belly = vec3(0.5, 0.52, 0.54);
+                alb = mix(belly, back, smoothstep(yc - 0.05, yc + 0.25, yn));
+                silver = (1.0 - smoothstep(yc - 0.3, yc, yn)) * 0.55;
+                alb = mix(alb, vec3(0.6, 0.02, 0.03) * (1.0 - 0.65 * fade), red);
+                silver *= 1.0 - red;
+                irid = film(nv, vec3(0.02, 0.22, 1.0), vec3(0.04, 0.62, 0.95)) * blue * 1.6 * (1.0 - 0.8 * fade);
+                alb = mix(alb, vec3(0.02, 0.04, 0.09), blue);
+                alb *= 0.88 + 0.12 * scales(s, yn, 34.0);
+                float gill = 1.0 - smoothstep(0.0, 0.01, abs(s - 0.19 - 0.04 * yn * yn));
+                alb *= 1.0 - 0.3 * gill * step(yn, 0.4);
+                /* the mouth */
+                alb *= 1.0 - 0.6 * (1.0 - smoothstep(0.0, 0.06, abs(yn + 0.05))) * (1.0 - smoothstep(0.02, 0.045, s));
+                trans = 0.35 * smoothstep(0.84, 1.0, s);
+            } else {
+                alpha = 0.1 + 0.28 * rays;
+                alb = vec3(0.8, 0.82, 0.85);
+                if (part == 3) { alpha += 0.45 * (1.0 - smoothstep(0.0, 0.1, vUV.x)) * smoothstep(0.2, 0.8, vUV.y); alb = vec3(0.9); }
+                if (part == 6) alpha = 0.45;
+                if (part == 2) { alb = mix(alb, vec3(0.75, 0.15, 0.1), 0.5 * (1.0 - smoothstep(0.0, 0.35, vUV.y))); alpha += 0.15 * (1.0 - vUV.y); }
+                trans = 0.6;
+            }
+        } else if (uSpec == 1) {
+            /* angelfish: silver, four black bars running on into the fins */
+            float b1 = smoothstep(0.034, 0.022, abs(s - 0.115 - 0.04 * y));
+            float b2 = smoothstep(0.055, 0.038, abs(s - 0.35 - 0.05 * y));
+            float b3 = smoothstep(0.05, 0.034, abs(s - 0.63 - 0.08 * y));
+            float b4 = smoothstep(0.032, 0.02, abs(s - 0.91));
+            float bar = max(max(b1, b2), max(b3, b4));
+            if (part == 0) {
+                alb = vec3(0.6, 0.6, 0.58);
+                alb = mix(alb, vec3(0.52, 0.45, 0.28), smoothstep(0.4, 0.9, yn) * (1.0 - smoothstep(0.25, 0.5, s)));
+                alb = mix(alb, vec3(0.025), bar * 0.95);
+                silver = 0.6 * (1.0 - bar);
+                alb *= 0.92 + 0.08 * scales(s, yn, 46.0);
+                spec = 0.45;
+            } else if (part == 5) {
+                alb = mix(vec3(0.55, 0.55, 0.5), vec3(0.85, 0.85, 0.8), vUV.x);
+                alpha = 0.95;
+            } else {
+                float sy = abs(y);
+                /* the long sails: grey, banded, darker at the trailing edge */
+                alb = mix(vec3(0.2, 0.21, 0.2), vec3(0.02), bar * 0.92);
+                alb = mix(alb, vec3(0.04), 0.6 * smoothstep(0.5, 0.8, vUV.y) * (1.0 - smoothstep(0.86, 0.97, vUV.y)));
+                alb = mix(alb, vec3(0.03), 0.7 * (1.0 - smoothstep(0.0, 0.06, vUV.x)));
+                alpha = 0.7 + 0.2 * rays + 0.3 * bar - 0.3 * smoothstep(0.85, 1.0, vUV.y);
+                if (part == 4) { alpha = 0.12 + 0.2 * rays; alb = vec3(0.8); }
+                if (part == 2) { alpha = 0.3 + 0.3 * rays; alb = mix(vec3(0.5), vec3(0.12), 0.5 * rays); }
+                trans = 0.4;
+                (void(sy));
+            }
+        } else if (uSpec == 2) {
+            /* discus: fine turquoise vermiculation over red-brown */
+            float w1 = sin(yn * 34.0 + 2.6 * sin(s * 15.0 + seed * 7.0) + 1.4 * sin(s * 33.0 - yn * 9.0 + seed));
+            float line = smoothstep(0.55, 0.92, w1) * 0.85;
+            float head = 1.0 - smoothstep(0.15, 0.35, s);
+            line = max(line, head * smoothstep(0.0, 0.6, w1) * 0.8);
+            float bars = smoothstep(0.6, 1.0, 0.5 + 0.5 * cos((s - 0.05) * 6.2831 * 4.5));
+            if (part == 0) {
+                alb = vec3(0.5, 0.17, 0.06) * (1.0 - 0.3 * bars * smoothstep(0.1, 0.3, s));
+                irid = film(nv, vec3(0.03, 0.3, 0.38), vec3(0.1, 0.5, 0.35)) * line * 0.6;
+                alb = mix(alb, vec3(0.1, 0.2, 0.2), line * 0.65);
+                alb *= 0.94 + 0.06 * scales(s, yn, 60.0);
+                spec = 0.45;
+            } else {
+                float fy = vUV.y;
+                alb = mix(vec3(0.45, 0.16, 0.06), vec3(0.08, 0.25, 0.28), line * 0.6);
+                irid = vec3(0.04, 0.4, 0.5) * line * 0.5 * (1.0 - fy);
+                alb = mix(alb, vec3(0.03), smoothstep(0.62, 0.72, fy) * (1.0 - smoothstep(0.78, 0.86, fy)));
+                alb = mix(alb, vec3(0.75, 0.15, 0.05), smoothstep(0.82, 0.9, fy));
+                alpha = 0.9 - 0.3 * fy;
+                if (part == 2 || part == 4) { alpha = 0.25 + 0.25 * rays; alb = vec3(0.55, 0.3, 0.15); irid = vec3(0.0); }
+                if (part == 5) { alpha = 0.8; alb = vec3(0.6, 0.1, 0.05); }
+                trans = 0.5;
+            }
+        } else {
+            /* panda Corydoras: pale, a black mask, a black sail and a tail spot */
+            if (part == 0) {
+                alb = vec3(0.84, 0.68, 0.56);
+                alb = mix(alb, vec3(0.9, 0.78, 0.7), smoothstep(-0.2, -0.7, yn));
+                float mask = smoothstep(0.085, 0.06, abs(s - 0.165 + 0.15 * y)) * smoothstep(-0.07, -0.03, y);
+                float spot = smoothstep(1.0, 0.75, length(vec2((s - 0.915) / 0.075, (yn - 0.05) / 0.85)));
+                float dors = smoothstep(0.11, 0.06, abs(s - 0.39)) * smoothstep(0.75, 0.95, yn) * 0.8;
+                alb = mix(alb, vec3(0.02, 0.02, 0.025), max(max(mask, spot), dors));
+                /* the bony plates: two rows meeting along the flank */
+                float seam = 1.0 - smoothstep(0.0, 0.05, abs(yn - 0.05));
+                float plate = 1.0 - smoothstep(0.0, 0.07, abs(fract(s * 21.0 + yn * 0.8) - 0.5) * 2.0 - 0.88);
+                alb *= 1.0 - 0.18 * max(seam, plate * smoothstep(0.25, 0.4, s) * (1.0 - smoothstep(0.85, 0.95, s)) * smoothstep(-0.8, -0.4, yn));
+                silver = 0.08;
+                irid = film(nv, vec3(0.2, 0.16, 0.2), vec3(0.08, 0.25, 0.18)) * 0.2;
+                spec = 0.4;
+            } else if (part == 7) {
+                alb = vec3(0.8, 0.72, 0.66);
+            } else {
+                alb = vec3(0.85, 0.82, 0.78);
+                alpha = 0.18 + 0.35 * rays;
+                if (part == 1) { alb = vec3(0.02); alpha = 0.95 - 0.35 * vUV.y; }
+                if (part == 4) alpha = 0.3 + 0.35 * rays + 0.5 * (1.0 - smoothstep(0.0, 0.15, vUV.x));
+                if (part == 2) alb = mix(alb, vec3(0.1), 0.4 * rays);
+                if (part == 6) { alpha = 0.6; alb = vec3(0.3); }
+                trans = 0.5;
+            }
+        }
+        /* the eye: a dark lens in a ring, with the lamp in it */
+        vec3 glint = vec3(0.0);
+        if (part == 0) {
+            vec2 de = vec2(s - uEye.x, y - uEye.y) / uEye.z;
+            float d = length(de);
+            if (d < 1.05 && abs(vRest.z) > 0.004) {
+                vec3 iris = uSpec == 0 ? mix(vec3(0.32, 0.33, 0.33), vec3(0.12, 0.3, 0.6), smoothstep(-0.2, 0.7, de.y)) :
+                            uSpec == 1 ? mix(vec3(0.6, 0.55, 0.42), vec3(0.65, 0.12, 0.06), smoothstep(-0.2, 0.5, de.y)) :
+                            uSpec == 2 ? vec3(0.65, 0.09, 0.04) : vec3(0.4, 0.33, 0.18);
+                float pupil = smoothstep(0.64, 0.56, d);
+                vec3 e = mix(iris, vec3(0.004), pupil);
+                e = mix(e, vec3(0.03), smoothstep(0.86, 1.0, d));
+                float k = 1.0 - smoothstep(0.98, 1.05, d);
+                alb = mix(alb, e, k);
+                irid *= 1.0 - k; silver *= 1.0 - k;
+                /* the cornea: a round lens, so the highlight sits off centre */
+                vec3 bn = normalize(N + 0.6 * normalize(vec3(0.0, 1.0, 0.0) + V * 0.3));
+                float sp = pow(max(dot(reflect(-V, N), -uL), 0.0), 30.0);
+                glint = vec3(1.0) * k * (0.25 + 1.5 * sp) * smoothstep(0.3, 0.1, length(de - vec2(-0.18, 0.28)));
+                spec = mix(spec, 1.2, k); rough = mix(rough, 200.0, k);
+                (void(bn));
+            }
+        }
+        if (uPass == 1) { if (alpha < 0.5) discard; return; }
+        if (uFrame < -0.5 && part != 0) { alb = vec3(vUV, 0.0); alpha = 1.0; irid = vec3(0.0); silver = 0.0; }
+        /* light: the lamp from above, a little wrapped (they are thin and
+         * translucent), the water's glow mirrored in the silver and the
+         * scales, and structural colour */
+        float ndl = max(dot(N, -uL), 0.0);
+        float wrap = max(dot(N, -uL) * 0.5 + 0.5, 0.0);
+        float bk = max(dot(N, uL), 0.0) * trans;
+        vec3 H = normalize(V - uL);
+        float sp = pow(max(dot(N, H), 0.0), rough) * spec * (rough + 8.0) / 8.0 * ndl;
+        vec3 R = reflect(-V, N);
+        float env = mix(0.3, 1.7, smoothstep(-0.7, 0.9, R.y));
+        float fres = pow(1.0 - nv, 4.0);
+        vec3 sunp = alb * (ndl * 0.8 + wrap * 0.2 + bk) + irid * (0.35 + 0.65 * wrap)
+                  + silver * vec3(0.85, 0.92, 1.0) * 0.55 * pow(max(dot(R, -uL), 0.0), 6.0);
+        vec3 amb = alb * amb_s(vP, N) + silver * env * 0.2 + irid * 0.9 + fres * env * 0.05;
+        sunp += glint;
+        g_alpha = alpha;
+        emit(vP, vG, sunp, sp, amb, 0.0, false);
+    });
+
+/* ---- the fish on the GPU ---- */
+static GLuint p_fish;
+static GLuint vao_sp[SP_N], vbo_sp[SP_N], ibo_sp[SP_N], ivbo_sp[SP_N];
+static int ni_sp[SP_N], nb_sp[SP_N];
+static float fish_inst[MAXFISH * 16];
+static int frame_no;
+
+static void fish_gl(void) {
+    p_fish = mk_prog(VS_FISH, NULL, FS_FISH, NULL);
+    Mesh m = {0};
+    for (int sp = 0; sp < SP_N; sp++) {
+        int nb;
+        build_species(&m, sp, &nb);
+        ni_sp[sp] = m.ni;
+        nb_sp[sp] = nb;
+        glGenVertexArrays(1, &vao_sp[sp]);
+        glBindVertexArray(vao_sp[sp]);
+        glGenBuffers(1, &vbo_sp[sp]);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_sp[sp]);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(sizeof(float) * SV * m.nv), m.v, GL_STATIC_DRAW);
+        solid_attribs();
+        glGenBuffers(1, &ibo_sp[sp]);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_sp[sp]);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(sizeof(uint32_t) * m.ni), m.ix, GL_STATIC_DRAW);
+        glGenBuffers(1, &ivbo_sp[sp]);
+        glBindBuffer(GL_ARRAY_BUFFER, ivbo_sp[sp]);
+        glBufferData(GL_ARRAY_BUFFER, sizeof fish_inst, NULL, GL_DYNAMIC_DRAW);
+        for (int a = 0; a < 4; a++) {
+            glVertexAttribPointer((GLuint)(5 + a), 4, GL_FLOAT, GL_FALSE, 64, (void *)(intptr_t)(a * 16));
+            glEnableVertexAttribArray((GLuint)(5 + a));
+            glVertexAttribDivisor((GLuint)(5 + a), 1);
+        }
+    }
+    free(m.v); free(m.ix);
+}
+
+static int cmp_far(const void *a, const void *b) {
+    float za = shown[*(const int *)a].p[2], zb = shown[*(const int *)b].p[2];
+    return za < zb ? 1 : za > zb ? -1 : 0;
+}
+
+static void fish_upload(void) {
+    for (int sp = 0; sp < SP_N; sp++) {
+        float *o = fish_inst;
+        /* far to near, for the fins' blending */
+        int order[MAXFISH];
+        for (int k = 0; k < nsp[sp]; k++) order[k] = sp_first[sp] + k;
+        qsort(order, (size_t)nsp[sp], sizeof(int), cmp_far);
+        for (int k = 0; k < nsp[sp]; k++) {
+            int i = order[k];
+            Agent *a = &shown[i];
+            Fish *F = &fish[i];
+            V3 f = vnorm(v3(a->f[0], a->f[1], a->f[2]));
+            float fade = sp == SP_TETRA ? lit.night : 0;
+            float amp = a->amp * (0.8f + 0.5f * cpu_load(wall()));
+            float v[16] = {a->p[0], a->p[1], a->p[2], F->size, f.x, f.y, f.z, a->roll,
+                           a->phase, amp, a->bend, a->pph, a->pamp, (F->seed % 1000) * 0.001f, fade, 0};
+            memcpy(o, v, sizeof v);
+            o += 16;
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, ivbo_sp[sp]);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(sizeof(float) * 16 * nsp[sp]), fish_inst);
+    }
+}
+
+/* what: 0 bodies, 1 fins, 2 both */
+static void fish_draw(int what) {
+    set_common(p_fish);
+    glUniform1f(U(p_fish, "uFrame"), getenv("AQ_FINDBG") ? -1.0f : (float)(frame_no % 64));
+    for (int sp = 0; sp < SP_N; sp++) {
+        if (!nsp[sp]) continue;
+        const BodySpec *b = &body_of[sp];
+        glUniform1i(U(p_fish, "uSpec"), sp);
+        glUniform1f(U(p_fish, "uLam"), motion[sp].lam);
+        glUniform1f(U(p_fish, "uEnv0"), sp == SP_TETRA ? 0.12f : sp == SP_CORY ? 0.15f : 0.08f);
+        glUniform3f(U(p_fish, "uEye"), b->eye_s, b->eye_y, b->eye_r);
+        glBindVertexArray(vao_sp[sp]);
+        int i0 = what == 1 ? nb_sp[sp] : 0, i1 = what == 0 ? nb_sp[sp] : ni_sp[sp];
+        glDrawElementsInstanced(GL_TRIANGLES, i1 - i0, GL_UNSIGNED_INT, (void *)(intptr_t)(i0 * 4), nsp[sp]);
+    }
+}
+
+/* ==================================================================== */
+/* ---- the creatures, together ---- */
+static void creatures_init(void) {
+    roster();
+}
+static void creatures_gl(void) {
+    fish_gl();
+}
+static void creatures_update(double t, double wt) {
+    agents_at(t, wt);
+    fish_upload();
+    frame_no++;
+}
+static void creatures_draw(int pass) {
+    fish_draw(pass == 1 ? 2 : 0);
+}
+/* fins and the other see-through parts, blended over the scene far to near */
+static void creatures_draw_translucent(void) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    glDepthMask(GL_FALSE);
+    fish_draw(1);
+    glDepthMask(GL_TRUE);
+    glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDisable(GL_BLEND);
+}
+
+/* --focus: the best-placed animal of a kind for a close-up */
+static int creature_focus(const char *kind, V3 *at, float *size) {
+    int sp = !strcmp(kind, "tetra") ? SP_TETRA : !strcmp(kind, "angel") ? SP_ANGEL : !strcmp(kind, "discus") ? SP_DISCUS :
+             !strcmp(kind, "cory") ? SP_CORY : -1;
+    if (sp < 0 || !nsp[sp]) return 0;
+    int best = -1;
+    float bs = -1e9f;
+    for (int i = sp_first[sp]; i < sp_first[sp] + nsp[sp]; i++) {
+        Agent *a = &shown[i];
+        float sc = fabsf(a->f[0]) * 2 - a->p[2] * 4 - fabsf(a->f[1]) * 2;
+        if (sc > bs) { bs = sc; best = i; }
+    }
+    Agent *a = &shown[best];
+    if (getenv("AQ_SPEC")) {
+        /* a specimen pose for looking at the model: near the glass, side on, turned by AQ_SPEC degrees */
+        float yaw = (float)atof(getenv("AQ_SPEC")) * PI / 180;
+        a->p[0] = (X0 + X1) / 2; a->p[1] = sp == SP_CORY ? ground_at(a->p[0], 0.035f) + 0.03f : YW * 0.5f; a->p[2] = 0.035f;
+        a->f[0] = cosf(yaw); a->f[1] = sp == SP_CORY ? -0.25f : 0; a->f[2] = sinf(yaw);
+        a->roll = 0; a->bend = 0;
+        fish_upload();
+    }
+    *at = v3(a->p[0], a->p[1], a->p[2]);
+    *size = fish[best].size * (sp == SP_ANGEL ? 1.6f : 1.15f);
+    return 1;
+}
+
 static const char *CREATURE_FS = GLSL(
     void creature(int mat, inout vec3 alb, inout vec3 n, inout float spec, inout float rough, inout vec3 tr, inout float alpha) { alb = vec3(1.0, 0.0, 1.0); });
 
