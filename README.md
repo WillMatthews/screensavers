@@ -58,12 +58,15 @@ one and carries any clock or caption.
 | | |
 |---|---|
 | ![stir](docs/img/stir.jpg) | **stir**: away messages ("Will is away from this computer…") and live details on a grid of letters, twisted like Midjourney's home page, on an old monitor with phosphor trails and a clock that fades in. Palettes: brass, paper, phosphor, amber, ice. `--text FILE` uses your own messages. |
-| ![splitflap](docs/img/splitflap.jpg) | **splitflap**: a railway departures board that clatters at each minute. Portrait screens get a tall platform board; a wall gets departures, arrivals and platform boards. Palettes: brass, classic, blue, led. |
 | ![gauges](docs/img/gauges.jpg) | **gauges**: the machine's vital signs on a brass instrument panel: CPU temperature and load, a clock, memory, battery, and odometers for uptime and time away. |
 | ![contours](docs/img/contours.jpg) | **contours**: a drifting topographic map of terrain carved by its own drainage, with streams, villages, roads and invented place names. The sun moves and hills cast shadows. Palettes: brass, cream, slate, blueprint, survey. |
 | ![clockwork](docs/img/clockwork.jpg) | **clockwork**: an opened-up clock movement ticking at the real time; on a wall the side screens show the escapement and the gear train. |
 | ![nightsky](docs/img/nightsky.jpg) | **nightsky**: the real sky for your place and time over a mountain lake: stars, Milky Way, Moon phase, planets, meteors, twilight. `--lines` draws constellations. |
 | ![flightsim](docs/img/flightsim.jpg) | **flightsim**: flying low over procedural mountains, forests and lakes with a head-up display; spans a wall as one camera. |
+| ![orrery](docs/img/orrery.jpg) | **orrery**: a brass and enamel orrery in a dim study, planets where they really are tonight, its gear train turning in true ratios; now and then it winds forward months and back. |
+| ![soapfilm](docs/img/soapfilm.jpg) | **soapfilm**: physically computed thin-film colour: a draining film in a wire frame that turns black and bursts, drifting bubbles that merge and pop, and a coarsening foam. |
+| ![aquarium](docs/img/aquarium.jpg) | **aquarium**: a planted freshwater tank through the front glass: schooling neon tetras, angelfish, discus and corys with lofted bodies and rayed fins, a fire eel that burrows into the sand, cherry and Amano shrimp picking at the stones. Caustics, light shafts and real time-of-day lighting; a thermometer on the glass reads the CPU temperature. |
+| ![atc](docs/img/atc.jpg) | **atc**: an air-traffic radar scope, a paper flight-strip board and an approach view. Real ADS-B from a local receiver or, if a location is set, adsb.lol; otherwise simulated traffic. Airships (the Goodyear blimps) get special attention. |
 
 Also in the rotation on hosts that build them: **pipes** and **maze**, the
 xscreensaver classics, vendored as binaries and run through a private
@@ -77,14 +80,15 @@ in `savers.sh`.
 
 | | |
 |---|---|
-| ![orrery](docs/img/orrery.jpg) | **orrery**: a brass and enamel orrery in a dim study, planets where they really are tonight, its gear train turning in true ratios; now and then it winds forward months and back. |
-| ![soapfilm](docs/img/soapfilm.jpg) | **soapfilm**: physically computed thin-film colour: a draining film in a wire frame that turns black and bursts, drifting bubbles that merge and pop, and a coarsening foam. |
+| ![splitflap](docs/img/splitflap.jpg) | **splitflap**: a railway departures board that clatters at each minute. Portrait screens get a tall platform board; a wall gets departures, arrivals and platform boards. Palettes: brass, classic, blue, led. |
 | ![lavalamp](docs/img/lavalamp.jpg) | **lavalamp**: a lava lamp warming up from cold, its wax swelling, necking, pinching off, rising and sinking back; on a wall, one lamp per screen along a shared shelf. |
 | ![ink](docs/img/ink.jpg) | **ink**: drops of ink falling into a tank of water and rolling into vortex rings and curling wisps, on a GPU fluid sim. Palettes: indigo, sumi, botanical, neon, sunset. |
 | ![marbling](docs/img/marbling.jpg) | **marbling**: paper marbling made live: inks dropped, combed and raked into stone, chevron, nonpareil and bouquet patterns, then the sheet is lifted. |
-| ![atc](docs/img/atc.jpg) | **atc**: an air-traffic radar scope, a paper flight-strip board and an approach view. Real ADS-B from a local receiver or, if a location is set, adsb.lol; otherwise simulated traffic. Airships (the Goodyear blimps) get special attention. |
 | ![pendulums](docs/img/pendulums.jpg) | **pendulums**: chaos made visible. A thousand double pendulums started a hair apart swing as one line, fray into a rainbow ribbon and bloom into chaos; also the flip-time chaos map and a Poincaré section building up. Live Lyapunov and energy-error readouts. |
 | ![billiards](docs/img/billiards.jpg) | **billiards**: mathematical billiards. Ideal balls in circles, ellipses, stadia, cardioids and mushrooms trace glowing orbits next to their phase portraits: integrable, mixed and chaotic tables side by side. |
+| ![algorithms](docs/img/algorithms.jpg) | **algorithms**: sorting and maze algorithms at work: 22 sorts shown as bars, dots, a colour wheel, a picture sorting itself back together and sorting networks; 11 maze generators and 6 solvers. On a wall, sorts race each other screen by screen, or one maze spans them all. |
+| ![voronoi](docs/img/voronoi.jpg) | **voronoi**: Lloyd's relaxation: hundreds of Voronoi cells settle into a honeycomb, are stirred by ripples, swirls and wind, divide and fuse, and now and then bud into the time or the hostname. Stained glass, giraffe, crackle, blueprint, paper and honey. |
+| ![netflow](docs/img/netflow.jpg) | **netflow**: the machine's own networking as a live stack diagram: packets flowing through interfaces, IP and TCP/UDP/ICMP to the sockets, per-interface scopes and connection-state dials. Aggregate counters from /proc only: no addresses, ports or captures. |
 
 ## Building
 
