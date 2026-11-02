@@ -15,9 +15,9 @@ enum {
     PM_RAIL, PM_SLEEPER, PM_BALLAST, PM_STONE, PM_COPING, PM_LAMP, PM_SIG_R, PM_SIG_G,
     PM_WHITE, PM_SIGN, PM_POLE, PM_IRON, PM_FIRE, PM_CARPAINT, PM_HEAD, PM_TAIL,
     PM_BRICK, PM_SLATE, PM_BWIN, PM_PLATE, PM_WHEEL_B, PM_WHEEL_T, PM_WHEEL_X, PM_SMOKEBOX,
-    PM_HEADBOARD, PM_GRIME, PM_SIGN2, PM_FLAME, PM_NAME, NPM
+    PM_HEADBOARD, PM_GRIME, PM_SIGN2, PM_FLAME, PM_DIAL, PM_FIREBED, PM_WATER, PM_CLOCK, PM_NAME, NPM
 };
-static float pal[48][4], pal2[48][4];
+static float pal[64][4], pal2[64][4];
 static void pal_set(int i, float r, float g, float b, float rough, float metal, float emis, float kind, float w) {
     pal[i][0] = r; pal[i][1] = g; pal[i][2] = b; pal[i][3] = rough;
     pal2[i][0] = metal; pal2[i][1] = emis; pal2[i][2] = kind; pal2[i][3] = w;
@@ -68,6 +68,10 @@ static void palette_init(void) {
     pal_set(PM_HEADBOARD, 0.015f, 0.03f, 0.07f, 0.4f, 0, 0, 3, 2);
     pal_set(PM_GRIME, 0.03f, 0.028f, 0.025f, 0.8f, 0, 0, 0, 0);
     pal_set(PM_FLAME, 1.0f, 0.55f, 0.2f, 0.5f, 0, 8.0f, 4, 0);
+    pal_set(PM_DIAL, 0.75f, 0.72f, 0.64f, 0.3f, 0, 0.0f, 8, 0);
+    pal_set(PM_FIREBED, 1.0f, 0.5f, 0.15f, 0.8f, 0, 3.0f, 9, 0);
+    pal_set(PM_CLOCK, 0.8f, 0.78f, 0.7f, 0.3f, 0, 0.0f, 8, 1);
+    pal_set(PM_WATER, 0.02f, 0.03f, 0.035f, 0.05f, 0, 0, 0, 0);
 }
 
 static void mat(int m) { mb->mat = (float)m; }
@@ -126,6 +130,7 @@ static void handrail(V3 a, V3 b, int posts) {
 static Mesh m_loco, m_tender, m_coach, m_rod, m_link, m_xhead, m_pin;
 static GMesh g_loco, g_tender, g_coach, g_rod, g_link, g_xhead, g_pin;
 static GMesh g_loco_w, g_tender_w, g_coach_w;      /* their wheels' spoked centres, drawn blended */
+static GMesh g_door, g_needle, g_water, g_shovel;  /* the footplate's moving parts */
 static int is_wheel(int m) { return pal2[m][2] > 0.5f && pal2[m][2] < 1.5f; }
 
 #define BOILER_Y 2.95f
@@ -425,32 +430,124 @@ static void build_loco(void) {
         mat(PM_BLACK);
         boxc(0, cyr + 0.43f, -4.3f, 0.35f, 0.04f, 0.4f);
     }
-    /* inside the cab: the backhead (glowing round the firehole), gauges, the regulator */
-    mat(PM_GRIME);
-    mb_quad(v3(-0.9f, cy0 - 0.25f, cz0 - 0.02f), v3(0.9f, cy0 - 0.25f, cz0 - 0.02f), v3(0.9f, BOILER_Y + 0.5f, cz0 - 0.02f), v3(-0.9f, BOILER_Y + 0.5f, cz0 - 0.02f));
-    mat(PM_FIRE);
-    boxc(0, 2.45f, cz0 - 0.03f, 0.22f, 0.16f, 0.005f);
-    mat(PM_BRASS);
-    for (int s = -1; s <= 1; s += 2) {
-        M4 sv2 = mb->xf;
-        push(m4trans(s * 0.35f, 3.35f, cz0 - 0.05f));
-        mb_torus(0.12f, 0.02f, 20, 6);
-        mb->xf = sv2;
+    /* inside the cab: the backhead. The firehole with its sliding doors (drawn
+     * each frame, as are the needles, the water in the glasses, the regulator
+     * and the shovel), the fire behind, gauges, gauge glasses, pipes, valves */
+    {
+        float zb = cz0 - 0.02f;
+        mat(PM_BLACK);
+        /* round-topped plate, as a fan from the firehole */
+        int nseg = 28;
+        V3 cfan = v3(0, 2.45f, zb);
+        for (int i = 0; i < nseg; i++) {
+            float a0 = -(float)M_PI / 2 + 2 * (float)M_PI * i / nseg, a1 = -(float)M_PI / 2 + 2 * (float)M_PI * (i + 1) / nseg;
+            V3 P[2], Q[2];
+            float as[2] = {a0, a1};
+            /* the hole: where the ray leaves the firehole's rectangle */
+            for (int k = 0; k < 2; k++) {
+                float ca = cosf(as[k]), sa = sinf(as[k]);
+                float tq = fminf(ca != 0 ? 0.23f / fabsf(ca) : 10, sa != 0 ? 0.17f / fabsf(sa) : 10);
+                Q[k] = v3(ca * tq, 2.45f + sa * tq, zb);
+            }
+            for (int k = 0; k < 2; k++) {
+                float ca = cosf(as[k]), sa = sinf(as[k]);
+                /* the outline: the round top above the boiler's centre, straight sides, the floor */
+                float x = 0, y = 0;
+                float tmax = 10;
+                /* ray from cfan in direction (ca, sa): hit the outline */
+                float tx = ca != 0 ? 0.9f / fabsf(ca) : tmax;
+                float ty_floor = sa < 0 ? (2.45f - 1.87f) / -sa : tmax;
+                float t = fminf(tx, ty_floor);
+                x = ca * t; y = 2.45f + sa * t;
+                if (y > BOILER_Y) {
+                    /* beyond the shoulder: intersect the circle r 0.9 about the boiler centre */
+                    float oy = 2.45f - BOILER_Y;
+                    float b = ca * 0 + sa * oy, c = oy * oy - 0.81f;
+                    float tc = -b + sqrtf(fmaxf(b * b - c, 0));
+                    x = ca * tc; y = 2.45f + sa * tc;
+                }
+                P[k] = v3(x, y, zb);
+            }
+            mb_quad(Q[0], Q[1], P[1], P[0]);
+        }
+        (void)cfan;
+        /* the firebox's inside, round the hole: walls glowing in the heat */
+        mat(PM_BRICK);
+        mb_quad(v3(-0.23f, 2.28f, zb), v3(-0.23f, 2.62f, zb), v3(-0.34f, 2.75f, zb + 0.55f), v3(-0.34f, 2.2f, zb + 0.55f));
+        mb_quad(v3(0.23f, 2.62f, zb), v3(0.23f, 2.28f, zb), v3(0.34f, 2.2f, zb + 0.55f), v3(0.34f, 2.75f, zb + 0.55f));
+        /* the firehole ring */
+        mat(PM_IRON);
+        boxc(0, 2.45f + 0.21f, zb - 0.04f, 0.3f, 0.045f, 0.04f);
+        boxc(0, 2.45f - 0.21f, zb - 0.04f, 0.3f, 0.045f, 0.04f);
+        boxc(-0.275f, 2.45f, zb - 0.04f, 0.045f, 0.2f, 0.04f);
+        boxc(0.275f, 2.45f, zb - 0.04f, 0.045f, 0.2f, 0.04f);
+        /* the door runners above and below */
+        mat(PM_STEEL);
+        boxc(0, 2.45f + 0.27f, zb - 0.1f, 0.55f, 0.012f, 0.012f);
+        boxc(0, 2.45f - 0.27f, zb - 0.1f, 0.55f, 0.012f, 0.012f);
+        /* the fire, seen through the hole: a bed of burning coal under the brick arch */
+        mat(PM_FIREBED);
+        mb_quad(v3(0.32f, 2.2f, zb + 0.5f), v3(-0.32f, 2.2f, zb + 0.5f), v3(-0.32f, 2.72f, zb + 0.55f), v3(0.32f, 2.72f, zb + 0.55f));
+        mb_quad(v3(0.32f, 2.2f, zb + 0.02f), v3(-0.32f, 2.2f, zb + 0.02f), v3(-0.32f, 2.2f, zb + 0.5f), v3(0.32f, 2.2f, zb + 0.5f));
+        mat(PM_BRICK);
+        mb_quad(v3(-0.32f, 2.7f, zb + 0.02f), v3(0.32f, 2.7f, zb + 0.02f), v3(0.32f, 2.72f, zb + 0.5f), v3(-0.32f, 2.72f, zb + 0.5f));
+        /* gauges: boiler pressure in the middle, steam chest beside it */
+        float gx[2] = {0.0f, -0.4f}, gy[2] = {3.32f, 3.22f}, gr[2] = {0.13f, 0.09f};
+        for (int g = 0; g < 2; g++) {
+            mat(PM_BRASS);
+            M4 sv2 = mb->xf;
+            push(m4trans(gx[g], gy[g], zb - 0.05f));
+            mb_torus(gr[g] + 0.012f, 0.018f, 24, 6);
+            mb->xf = sv2;
+            mat(PM_DIAL);
+            for (int i = 0; i < 24; i++) {
+                float a0 = 2 * (float)M_PI * i / 24, a1 = 2 * (float)M_PI * (i + 1) / 24;
+                V3 c = v3(gx[g], gy[g], zb - 0.045f);
+                V3 A = v3(gx[g] + gr[g] * cosf(a0), gy[g] + gr[g] * sinf(a0), zb - 0.045f), B = v3(gx[g] + gr[g] * cosf(a1), gy[g] + gr[g] * sinf(a1), zb - 0.045f);
+                V3 n = v3(0, 0, -1);
+                /* uv: the dial seen from the cab (x mirrored: +x is on the viewer's left) */
+                mb_vert(c, n, 0, 0); mb_vert(B, n, -cosf(a1), sinf(a1)); mb_vert(A, n, -cosf(a0), sinf(a0));
+            }
+            mat(PM_COPPER);
+            mb_rod(v3(gx[g], gy[g] + gr[g], zb - 0.06f), v3(gx[g], BOILER_Y + 0.75f, zb - 0.06f), 0.012f, 5, 0);
+        }
+        /* the water gauge glasses either side: brass cocks, a glass tube */
+        for (int s = -1; s <= 1; s += 2) {
+            float x = s * 0.45f;
+            mat(PM_BRASS);
+            boxc(x, 2.72f, zb - 0.06f, 0.04f, 0.035f, 0.05f);
+            boxc(x, 3.12f, zb - 0.06f, 0.04f, 0.035f, 0.05f);
+            mb_rod(v3(x - 0.03f, 2.75f, zb - 0.09f), v3(x - 0.03f, 3.09f, zb - 0.09f), 0.006f, 4, 0);
+            mb_rod(v3(x + 0.03f, 2.75f, zb - 0.09f), v3(x + 0.03f, 3.09f, zb - 0.09f), 0.006f, 4, 0);
+            mat(PM_GLASS);
+            cyl_at(v3(x, 2.755f, zb - 0.06f), v3(0, 1, 0), 0.016f, 0.33f, 10);
+        }
+        /* pipes up the sides, the injector valves' handwheels, the blower */
+        mat(PM_COPPER);
+        mb_rod(v3(-0.72f, 1.9f, zb - 0.07f), v3(-0.72f, 3.5f, zb - 0.07f), 0.028f, 6, 0);
+        mb_rod(v3(0.72f, 1.9f, zb - 0.07f), v3(0.72f, 3.5f, zb - 0.07f), 0.028f, 6, 0);
+        mb_rod(v3(-0.72f, 3.5f, zb - 0.07f), v3(0.72f, 3.5f, zb - 0.07f), 0.028f, 6, 0);
+        for (int s = -1; s <= 1; s += 2) {
+            mat(PM_RED);
+            M4 sv2 = mb->xf;
+            push(m4trans(s * 0.6f, 2.12f, zb - 0.1f));
+            mb_torus(0.07f, 0.012f, 16, 5);
+            mb->xf = sv2;
+            mat(PM_BRASS);
+            boxc(s * 0.6f, 2.12f, zb - 0.06f, 0.035f, 0.035f, 0.04f);
+        }
+        /* the regulator's stuffing box, high in the middle */
+        mat(PM_BRASS);
+        cyl_at(v3(0, 3.62f, zb), v3(0, 0, -1), 0.05f, 0.08f, 12);
+        /* a gauge lamp over it all */
+        mat(PM_IRON);
+        boxc(0.38f, 3.7f, zb - 0.1f, 0.05f, 0.06f, 0.05f);
+        mat(PM_LAMP);
+        boxc(0.38f, 3.62f, zb - 0.1f, 0.035f, 0.025f, 0.035f);
+        /* the floorboards, worn */
+        mat(PM_POLE);
+        boxc(0, 1.86f, (cz0 + cz1) / 2, cw - 0.03f, 0.02f, (cz0 - cz1) / 2);
     }
-    mat(PM_WHITE);
-    for (int s = -1; s <= 1; s += 2) {
-        M4 sv2 = mb->xf;
-        push(m4trans(s * 0.35f, 3.35f, cz0 - 0.045f));
-        push(m4roty((float)M_PI));
-        float gl[] = {0, 0, 0.11f, 0};
-        mb_lathe(gl, 2, 20, 0, 2 * (float)M_PI);
-        mb->xf = sv2;
-    }
-    mat(PM_COPPER);
-    mb_rod(v3(-0.7f, 2.2f, cz0 - 0.06f), v3(-0.7f, 3.6f, cz0 - 0.06f), 0.03f, 6, 0);
-    mb_rod(v3(0.7f, 2.2f, cz0 - 0.06f), v3(0.7f, 3.6f, cz0 - 0.06f), 0.03f, 6, 0);
-    mat(PM_STEEL);
-    mb_rod(v3(0, 3.65f, cz0 - 0.08f), v3(0.55f, 3.25f, cz0 - 0.1f), 0.025f, 6, 1);
 }
 
 static void build_tender(void) {
@@ -659,4 +756,39 @@ static void loco_meshes_init(void) {
     gm_upload(&g_xhead, &m_xhead);
     mb_begin(&m_pin); mat(PM_STEEL); cyl_at(v3(0, 0, 0), v3(1, 0, 0), 0.07f, 0.17f, 14);
     gm_upload(&g_pin, &m_pin);
+    static Mesh mm;
+    /* a firehole door: a plate with a raised rim and a handle (unit: 0.27 x 0.4) */
+    mb_begin(&mm); mat(PM_IRON);
+    boxc(0, 0, 0, 0.135f, 0.2f, 0.012f);
+    boxc(0, 0, -0.015f, 0.12f, 0.185f, 0.006f);
+    mat(PM_STEEL);
+    mb_rod(v3(0.08f, -0.06f, -0.03f), v3(0.08f, 0.06f, -0.03f), 0.01f, 5, 1);
+    gm_upload(&g_door, &mm);
+    /* a needle: a tapered blade along +y from a boss (unit length) */
+    mb_begin(&mm); mat(PM_BLACK);
+    mb_quad(v3(-0.04f, -0.15f, 0), v3(0.04f, -0.15f, 0), v3(0.008f, 1.0f, 0), v3(-0.008f, 1.0f, 0));
+    mb_quad(v3(0.04f, -0.15f, 0), v3(-0.04f, -0.15f, 0), v3(-0.008f, 1.0f, 0), v3(0.008f, 1.0f, 0));
+    cyl_at(v3(0, 0, 0), v3(0, 0, -1), 0.08f, 0.01f, 10);
+    gm_upload(&g_needle, &mm);
+    /* the water in a gauge glass: a column, unit height from its foot */
+    mb_begin(&mm); mat(PM_WATER);
+    cyl_at(v3(0, 0, 0), v3(0, 1, 0), 0.014f, 1.0f, 10);
+    gm_upload(&g_water, &mm);
+    /* the shovel: blade at the origin pointing along -z, the shaft back along +z to a D grip */
+    mb_begin(&mm); mat(PM_IRON);
+    mb_quad(v3(-0.13f, 0, -0.32f), v3(0.13f, 0, -0.32f), v3(0.15f, 0, 0), v3(-0.15f, 0, 0));
+    mb_quad(v3(0.13f, 0, -0.32f), v3(-0.13f, 0, -0.32f), v3(-0.15f, 0, 0), v3(0.15f, 0, 0));
+    for (int s = -1; s <= 1; s += 2) mb_quad(v3(s * 0.13f, 0, -0.32f), v3(s * 0.15f, 0, 0), v3(s * 0.15f, 0.06f, 0), v3(s * 0.13f, 0.05f, -0.28f));
+    mat(PM_COAL);
+    boxc(0, 0.04f, -0.15f, 0.1f, 0.04f, 0.12f);
+    mat(PM_POLE);
+    mb_rod(v3(0, 0.03f, 0), v3(0, 0.12f, 0.95f), 0.02f, 6, 1);
+    mat(PM_IRON);
+    {
+        M4 s = mb->xf;
+        push(m4mul(m4trans(0, 0.13f, 1.02f), m4roty((float)M_PI / 2)));
+        mb_torus(0.06f, 0.012f, 10, 4);
+        mb->xf = s;
+    }
+    gm_upload(&g_shovel, &mm);
 }

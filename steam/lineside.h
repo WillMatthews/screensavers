@@ -504,7 +504,7 @@ static void piece_get(long seg, int kind) {
 }
 
 /* ---- signals: a post, an arm that drops to clear, a lamp behind its spectacle ---- */
-static GMesh g_sigpost, g_sigarm, g_board, g_lamp_r, g_lamp_g;
+static GMesh g_sigpost, g_sigarm, g_board, g_lamp_r, g_lamp_g, g_clock;
 static float sig_arm[64];              /* the arms' angles, by (segment * NSIG_SEG + i) mod 64 */
 static void lineside_init(void) {
     static Mesh m;
@@ -541,6 +541,22 @@ static void lineside_init(void) {
     mat(PM_BLACK);
     boxc(0, 1.975f, 0.0f, 1.03f, 0.3f, 0.02f);
     gm_upload(&g_board, &m);
+    /* a station clock: a drum hung from a bracket, a dial each side (uv: the unit circle as seen) */
+    mb_begin(&m);
+    mat(PM_BLACK);
+    cyl_at(v3(0, 0, -0.1f), v3(0, 0, 1), 0.46f, 0.2f, 32);
+    boxc(0, 0.62f, 0, 0.03f, 0.16f, 0.03f);
+    mat(PM_CLOCK);
+    for (int f = -1; f <= 1; f += 2)
+        for (int i = 0; i < 32; i++) {
+            float a0 = 2 * (float)M_PI * i / 32, a1 = 2 * (float)M_PI * (i + 1) / 32;
+            V3 c = v3(0, 0, f * 0.105f), A = v3(0.42f * cosf(a0), 0.42f * sinf(a0), f * 0.105f), B = v3(0.42f * cosf(a1), 0.42f * sinf(a1), f * 0.105f);
+            V3 n = v3(0, 0, (float)f);
+            /* seen from +z, +x is to the left: mirror u on that face */
+            if (f > 0) { mb_vert(c, n, 0, 0); mb_vert(A, n, -cosf(a0), sinf(a0)); mb_vert(B, n, -cosf(a1), sinf(a1)); }
+            else { mb_vert(c, n, 0, 0); mb_vert(B, n, cosf(a1), sinf(a1)); mb_vert(A, n, cosf(a0), sinf(a0)); }
+        }
+    gm_upload(&g_clock, &m);
     /* the signal lamps: a lens facing down the line toward the train */
     for (int c = 0; c < 2; c++) {
         mb_begin(&m);
@@ -681,6 +697,36 @@ static void lineside_draw(GLuint p, int shadow) {
                 gm_draw(clear ? &g_lamp_g : &g_lamp_r);
             }
         }
+    /* the station clock, under the canopy, telling the real time */
+    for (long k = k0 - 1; k <= k0 + 1; k++) {
+        Feat f = feat(k, F_STATION);
+        if (!f.on) continue;
+        double z = f.z0 + 105;
+        if (fabs(z - cam.p[2]) > 600) continue;
+        double b[3];
+        line_pt(z, -pole_side * 3.0, 0.92 + 3.05, b);
+        float yaw = (float)atan(track_dx(z));
+        M4 base = m4mul(m4trans((float)(b[0] - cam.p[0]), (float)(b[1] - cam.p[1]), (float)(b[2] - cam.p[2])), m4roty(yaw));
+        glUniformMatrix4fv(UL(p, "uModel"), 1, GL_FALSE, base.m);
+        glUniform4f(UL(p, "uObj"), 1, 1, 0, 0);
+        gm_draw(&g_clock);
+        if (shadow) continue;
+        time_t ts = (time_t)wall_now;
+        struct tm tm;
+        localtime_r(&ts, &tm);
+        float mins = tm.tm_min + tm.tm_sec / 60.0f, hrs = (tm.tm_hour % 12) + mins / 60;
+        for (int fside = -1; fside <= 1; fside += 2) {
+            /* clockwise as seen from each face */
+            float am = -fside * mins / 60 * 2 * (float)M_PI, ah = -fside * hrs / 12 * 2 * (float)M_PI;
+            M4 face = m4mul(base, m4trans(0, 0, fside * 0.115f));
+            M4 hm = m4mul(face, m4mul(m4rotz(-am * 1.0f), m4scale(0.35f, 0.36f, 1)));
+            M4 hh = m4mul(face, m4mul(m4rotz(-ah), m4scale(0.5f, 0.24f, 1)));
+            glUniformMatrix4fv(UL(p, "uModel"), 1, GL_FALSE, hm.m);
+            gm_draw(&g_needle);
+            glUniformMatrix4fv(UL(p, "uModel"), 1, GL_FALSE, hh.m);
+            gm_draw(&g_needle);
+        }
+    }
     /* the board with the time away, a few hundred metres before each station */
     for (long k = k0 - 1; k <= k0 + 1; k++) {
         Feat f = feat(k, F_STATION);

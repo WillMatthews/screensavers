@@ -41,7 +41,7 @@ static const char *GL_COMMON = GLSL(
         if (uWeather.x > 0.0) {
             float puddle = smoothstep(0.55, 0.7, vnoise(wp.xz * 0.35)) * smoothstep(0.85, 0.97, N.y);
             alb *= 1.0 - 0.45 * uWeather.x;
-            rough = mix(rough, 0.12, uWeather.x * (0.45 + 0.55 * puddle));
+            rough = mix(rough, 0.12, uWeather.x * (0.6 + 0.4 * puddle));
         }
         if (uWeather.y > 0.0) {
             float cover = smoothstep(0.35, 0.75, N.y + 0.25 * (vnoise(wp.xz * 1.7) - 0.5)) * uWeather.y;
@@ -179,7 +179,7 @@ static const char *FS_OBJ_HEAD = GLSL(
     in vec3 vP, vN, vL;
     in vec2 vUV;
     flat in int vMat;
-    uniform vec4 uPal[48], uPal2[48];
+    uniform vec4 uPal[64], uPal2[64];
     uniform vec4 uWheelW4;       /* the wheels' angular speeds (rad/s), for the blur: drivers, bogie, trailing, others */
     uniform vec4 uWheelA4;       /* and their angles */
     uniform vec4 uObj;           /* per draw: emissive scale, lit fraction, seed, - */
@@ -256,6 +256,39 @@ static const char *FS_OBJ = GLSL(
             vec2 fg = fract(g);
             float mort = smoothstep(0.06, 0.0, min(min(fg.x, 1.0 - fg.x) * 0.9 * 2.5, min(fg.y, 1.0 - fg.y)));
             alb *= (0.75 + 0.5 * hash12(floor(g))) * (1.0 - 0.45 * mort) * (0.8 + 0.4 * vnoise(wp.xz * 0.7 + wp.y));
+        } else if (kind == 8 && B.w > 0.5) {
+            /* a station clock's dial: minute ticks, bold hour bars, lit from inside */
+            vec2 q = vUV;
+            float r = length(q), a = atan(q.x, q.y);
+            float m = abs(fract(a / 6.28318 * 60.0 + 0.5) - 0.5) * 2.0, hr = abs(fract(a / 6.28318 * 12.0 + 0.5) - 0.5) * 2.0;
+            float ink = smoothstep(0.86, 0.88, r) * smoothstep(0.96, 0.94, r) * smoothstep(0.1, 0.0, m)
+                      + smoothstep(0.7, 0.72, r) * smoothstep(0.96, 0.94, r) * smoothstep(0.05, 0.0, hr);
+            alb = mix(alb, vec3(0.02), clamp(ink, 0.0, 1.0));
+            E = alb * 0.5;
+        } else if (kind == 8) {
+            /* an enamelled gauge dial: ticks round 270 degrees, a red line */
+            vec2 q = vUV;
+            float r = length(q);
+            float a = atan(q.x, q.y);
+            float sw = 2.356;
+            float f = (a + sw) / (2.0 * sw);
+            float tick = abs(fract(f * 20.0 + 0.5) - 0.5) * 2.0;
+            float maj = abs(fract(f * 4.0 + 0.5) - 0.5) * 2.0;
+            float on = step(abs(a), sw) * step(0.0, f);
+            float ink = on * (smoothstep(0.82, 0.84, r) * smoothstep(0.95, 0.93, r) * smoothstep(0.12, 0.0, tick)
+                            + smoothstep(0.7, 0.72, r) * smoothstep(0.95, 0.93, r) * smoothstep(0.06, 0.0, maj));
+            alb = mix(alb, vec3(0.03), clamp(ink, 0.0, 1.0));
+            alb = mix(alb, vec3(0.5, 0.04, 0.03), on * step(0.88, f) * smoothstep(0.84, 0.86, r) * smoothstep(0.95, 0.93, r));
+            E = alb * 0.12;
+        } else if (kind == 9) {
+            /* the fire: a bed of burning coal, flickering, white-hot where the draught is strongest */
+            vec2 q = vL.xy * vec2(11.0, 15.0) + vec2(vL.z * 6.0, 0.0);
+            float n = vnoise(q + vec2(0.0, -uTime * 1.6)) * 0.6 + vnoise(q * 2.3 + vec2(uTime * 0.7, -uTime * 2.9)) * 0.4;
+            float h = clamp((n - 0.35) * 2.2, 0.0, 1.2);
+            vec3 c = mix(vec3(0.3, 0.03, 0.0), vec3(1.0, 0.35, 0.05), smoothstep(0.1, 0.5, h));
+            c = mix(c, vec3(1.0, 0.75, 0.35), smoothstep(0.55, 0.95, h));
+            E = c * emis * uObj.w;
+            alb = vec3(0.0);
         } else if (kind == 7) {
             /* polished: the rails' heads, the motion's bright steel */
             rough = 0.18 + 0.15 * vnoise(wp.xz * 3.0);
@@ -268,6 +301,9 @@ static const char *FS_OBJ = GLSL(
         }
         if (kind != 2 && kind != 4) weather(alb, rough, N, wp);
         float sh = moonShadow(vP, N);
+        /* under the cab roof (the engine's own frame): the sky can't see in */
+        float indoor = uObj.z < 0.5 && abs(vL.x) < 1.33 && vL.y > 1.75 && vL.y < 3.9 && vL.z < -3.22 && vL.z > -5.6 ? 1.0 : 0.0;
+        if (indoor > 0.5) { sh *= 0.15; alb *= 0.6; }
         vec3 col = lightAll(vP, N, alb, rough, metal, sh) + E;
         o = vec4(fogApply(col, vP), cover);
     });
@@ -613,7 +649,8 @@ static const char *FS_SMOKE = GLSL(
         float d = length(vQ);
         if (d > 1.0) discard;
         if (vA.y > 1.5) {
-            /* a spark */
+            /* a spark: hidden behind solid things */
+            if (linz(texture(uDepth, gl_FragCoord.xy * 2.0 / uDepthSize).r) < vDepth) discard;
             float g = smoothstep(1.0, 0.0, d);
             float life = 1.0 - vL.w;
             vec3 c = mix(vec3(1.0, 0.25, 0.04), vec3(1.0, 0.7, 0.3), life) * 6.0 * life;
@@ -690,7 +727,7 @@ static const char *VS_RAIN = HDR GLSL(
         if (end == 1) p -= streak;
         vP = p;
         float d = length(p);
-        vA = smoothstep(box * 0.5, box * 0.3, d) * smoothstep(0.3, 1.0, d);
+        vA = smoothstep(box * 0.5, box * 0.3, d) * smoothstep(0.5, 3.0, d);
         /* the lamps nearby light it */
         vec3 L = uSkyCol * 3.0 + uMoonCol * 0.15;
         for (int i = 0; i < 16; i++) {
@@ -708,7 +745,7 @@ static const char *FS_RAIN = GLSL(
     uniform float uSnowing;
     out vec4 o;
     void main() {
-        float a = vA * (uSnowing > 0.5 ? 0.85 : 0.35);
+        float a = vA * (uSnowing > 0.5 ? 0.8 : 0.2);
         o = vec4(fogApply(vC * (uSnowing > 0.5 ? 1.6 : 0.8), vP), a);
     });
 static const char *FS_NONE = GLSL(

@@ -6,7 +6,7 @@
  * of shots that ride with the train. Dips to black between them. All of it
  * a function of the simulation, so spanned instances agree. */
 
-enum { SH_WHEELS, SH_FRONT, SH_PASSBY, SH_AERIAL, SH_CAB, SH_SIDE, SH_MOON, SH_VIADUCT, SH_STATION, SH_TUNNEL, SH_CROSSING, NSHOT };
+enum { SH_WHEELS, SH_FRONT, SH_PASSBY, SH_AERIAL, SH_CAB, SH_SIDE, SH_MOON, SH_FIRE, SH_VIADUCT, SH_STATION, SH_TUNNEL, SH_CROSSING, NSHOT };
 static struct {
     int kind, n;
     double t0, t1;
@@ -116,7 +116,7 @@ static int shot_ok(void) {
         shot_target(shot.t0 + u * len, shot.look);
         shot.look_init = 1;
         director_camera(shot.t0 + u * len);
-        if (sight_blocked(cam.p, cam_at) || pole_blocked(cam.p, cam_at)) ok = 0;
+        if (shot.kind != SH_FIRE && (sight_blocked(cam.p, cam_at) || pole_blocked(cam.p, cam_at))) ok = 0;
     }
     tr.z = z0;
     cam = save;
@@ -129,6 +129,7 @@ static double shot_len(int kind, double t, int n) {
     (void)t;
     switch (kind) {
     case SH_VIADUCT: case SH_STATION: case SH_TUNNEL: case SH_CROSSING: return 34;
+    case SH_FIRE: return 16;
     default: return 22 + 12 * dfrand(n, 3);
     }
 }
@@ -141,7 +142,7 @@ static void shot_pick(double t) {
     int kind = -1;
     /* a set piece coming up? */
     struct { int f, k; double lo, hi; } want[] = {
-        {F_VIADUCT, SH_VIADUCT, 8, 24}, {F_STATION, SH_STATION, 7, 20}, {F_TUNNEL, SH_TUNNEL, 9, 22}, {F_CROSSING, SH_CROSSING, 7, 18},
+        {F_VIADUCT, SH_VIADUCT, 7, 30}, {F_STATION, SH_STATION, 6, 26}, {F_TUNNEL, SH_TUNNEL, 9, 30}, {F_CROSSING, SH_CROSSING, 6, 22},
     };
     for (size_t i = 0; i < sizeof want / sizeof *want && kind < 0; i++) {
         Feat f = feat_near(head_z() + v * 15, want[i].f);
@@ -150,6 +151,11 @@ static void shot_pick(double t) {
             kind = want[i].k;
             shot.fz0 = f.z0; shot.fz1 = f.z1;
         }
+    }
+    /* a round of firing about to begin: be on the footplate for it */
+    if (kind < 0 && prev != SH_FIRE) {
+        double nr = next_round(t);
+        if (nr > 0 && nr - t > 2.0 && nr - t < 7.0 && dfrand(n, 11) < 0.6f) kind = SH_FIRE;
     }
     if (kind < 0) {
         static const int rot[] = {SH_WHEELS, SH_FRONT, SH_AERIAL, SH_PASSBY, SH_CAB, SH_MOON, SH_SIDE, SH_FRONT, SH_WHEELS, SH_PASSBY, SH_AERIAL, SH_MOON};
@@ -169,6 +175,15 @@ static void shot_pick(double t) {
     shot.n = n;
     shot.t0 = t;
     shot.t1 = t + shot_len(kind, t, n);
+    /* a set piece coming up: cut in time to be there for it */
+    if (kind < SH_VIADUCT && kind != SH_FIRE) {
+        static const int fk[] = {F_VIADUCT, F_STATION, F_TUNNEL, F_CROSSING};
+        for (int i = 0; i < 4; i++) {
+            Feat f = feat_near(head_z() + v * 30, fk[i]);
+            double ta = (f.z0 - head_z()) / v;
+            if (f.on && ta > 20 && t + ta - 14 < shot.t1) shot.t1 = fmax(t + 12, t + ta - 14);
+        }
+    }
     shot.look_init = 0;
     /* try set-ups until one isn't looking through a tree or a hill */
     for (int var = 0; var < 10; var++) {
@@ -178,7 +193,7 @@ static void shot_pick(double t) {
 }
 
 static void director_init(double t) {
-    shot.n = (int)(dhash(0, 9) % 1000);
+    shot.n = (int)(dhash((int)floor(t / 10), 9) % 1000);
     shot.kind = -1;
     shot_pick(t);
     /* a run started mid-way begins its first shot in the clear */
@@ -192,7 +207,7 @@ static void director_update(double t) {
         train_tail_z() > shot.a[2] + 60 && t - shot.t0 > 8)
         shot.t1 = t + FADE;
     if (shot.kind == SH_VIADUCT && train_tail_z() > shot.fz1 + 40 && t < shot.t1 - FADE) shot.t1 = t + FADE;
-    if (shot.kind == SH_TUNNEL && train_tail_z() > shot.fz0 + 30 && t < shot.t1 - FADE) shot.t1 = t + FADE + 1.5;
+    if (shot.kind == SH_TUNNEL && train_tail_z() > shot.fz0 + 30 && shot.t1 > t + FADE + 1.6) shot.t1 = t + FADE + 1.5;
     /* the look-at point follows its target on a critically damped spring */
     double tg[3];
     shot_target(t, tg);
@@ -244,6 +259,14 @@ static void director_camera(double t) {
         fpt(&f0, s * 0.4f, 2.4f, 0.5f, at);
         cam.hfov = 34; cam.fstop = 0.7f;
         roll = -s * 0.015f;
+        break;
+    }
+    case SH_FIRE: {
+        /* the fireman's eye, looking down at the firehole; the cab rocks */
+        fpt(&f0, -0.25f + 0.02f * wander(t, 1.7f, 7), 3.5f + 0.015f * wander(t, 2.9f, 8), -5.35f, p);
+        fpt(&f0, 0.05f, 2.62f, -3.27f, at);
+        cam.hfov = 64; cam.fstop = 0.5f;
+        roll = 0.015f * wander(t, 1.1f, 9);
         break;
     }
     case SH_MOON: {
@@ -310,7 +333,7 @@ static void director_camera(double t) {
     }
     /* never below the ground */
     double g = terrain_h(p[0], p[2]);
-    if (shot.kind != SH_WHEELS && shot.kind != SH_FRONT && shot.kind != SH_CAB && p[1] < g + 0.5) p[1] = g + 0.5;
+    if (shot.kind != SH_WHEELS && shot.kind != SH_FRONT && shot.kind != SH_CAB && shot.kind != SH_FIRE && p[1] < g + 0.5) p[1] = g + 0.5;
     if ((shot.kind == SH_FRONT || shot.kind == SH_WHEELS) && p[1] < g + 0.35) p[1] = g + 0.35;
     for (int k = 0; k < 3; k++) cam_at[k] = at[k];
     cam_look(p, at, roll);

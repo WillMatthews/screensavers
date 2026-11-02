@@ -220,6 +220,11 @@ static struct {
 
 static double t_now;
 static double sim_t;
+static float door_now;
+static double wall_now;        /* the wall clock, for the station clocks */
+static float fire_door(double t);
+static int fire_round(double t, double *age, double *len);
+static double next_round(double t);
 static float flick;            /* the fire's flicker, this frame */
 #include "lineside.h"
 #include "director.h"
@@ -414,8 +419,34 @@ static uint32_t thash(long n, int salt) {
     h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15;
     return h;
 }
+/* the round in progress at t: its age (s) and length, or 0 */
+static double force_round = -1;        /* --fire: a round starting then (for testing) */
+static int fire_round(double t, double *age, double *len) {
+    if (force_round >= 0 && t >= force_round && t <= force_round + 7) { *age = t - force_round; *len = 7; return 1; }
+    for (long k = (long)floor(t / 28) - 1; k <= (long)floor(t / 28); k++) {
+        float a = (thash(k, 31) & 0xffff) / 65536.0f, b = (thash(k, 32) & 0xffff) / 65536.0f;
+        if (b > 0.45f + 0.5f * tr.load_s) continue;
+        double t0 = k * 28.0 + a * 20, l = 4.5 + 3 * b;
+        if (t >= t0 && t <= t0 + l) { *age = t - t0; *len = l; return 1; }
+    }
+    return 0;
+}
+/* when the next round starts after t (within a minute), or 0 */
+static double next_round(double t) {
+    for (long k = (long)floor(t / 28); k <= (long)floor(t / 28) + 2; k++) {
+        float a = (thash(k, 31) & 0xffff) / 65536.0f, b = (thash(k, 32) & 0xffff) / 65536.0f;
+        if (b > 0.45f + 0.5f * tr.load_s) continue;
+        double t0 = k * 28.0 + a * 20;
+        if (t0 > t) return t0;
+    }
+    return 0;
+}
 static float fire_door(double t) {
     float best = 0;
+    if (force_round >= 0 && t >= force_round && t <= force_round + 7) {
+        float u = (float)(t - force_round);
+        best = sstepf(0, 0.5f, u) * sstepf(7, 6.4f, u) * (0.75f + 0.25f * cosf(u * 2 * (float)M_PI / 1.3f));
+    }
     for (long k = (long)floor(t / 28) - 1; k <= (long)floor(t / 28); k++) {
         float a = (thash(k, 31) & 0xffff) / 65536.0f, b = (thash(k, 32) & 0xffff) / 65536.0f;
         if (b > 0.45f + 0.5f * tr.load_s) continue;
@@ -472,12 +503,13 @@ static void advance(double t, double wt) {
         read_sensors();
         last_read = span_me >= 0 ? floor(wt) : t;
     }
+    wall_now = wt;
     const double h = 1.0 / 120;
     if (!sim_started) {
         /* the train is where a steady run from the epoch would have put it,
          * with the last half minute run for real (so the smoke's there) */
         sim_started = 1;
-        double t0 = fmax(t - 30, 0);
+        double t0 = floor(fmax(t - 30, 0) / 10) * 10;   /* on a 10 s grid, so outputs started together agree */
         sim_t = t0;
         tr.z = 600 + 20 * t0;
         director_init(t0);
@@ -717,6 +749,53 @@ static void draw_motion(GLuint p, const Frame *f, int s) {
     }
 }
 
+/* the footplate's moving parts: the firehole doors, the needles, the water in the glasses, the shovel */
+static void draw_part(GLuint p, M4 base, M4 local, GMesh *g) {
+    M4 m = m4mul(base, local);
+    glUniformMatrix4fv(UL(p, "uModel"), 1, GL_FALSE, m.m);
+    gm_draw(g);
+}
+static void draw_footplate(GLuint p, const Frame *f) {
+    M4 base = frame_model(f);
+    float zb = -3.27f;
+    /* the doors slide apart */
+    float o = door_now;
+    for (int s = -1; s <= 1; s += 2)
+        draw_part(p, base, m4trans(s * (0.15f + 0.26f * o), 2.45f, zb - 0.1f), &g_door);
+    /* boiler pressure: the CPU's load, trembling; the steam chest: its heat (the dials are seen mirrored from the cab) */
+    float tremble = 0.015f * sinf((float)t_now * 23) + 0.01f * sinf((float)t_now * 37);
+    float a1 = (-2.356f + 4.712f * clampf(tr.load_s * 0.9f + 0.05f + tremble, 0, 1));
+    float a2 = (-2.356f + 4.712f * clampf((tr.temp_s - 20) / 80, 0, 1));
+    draw_part(p, base, m4mul(m4mul(m4trans(0.0f, 3.32f, zb - 0.055f), m4rotz(a1)), m4scale(0.012f / 0.04f * 0.4f, 0.11f, 1)), &g_needle);
+    draw_part(p, base, m4mul(m4mul(m4trans(-0.4f, 3.22f, zb - 0.055f), m4rotz(a2)), m4scale(0.3f, 0.075f, 1)), &g_needle);
+    /* the water in the glasses: the battery's charge (or a comfortable half) */
+    float lvl = aux_kind == AUX_BATT ? clampf(sens.aux / 100, 0.04f, 1) : 0.6f;
+    lvl += 0.01f * sinf((float)t_now * 5.3f);
+    for (int s = -1; s <= 1; s += 2)
+        draw_part(p, base, m4mul(m4trans(s * 0.45f, 2.755f, zb - 0.06f), m4scale(1, 0.33f * lvl, 1)), &g_water);
+    /* the shovel: a round in progress swings coal from the tender into the fire; between rounds it leans on the tender */
+    double age, len;
+    V3 blade, aim;
+    if (fire_round(t_now, &age, &len)) {
+        float c = (float)fmod(age + 0.3, 1.3) / 1.3f;
+        V3 mouth = v3(0, 2.42f, -3.45f), in = v3(0, 2.42f, -3.05f), coal = v3(0.15f, 2.05f, -6.15f), lift = v3(-0.15f, 2.55f, -4.7f);
+        if (c < 0.15f) blade = vlerp(mouth, in, sstepf(0, 0.15f, c));
+        else if (c < 0.3f) blade = vlerp(in, mouth, sstepf(0.15f, 0.3f, c));
+        else if (c < 0.55f) blade = vlerp(mouth, lift, sstepf(0.3f, 0.55f, c));
+        else if (c < 0.65f) blade = vlerp(lift, coal, sstepf(0.55f, 0.65f, c));
+        else if (c < 0.8f) blade = vlerp(coal, lift, sstepf(0.65f, 0.8f, c));
+        else blade = vlerp(lift, mouth, sstepf(0.8f, 1.0f, c));
+        if (age > len - 0.8) blade = vlerp(blade, v3(-0.5f, 2.6f, -5.6f), sstepf((float)len - 0.8f, (float)len, (float)age));
+        /* the fireman's hands follow behind it */
+        aim = vnorm(vsub(blade, v3(-0.35f, 3.0f, -5.25f)));
+    } else {
+        blade = v3(-0.55f, 1.95f, -6.2f);
+        aim = vnorm(v3(0.05f, -0.9f, -0.35f));
+    }
+    V3 Z = vmul(aim, -1), X = vnorm(vcross(v3(0, 1, 0), Z)), Y = vcross(Z, X);
+    draw_part(p, base, m4basis(X, Y, Z, blade), &g_shovel);
+}
+
 static void draw_train(GLuint p, int wheels) {
     glUniform1i(UL(p, "uTex"), 3);
     float wa[4], ww[4];
@@ -737,10 +816,11 @@ static void draw_train(GLuint p, int wheels) {
         if (!visible((float)(c[0] - cam.p[0]), (float)(c[1] - cam.p[1]), (float)(c[2] - cam.p[2]), i == 0 ? 8.0f : i == 1 ? 5.0f : 11.0f)) continue;
         M4 m = frame_model(&f);
         glUniformMatrix4fv(UL(p, "uModel"), 1, GL_FALSE, m.m);
-        glUniform4f(UL(p, "uObj"), 1.0f, tr.lit, (float)i * 1.37f, tr.fire * (0.85f + 0.3f * flick));
+        glUniform4f(UL(p, "uObj"), 1.0f, tr.lit, (float)i * 1.37f, tr.fire * (0.85f + 0.3f * flick) * (0.4f + 1.6f * door_now));
         if (wheels) { gm_draw(i == 0 ? &g_loco_w : i == 1 ? &g_tender_w : &g_coach_w); continue; }
         gm_draw(i == 0 ? &g_loco : i == 1 ? &g_tender : &g_coach);
         if (i == 0 && d2 < 400.0 * 400.0) { draw_motion(p, &f, 1); draw_motion(p, &f, -1); }
+        if (i == 0 && d2 < 40.0 * 40.0) draw_footplate(p, &f);
     }
 }
 
@@ -775,7 +855,7 @@ static void render_shadow(void) {
     glDepthFunc(GL_LESS);
     glUseProgram(p_shadow);
     glUniformMatrix4fv(UL(p_shadow, "uVP"), 1, GL_FALSE, shadowM.m);
-    glUniform4fv(UL(p_shadow, "uPal2"), 48, &pal2[0][0]);
+    glUniform4fv(UL(p_shadow, "uPal2"), 64, &pal2[0][0]);
     glUniform1f(UL(p_shadow, "uPre"), 0);
     cull_on = 0;
     draw_train(p_shadow, 0);
@@ -843,9 +923,12 @@ static void render(GLuint target) {
     float fi = tr.fire * (0.85f + 0.15f * flick);
     fpt(&f0, 0, 0.45f, -3.3f, wp); add_light(wp, 1.3f, 4.0f * fi, 1.3f * fi, 0.3f * fi);
     float door = fire_door(t_now);
+    door_now = door;
     float ci = fi * (0.6f + 3.2f * door * (0.85f + 0.3f * flick));
-    fpt(&f0, 0, 2.6f, -3.7f, wp); add_light(wp, 0.9f + 1.4f * door, 3.2f * ci, 1.0f * ci, 0.22f * ci);
+    fpt(&f0, 0, 2.6f, -3.7f, wp); add_light(wp, 0.9f + 1.0f * door, 2.2f * ci, 0.7f * ci, 0.15f * ci);
     for (int s = -1; s <= 1; s += 2) { fpt(&f0, s * 0.87f, 1.48f, 7.7f, wp); add_light(wp, 1.0f, 0.8f, 0.68f, 0.45f); }
+    /* the gauge lamp in the cab */
+    fpt(&f0, 0.38f, 3.6f, -3.42f, wp); add_light(wp, 0.35f, 0.5f, 0.32f, 0.15f);
     {
         Frame ft = veh_frame(1 + tr.ncoach);
         fpt(&ft, 0.6f, 1.6f, -COACH_L / 2 - 0.4f, wp); add_light(wp, 0.6f, 0.6f, 0.03f, 0.01f);
@@ -909,8 +992,8 @@ static void render(GLuint target) {
     /* the train and the lineside */
     prof_mark(PR_OBJ);
     set_common(p_obj);
-    glUniform4fv(UL(p_obj, "uPal"), 48, &pal[0][0]);
-    glUniform4fv(UL(p_obj, "uPal2"), 48, &pal2[0][0]);
+    glUniform4fv(UL(p_obj, "uPal"), 64, &pal[0][0]);
+    glUniform4fv(UL(p_obj, "uPal2"), 64, &pal2[0][0]);
     draw_train(p_obj, 0);
     prof_mark(PR_LINE);
     lineside_draw(p_obj, 0);
@@ -1092,7 +1175,7 @@ static void usage(void) {
     fprintf(stderr,
         "usage: steam [--window | --root | --layer] [--seed N] [--fps N] [--font FAMILY] [--sans FAMILY]\n"
         "             [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
-        "             [--scale F] [--weather 0-3] [--view N] [--no-caption]\n"
+        "             [--scale F] [--weather 0-3] [--view N] [--fire] [--no-caption]\n"
         "             [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH]\n");
     exit(1);
 }
@@ -1150,8 +1233,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-view") && i + 1 < argc) opt_view = atoi(argv[++i]);
         else if (!strcmp(a, "-weather") && i + 1 < argc) opt_weather = atoi(argv[++i]);
         else if (!strcmp(a, "-no-caption")) opt_caption = 0;
+        else if (!strcmp(a, "-fire")) force_round = 1e9;     /* set from --at below */
         else usage();
     }
+    if (force_round > 1e8) force_round = opt_at - (getenv("STEAM_FIRE_AGE") ? atof(getenv("STEAM_FIRE_AGE")) : 2.0);
     if (span_me >= span_n) span_me = -1;
     if (opt_fps < 1) opt_fps = 1;
     if (!opt_seed) opt_seed = (uint32_t)time(NULL) ^ (uint32_t)(now() * 1e6);
@@ -1224,6 +1309,20 @@ int main(int argc, char **argv) {
         GLuint tex = mk_tex(W, H, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, GL_NEAREST);
         GLuint fbo = mk_fbo(tex, 0);
         render_scale = auto_scale();
+        if (getenv("STEAM_LIST")) {
+            /* testing: list the shots the director takes over the first N seconds */
+            static const char *nm[NSHOT] = {"wheels", "front", "passby", "aerial", "cab", "side", "moon", "fire", "viaduct", "station", "tunnel", "crossing"};
+            double T = atof(getenv("STEAM_LIST"));
+            int last = -1;
+            for (double t = 0; t < T; t += 0.25) {
+                advance(t, t_wall0 + t);
+                if (shot.n != last) {
+                    last = shot.n;
+                    printf("%7.1f  %-9s  until %7.1f  (z %.0f, v %.1f)\n", shot.t0, nm[shot.kind], shot.t1, tr.z, tr.v);
+                }
+            }
+            return 0;
+        }
         if (opt_shot) {
             double wt = t_wall0 + opt_at;
             advance(opt_at, wt);
