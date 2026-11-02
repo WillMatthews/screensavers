@@ -4,10 +4,12 @@
  *
  * Several hundred to a few thousand sites (--cells: how many fall on the
  * front screen). Their Voronoi diagram is exact: a Delaunay triangulation on
- * the CPU (a port of delaunator's sweep-hull), its dual cells drawn as
- * polygons, and each pixel shaded from its distances to the bisectors with
- * the cell's Delaunay neighbours, so the edges are crisp, anti-aliased and
- * can be given any profile (lead came, wax walls, ink, cracks).
+ * the CPU (a port of delaunator's sweep-hull), each cell drawn as a fan of
+ * triangles that carry the bisector lines of the cell's edges, so every
+ * pixel knows its exact distance to the cell wall: the edges are crisp,
+ * anti-aliased and can be given any profile (lead came, wax walls, ink,
+ * cracks). The relaxation runs over a margin past the screens, so the
+ * squashed boundary row of the tessellation is out of sight.
  *
  * Relaxation: every half-second tick each site moves to the centroid of its
  * cell (clipped to the screen), and the sites glide between ticks on a
@@ -20,10 +22,17 @@
  *   wind       a gust front sweeps across, dragging sites in eddies
  *   cells      a cluster of cells divides (new seeds dropped in) while
  *              another cluster fuses pairwise
- *   text       the time, or the host name, becomes a density: weighted
- *              Voronoi stippling draws it in small cells, then it dissolves
+ *   text       the time (hours over minutes) or the host name becomes a
+ *              density: cells under it bud new seeds, written left to right,
+ *              and weighted Lloyd (weighted Voronoi stippling) holds them
+ *              there, the small cells drawing the letters; then the budded
+ *              cells fuse back into their neighbours and it dissolves
  *   dissolve   every few minutes the honeycomb melts into a fresh random
  *              scatter (which is also what bounds the replay below)
+ *
+ * Divisions and fusions stay continuous: a new site starts on its parent
+ * (the two cells together are exactly the parent's) and glides apart while
+ * the line between them fades in; a fusing site glides onto its partner.
  *
  * Now and then the relaxation shows its workings: the Delaunay dual, the
  * centroid each site is heading for, or the cells shaded by their area.
@@ -38,15 +47,18 @@
  *   honey      honeycomb: wax walls, amber honey, capped cells
  *
  * Deterministic: everything is a function of --seed and the time since
- * --epoch. Time runs in eras of four cycles (~3.3 minutes); each era starts
- * from a fresh random scatter, so a (re)started instance replays at most two
- * eras of Lloyd steps to catch up.
+ * --epoch. Time runs in 200 s eras of five cycles (dissolve, two
+ * disturbances, text, untext; --schedule prints them); each era relaxes
+ * from a canonical random scatter, so a (re)started instance replays at most
+ * two eras of Lloyd steps to catch up and lands on exactly the frames a
+ * running one shows.
  *
  * Spanning (like flightsim): run one instance per monitor with the same
  * --seed, --epoch and --layout (every output's logical rect), and --output =
  * this one's index. The sites live in wall coordinates over the layout's
  * bounding box and every instance runs the same simulation, so the diagram is
- * one continuous sheet across the bezels; each draws just its own slice. The
+ * one continuous sheet across the bezels; each triangulates and draws just
+ * the sites within a few cells of its own slice. The
  * cell size comes from the "front" output (the one under the middle of the
  * layout), which also carries the caption and the time when it is drawn in
  * cells.
@@ -1560,7 +1572,8 @@ static const char *FS_CELL = GLSL(
             honey += vec3(0.45, 0.22, 0.0) * exp(-dot(p - s, p - s) / (0.05 * uSp * uSp)) * 0.5;
             float rim = (1.0 - smoothstep(hw, hw + 0.16 * uSp * cs, Ds)) * max(dot(G, normalize(vec2(0.6, 0.8))), 0.0);
             honey += vec3(1.0, 0.90, 0.60) * rim * 0.4;
-            float capped = step(kh(kk, 5.0), 0.16 + 0.6 * am * tA);
+            /* capped cells: a few at random; while text is up, exactly the small ones */
+            float capped = mix(step(kh(kk, 5.0), 0.16), smoothstep(0.55, 0.75, tA), am);
             vec3 cap = vec3(0.94, 0.80, 0.47) * (0.82 + 0.22 * depth) * (0.95 + 0.08 * vn(p / (uSp * 0.06)));
             vec3 cell = mix(honey, cap, capped);
             cell = mix(cell, cell * vec3(0.55, 0.40, 0.30), step(0.94, kh(kk, 8.0)) * (1.0 - capped));
