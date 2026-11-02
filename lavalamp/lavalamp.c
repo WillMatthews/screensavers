@@ -217,7 +217,7 @@ static const float box_min[3] = {-0.58f, -0.02f, -0.58f}, box_size[3] = {1.16f, 
 #define T_ROOM 0.06f
 #define T_NEUTRAL 0.47f                /* wax at this temperature neither rises nor sinks */
 #define T_MELT 0.30f
-#define WAX_V 0.30f                    /* all the wax there is (~11% of the lamp) */
+#define WAX_V 0.36f                   /* all the wax there is (~11% of the lamp) */
 #define Y_TOP (HG - 0.03f)
 
 typedef struct {
@@ -338,7 +338,7 @@ static void sim_step(void) {
     float h = pool_h(sim.Vpool);
 
     /* the pool: heated through the bottom, losing heat to the liquid */
-    sim.Tpool += DT * (0.0105f * hp * (1.0f - sim.Tpool) - 0.012f * (sim.Tpool - t_liquid(h * 0.5f, t)));
+    sim.Tpool += DT * (0.014f * hp * (1.0f - sim.Tpool) - 0.016f * (sim.Tpool - t_liquid(h * 0.5f, t)));
     for (int k = 0; k < 4; k++) sim.rip[k][2] += DT;
     if (sim.stub > 0) sim.stub = fmaxf(0, sim.stub - DT * (0.12f + 1.6f * sim.stub));
 
@@ -1150,6 +1150,8 @@ vec3 interior(vec3 p, vec3 d, float jit) {
     }
     float tex = t;
     vec3 tr = vec3(1.0), acc = vec3(0.0);
+    /* cold, the liquid is cloudy; it clears as it warms */
+    float cloud = 0.10 * (1.0 + 2.5 * (1.0 - uWarm) * (1.0 - uWarm));
     float tt = 0.0;
     float last = 1.0;
     for (int i = 0; i < 160; i++) {
@@ -1167,9 +1169,10 @@ vec3 interior(vec3 p, vec3 d, float jit) {
         ds = min(ds, tex - tt + 1e-3);
         if (i == 0) ds *= jit;
         vec3 e = E(q);
-        acc += tr * e * uSc * 0.10 * ds;
+        acc += tr * e * uSc * cloud * ds;
         if (uGlitter > 0.0) acc += tr * glint(q, d, ds, e);
-        tr *= exp(-uAbs * ds);
+        tr *= exp(-(uAbs + vec3(1.8 * (1.0 - uWarm) * (1.0 - uWarm))) * ds);
+
         last = ds;
         tt += ds;
     }
@@ -1485,9 +1488,9 @@ static void ensure_targets(void) {
         glDeleteTextures(NBLOOM, tex_bl); glDeleteFramebuffers(NBLOOM, fbo_bl);
     }
     rt_w = w; rt_h = h;
-    tex_hdr = mk_tex2d(w, h, GL_RGBA16F, GL_LINEAR);
+    tex_hdr = mk_tex2d(w, h, GL_R11F_G11F_B10F, GL_LINEAR);
     fbo_hdr = mk_fbo(tex_hdr);
-    tex_room = mk_tex2d(w, h, GL_RGBA16F, GL_NEAREST);
+    tex_room = mk_tex2d(w, h, GL_R11F_G11F_B10F, GL_NEAREST);
     fbo_room = mk_fbo(tex_room);
     room_at = -1e9;
     for (int i = 0; i < NBLOOM; i++) {
@@ -1495,7 +1498,7 @@ static void ensure_targets(void) {
         if (w < 1) w = 1;
         if (h < 1) h = 1;
         bl_w[i] = w; bl_h[i] = h;
-        tex_bl[i] = mk_tex2d(w, h, GL_RGBA16F, GL_LINEAR);
+        tex_bl[i] = mk_tex2d(w, h, GL_R11F_G11F_B10F, GL_LINEAR);
         fbo_bl[i] = mk_fbo(tex_bl[i]);
     }
 }
