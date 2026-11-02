@@ -204,7 +204,7 @@ static void gen_scene(int idx, Scene *s) {
         for (int k = 0; k <= pair && s->n < MAXDROP; k++) {
             Drop *d = &s->d[s->n++];
             d->t = t + k * frange(0.4f, 1.6f);
-            d->ink = pick_ink(last);
+            d->ink = s->n == 1 ? (frand() < 0.6f ? 0 : 1) : pick_ink(last);   /* open on a main ink */
             last = d->ink;
             /* the first near the middle; then somewhere not where the last one went in */
             float x = (lo + hi) / 2 + frange(-0.12f, 0.12f) * (hi - lo);
@@ -609,7 +609,7 @@ static const char *FS_SHOW = GLSL(
             }
         }
         /* the film's shoulder: bright ink rolls off rather than clipping */
-        col = mix(col, 0.75 + 0.25 * (1.0 - exp(-(col - 0.75) / 0.25)), step(0.75, col));
+        if (uDark == 1) col = mix(col, 0.75 + 0.25 * (1.0 - exp(-(col - 0.75) / 0.25)), step(0.75, col));
         /* a little lens: vignette and grain */
         vec2 vq = (q - vec2(uAspect * 0.5, 0.5)) / vec2(max(uAspect, 1.0), 1.0);
         col *= 1.0 - (uDark == 1 ? 0.25 : 0.12) * dot(vq, vq);
