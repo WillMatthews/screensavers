@@ -43,7 +43,18 @@
  * Same plumbing as gauges: Xlib + GLX for --window / --root, a native
  * wlr-layer-shell surface over EGL for --layer (swaylock-plugin), and
  * --shot FILE.ppm [--at SECONDS] [--size WxH] to render one frame offscreen.
- * --bench N times N frames offscreen at --size.
+ * --bench N times N frames offscreen at --size (LIBRARY_PROF=1: per stage).
+ *
+ * Also: --hour H pretends it's that local time of day (the light), --age N
+ * keeps one world in the book (0..4), --name NAME is who left the desk,
+ * --still holds the camera on the desk, --scale S fixes the render scale
+ * (else it tracks the frame budget), --fov DEG the horizontal angle across
+ * a spanned layout (default 100).
+ *
+ * The timeline: every 180 s the leaves turn (three of them, bending as
+ * they go) to the next world; the camera eases in towards the picture
+ * until it nearly fills the middle screen, holds, eases back, then drifts
+ * to look at two other corners of the room before coming back to the desk.
  *
  * Keys (window mode): q / Escape quit.
  */
@@ -304,8 +315,9 @@ static const char *ordinal_word[32] = {"", "first", "second", "third", "fourth",
 static const char *month_name[12] = {"January", "February", "March", "April", "May", "June", "July",
     "August", "September", "October", "November", "December"};
 static const char *day_name[7] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
-static const char *num_word[13] = {"no", "one", "two", "three", "four", "five", "six", "seven", "eight",
-    "nine", "ten", "eleven", "twelve"};
+static const char *num_word[24] = {"no", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+    "nineteen", "twenty", "twenty-one", "twenty-two", "twenty-three"};
 
 static void cat(char *dst, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void cat(char *dst, const char *fmt, ...) {
@@ -328,16 +340,15 @@ static void say_span(char *dst, double secs) {
     long h = m / 60;
     m %= 60;
     if (h < 24) {
-        if (h <= 12) cat(dst, "%s hour%s", num_word[h], h == 1 ? "" : "s");
-        else cat(dst, "%ld hours", h);
+        cat(dst, "%s hour%s", num_word[h], h == 1 ? "" : "s");
         if (m >= 5) cat(dst, " and %ld minutes", m);
         return;
     }
     long d = h / 24;
     h %= 24;
-    if (d <= 12) cat(dst, "%s day%s", num_word[d], d == 1 ? "" : "s");
+    if (d <= 23) cat(dst, "%s day%s", num_word[d], d == 1 ? "" : "s");
     else cat(dst, "%ld days", d);
-    if (h) cat(dst, " and %s hour%s", h <= 12 ? num_word[h] : "many", h == 1 ? "" : "s");
+    if (h) cat(dst, " and %s hour%s", num_word[h], h == 1 ? "" : "s");
 }
 
 /* The heading (date) goes in head; the entry's paragraphs in body, split
@@ -1327,7 +1338,7 @@ static void desk_build(void) {
         float r[] = {0.044f, 0.05f, 0.05f, 0.044f}, y[] = {0.462f, 0.462f, 0.475f, 0.475f};
         lathe(r, y, 4, 24, 0, 2 * PI);
     }
-    lamp_pos = m4_pt(&D, v3(lp.x, lp.y + 0.54f, lp.z));
+    lamp_pos = m4_pt(&D, v3(lp.x, lp.y + 0.62f, lp.z));
 
     /* tea, going cold */
     V3 cp = v3(0.6f, top, 0.16f);
@@ -1531,6 +1542,9 @@ static void room_build(void) {
     shelf_run(-22.5f * DEG, 19.4f * DEG, 1001 + opt_seed * 7);
     shelf_run(104.6f * DEG, 172 * DEG, 2002 + opt_seed * 7);
     shelf_run(-172 * DEG, -57.5f * DEG, 3003 + opt_seed * 7);
+    /* narrow presses between the windows */
+    shelf_run(39.6f * DEG, 52.4f * DEG, 4004 + opt_seed * 7);
+    shelf_run(71.6f * DEG, 84.4f * DEG, 5005 + opt_seed * 7);
     /* a brass rail along the shelves behind the desk, for the ladder */
     mat(MT_BRASS, 0.7f, 0.5f, 0.24f);
     for (int k = 0; k < 40; k++) {
@@ -1715,15 +1729,17 @@ float key_shadow(vec3 p, vec3 n) {
     if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0) return 1.0;
     float s = 0.0;
     vec2 t = vec2(1.0 / 2048.0);
-    s += texture(uKeySh, vec3(c.xy + t * vec2(-0.7, -0.4), c.z));
-    s += texture(uKeySh, vec3(c.xy + t * vec2(0.6, -0.7), c.z));
-    s += texture(uKeySh, vec3(c.xy + t * vec2(-0.5, 0.7), c.z));
-    s += texture(uKeySh, vec3(c.xy + t * vec2(0.7, 0.5), c.z));
-    return s * 0.25;
+    s += texture(uKeySh, vec3(c.xy + t * vec2(-0.6, -0.3), c.z));
+    s += texture(uKeySh, vec3(c.xy + t * vec2(0.6, 0.3), c.z));
+    return s * 0.5;
+}
+float pt_shadow1(samplerCubeShadow sh, vec3 lp, vec3 p, vec3 n) {
+    vec3 v = p + n * 0.01 - lp;
+    return texture(sh, vec4(v, cube_ref(v) - 0.0015 - 0.002 * length(v)));
 }
 float pt_shadow(samplerCubeShadow sh, vec3 lp, vec3 p, vec3 n) {
     vec3 v = p + n * 0.01 - lp;
-    float d = length(v), bias = 0.0015 + 0.002 * d;
+    float d = length(v), bias = 0.003 + 0.003 * d;
     vec3 t1 = normalize(cross(v, abs(v.y) < 0.9 * d ? vec3(0, 1, 0) : vec3(1, 0, 0))), t2 = normalize(cross(v, t1));
     float r = 0.01 * d, s = 0.0, ref = cube_ref(v) - bias;
     s += texture(sh, vec4(v + (t1 + t2 * 0.5) * r, ref));
@@ -1834,6 +1850,7 @@ void main() {
     s.alb = vC; s.rough = 0.6; s.metal = 0.0; s.emis = vec3(0); s.n = n; s.spec = 0.04; s.wrap = 0.0;
     float ao_mul = 1.0, clearcoat = 0.0;
     int m = vMat;
+    if (uDebug == 9) { oCol = vec4(vC * max(dot(n, vec3(0.3, 0.8, 0.5)), 0.1), 1.0); return; }
     if (m == 19) {                                         /* the sky */
         vec3 d = normalize(p - uCam);
         vec3 c = outside(d);
@@ -2001,10 +2018,14 @@ void main() {
         c = mix(c, ind * 1.5, (1.0 - smoothstep(0.03, 0.05, abs(fl - 0.2))) * 0.5);
         /* the medallion: an eight-pointed star */
         float star = 0.48 + 0.07 * cos(a * 8.0);
+        if (r < star + 0.02) c = ivo * 0.8;
         if (r < star) c = ind;
-        if (r < star - 0.05) c = mix(ivo * 0.8, gold, smoothstep(0.3, 0.7, n2(vec2(a * 2.0, r * 3.0))));
-        if (r < 0.26) c = mad;
-        if (r < 0.1) c = ind;
+        float petals = 0.3 + 0.05 * cos(a * 16.0);
+        if (r < star - 0.06) c = mix(ind, grn, 0.5);
+        if (r < petals) c = mad * 1.1;
+        if (abs(r - petals) < 0.012) c = gold;
+        if (r < 0.1) c = gold * 0.8;
+        if (r < 0.06) c = ind;
         /* borders */
         if (r > 1.36) c = gold;
         if (r > 1.4) {
@@ -2083,11 +2104,9 @@ void main() {
     }
 
     /* ambient occlusion from the voxelised room */
-    vec3 aq = (p + s.n * 0.1 + vec3(5.8, 0.0, 5.8)) / vec3(11.6, 10.0, 11.6);
+    vec3 aq = (p + s.n * 0.16 + vec3(5.8, 0.0, 5.8)) / vec3(11.6, 10.0, 11.6);
     float occ = texture(uAO, aq).r;
-    vec3 aq2 = (p + s.n * 0.3 + vec3(5.8, 0.0, 5.8)) / vec3(11.6, 10.0, 11.6);
-    float occ2 = texture(uAO, aq2).r;
-    float ao = clamp(1.0 / (1.0 + 6.0 * max(occ - 0.03, 0.0)) * (1.0 / (1.0 + 3.0 * max(occ2 - 0.03, 0.0))), 0.08, 1.0) * ao_mul;
+    float ao = clamp(1.0 / (1.0 + 9.0 * max(occ - 0.03, 0.0)), 0.08, 1.0) * ao_mul;
 
     vec3 col = vec3(0);
     /* the sun or the moon, through the windows */
@@ -2122,7 +2141,8 @@ void main() {
         float cs = max((dot(s.n, L) + 0.25) / 1.25, 0.0), cw = max(dot(wn, -L), 0.0);
         E += uWinL * uWinC[i].w * cs * cw / (PI * (d2 + uWinC[i].w * 0.3));
     }
-    vec3 hemi = mix(uGndAmb, uSkyAmb, s.n.y * 0.5 + 0.5) + uBounce;
+    vec3 hemi = mix(uGndAmb, uSkyAmb, s.n.y * 0.5 + 0.5) + uBounce
+              + uFireCol * 0.012 + uLampCol * uLampOn * 0.02;
     col += diffc * (E + hemi) * ao;
     /* a little sheen of the window light on metal and varnish */
     vec3 R = reflect(-V, s.n);
@@ -2476,8 +2496,8 @@ void main() {
     float wet = 1.0 - smoothstep(vK.x + vK.y, vK.x + vK.y + 7.0, uT);
     float a = cov * rev * vK.w;
     if (uWet == 1) { oCol = vec4(0, 0, 0, a * wet); return; }
-    vec3 dry = vec3(0.15, 0.09, 0.05), fresh = vec3(0.03, 0.035, 0.08);
-    oCol = vec4(mix(dry, fresh, wet), a * mix(0.88, 1.0, wet));
+    vec3 dry = vec3(0.09, 0.055, 0.03), fresh = vec3(0.02, 0.025, 0.06);
+    oCol = vec4(mix(dry, fresh, wet), min(a * 1.15, 1.0));
 }
 );
 
@@ -3014,7 +3034,7 @@ static GLuint tex_noise, tex_noise3, tex_ao, tex_atlas;
 #define KEY_SM 2048
 static GLuint tex_keysh, fbo_keysh;
 #define FIRE_SM 512
-#define LAMP_SM 512
+#define LAMP_SM 1024
 static GLuint tex_firesh, tex_lampsh;
 #define PW 1024
 #define PH 1434
@@ -3279,7 +3299,7 @@ static void sky_light(double wt) {
     if (s > -0.03f) { lt.key_dir = lt.sun_dir; lt.key_col = lt.sun_col; }
     else if (mel > 0.03f) {
         lt.key_dir = lt.moon_dir;
-        lt.key_col = vmul(v3(0.45f, 0.55f, 0.85f), 0.5f * lt.moon_phase * smoothf(0.03f, 0.2f, sinf(mel)) * (1 - twi * 0.8f));
+        lt.key_col = vmul(v3(0.42f, 0.52f, 0.85f), 0.3f * lt.moon_phase * smoothf(0.03f, 0.2f, sinf(mel)) * (1 - twi * 0.8f));
     } else { lt.key_dir = v3(0, 1, 0); lt.key_col = v3(0, 0, 0); }
     /* light through the windows and about the room */
     V3 sky = vlerp(lt.sky_hor, lt.sky_zen, 0.35f);
@@ -3650,17 +3670,21 @@ static Shot camera_at(double t) {
     /* a second, nearer home for variety */
     Shot home2 = home;
     home2.eye = vadd(home.eye, v3(-0.55f, 0.08f, -0.35f));
+    /* the leaves turn while we stand at the desk's edge */
+    Shot turn = shot_lerp(home, close, 0.5f);
+    turn.at = vlerp(home.at, panel_c, 0.6f);
+    turn.at.x -= 0.1f;
     Shot s;
-    if (u < 4) s = home;
-    else if (u < 26) s = shot_lerp(home, close, ease((u - 4) / 22));
+    if (u < 5) s = turn;
+    else if (u < 26) s = shot_lerp(turn, close, ease((u - 5) / 21));
     else if (u < 38) s = shot_lerp(close, deep, ease((u - 26) / 12));
     else if (u < 60) s = shot_lerp(deep, home2, ease((u - 38) / 22));
     else if (u < 92) s = shot_lerp(home2, wander[wa], ease_soft((u - 60) / 32));
     else if (u < 104) s = wander[wa];
     else if (u < 134) s = shot_lerp(wander[wa], wander[wb], ease_soft((u - 104) / 30));
     else if (u < 144) s = wander[wb];
-    else if (u < 172) s = shot_lerp(wander[wb], home, ease((u - 144) / 28));
-    else s = home;
+    else if (u < 164) s = shot_lerp(wander[wb], home, ease((u - 144) / 20));
+    else s = shot_lerp(home, turn, ease((u - 164) / 14));
     /* breathing: the slightest drift */
     float k = 1.0f - 0.85f * (u > 20 && u < 44 ? 1.0f : 0.0f);
     s.eye = vadd(s.eye, vmul(v3(sinf((float)t * 0.13f), sinf((float)t * 0.09f + 1) * 0.6f, sinf((float)t * 0.07f + 2)), 0.025f * k));
@@ -3793,6 +3817,7 @@ static void gl_init(void) {
         fbo_age[i] = mk_fbo(tex_age[i], 0);
     }
     glGetError();
+    if (getenv("LIBRARY_DEBUG")) fprintf(stderr, "library: room %d vertices, %d triangles\n", mesh.nv, mesh.ni / 3);
 }
 
 /* the picture in the book, sized to how big it is on screen */
@@ -3835,7 +3860,7 @@ static void set_scene_uniforms(GLuint p, double t, float flick) {
     glUniform3f(U(p, "uFirePos"), fire_pos.x, fire_pos.y + 0.02f * sinf((float)t * 5.1f), fire_pos.z);
     glUniform3f(U(p, "uFireCol"), fc.x, fc.y, fc.z);
     float lf = 1.0f + 0.02f * sinf((float)t * 9.0f) * sinf((float)t * 2.3f);
-    V3 lc = vmul(v3(1.0f, 0.66f, 0.34f), 0.55f * lf);
+    V3 lc = vmul(v3(1.0f, 0.66f, 0.34f), 0.42f * lf);
     glUniform3f(U(p, "uLampPos"), lamp_pos.x, lamp_pos.y, lamp_pos.z);
     glUniform3f(U(p, "uLampCol"), lc.x, lc.y, lc.z);
     float wc[NWIN][4];
@@ -3883,6 +3908,11 @@ static void render(double t, double wt, GLuint target) {
 
     /* the camera */
     Shot s = camera_at(t);
+    /* spanning, the wall is wide and short: look a little higher, so the
+     * windows and the shelves' upper rows come into the side screens */
+    if (span_me >= 0) { s.at.y += 0.12f; s.eye.y += 0.05f; }
+    /* a tall screen: less rug, more shelves */
+    else if (H > W) s.at.y += 0.45f * (1.0f - (float)W / H);
     if (getenv("LIBRARY_CAM")) sscanf(getenv("LIBRARY_CAM"), "%f,%f,%f,%f,%f,%f", &s.eye.x, &s.eye.y, &s.eye.z, &s.at.x, &s.at.y, &s.at.z);
     cam_eye = s.eye;
     float l = (view_x - cam_cx) / cam_f, r = (view_x + view_w - cam_cx) / cam_f;
@@ -4353,7 +4383,7 @@ int main(int argc, char **argv) {
     }
 
     double t0 = now();
-    render_scale = opt_scale > 0 ? opt_scale : 0.8f;
+    render_scale = opt_scale > 0 ? opt_scale : 0.7f;
     double avg = 1.0 / 60, last_change = 0;
     for (;;) {
         if (opt_layer && !wl_poll()) return 0;
@@ -4381,9 +4411,9 @@ int main(int argc, char **argv) {
         if (frame_no > 10) avg += (took - avg) * 0.1;
         if (opt_scale <= 0 && frame_no > 30 && t - last_change > 0.5) {
             float s = render_scale;
-            if (avg > 0.0085) s *= 0.92f;
-            else if (avg < 0.005) s *= 1.05f;
-            s = clampf(s, 0.45f, 1.0f);
+            if (avg > 0.0055) s *= 0.92f;
+            else if (avg < 0.0035) s *= 1.04f;
+            s = clampf(s, 0.5f, 1.0f);
             if (fabsf(s - render_scale) > 0.02f) { render_scale = s; last_change = t; avg = 1.0 / 150; }
         }
         double spare = 1.0 / opt_fps - (now() - t);
