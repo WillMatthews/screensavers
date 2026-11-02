@@ -699,7 +699,7 @@ static const char *FS_FILM = GLSL(
             vec2 uv = (q + uFrame.zw) / (2.0 * uFrame.zw);
             float h = max(hTex(uv), 0.0);
             /* the meniscus up against the wire, and at the edge being drawn up */
-            h += 3.5 * exp(-max(inner, 0.0) / 0.004);
+            h += 3.0 * exp(-max(inner, 0.0) / 0.0022);
             float dw = uWipe - P.y;
             h += 3.5 * exp(-max(dw, 0.0) / 0.0035);
             float cov = clamp(inner / px + 0.5, 0.0, 1.0) * clamp(dw / px + 0.5, 0.0, 1.0);
@@ -961,13 +961,15 @@ static const char *FS_DOWN = GLSL(
     uniform float uFocus, uAperture, uPxW, uMaxC;
     out vec4 o;
     void main() {
-        vec2 uv = gl_FragCoord.xy * 2.0 * uSrc;
-        vec3 c = texture(uCol, uv).rgb;
+        vec2 uv = gl_FragCoord.xy * 3.0 * uSrc;
+        vec2 e = uSrc * 0.75;
+        vec3 c = 0.25 * (texture(uCol, uv + vec2(-e.x, -e.y)).rgb + texture(uCol, uv + vec2(e.x, -e.y)).rgb +
+                         texture(uCol, uv + vec2(-e.x, e.y)).rgb + texture(uCol, uv + vec2(e.x, e.y)).rgb);
         vec2 d = texture(uDep, uv).rg;
         float z = d.x / max(d.y, 1e-6);
         /* signed: far +, near -, in half-res pixels */
         float coc = uAperture * (z - uFocus) / max(z, 0.05) / uPxW;
-        o = vec4(c, clamp(coc, -uMaxC, uMaxC));
+        o = vec4(c, clamp(coc, -uMaxC, uMaxC));   /* in this pass's pixels */
     });
 
 static const char *FS_DOF = GLSL(
@@ -977,18 +979,20 @@ static const char *FS_DOF = GLSL(
     out vec4 o;
     void main() {
         vec2 uv = gl_FragCoord.xy * uTx;
-        vec4 c0 = texture(uHalf, uv);
+        vec4 c0 = textureLod(uHalf, uv, 0.0);
         float cs = abs(c0.a);
         vec3 acc = c0.rgb;
-        float tot = 1.0, rad = 0.75;
-        for (float ang = 0.0; rad < uMaxC; ang += 2.39996323) {
-            vec4 s = texture(uHalf, uv + vec2(cos(ang), sin(ang)) * uTx * rad);
+        float tot = 1.0, rad = 1.0;
+        /* only as far out as anything near here is blurred */
+        float reach = min(uMaxC, max(cs, max(abs(textureLod(uHalf, uv, 2.0).a), abs(textureLod(uHalf, uv, 4.0).a)) * 2.5) + 1.0);
+        for (float ang = 0.0; rad < reach; ang += 2.39996323) {
+            vec4 s = textureLod(uHalf, uv + vec2(cos(ang), sin(ang)) * uTx * rad, 0.0);
             float ss = abs(s.a);
             if (s.a > c0.a) ss = clamp(ss, 0.0, cs * 2.0);
             float m = smoothstep(rad - 0.5, rad + 0.5, ss);
             acc += mix(acc / tot, s.rgb, m);
             tot += 1.0;
-            rad += 0.75 / rad;
+            rad += 0.9 / rad;
         }
         o = vec4(acc / tot, cs);
     });
@@ -1008,8 +1012,8 @@ static const char *FS_FINAL = GLSL(
         vec2 uv = gl_FragCoord.xy / uRes;
         vec3 sharp = texture(uCol, uv).rgb;
         vec4 dof = texture(uDofT, uv);
-        vec3 c = mix(sharp, dof.rgb, smoothstep(0.35, 1.1, dof.a));
-        vec3 bl = textureLod(uDofT, uv, 3.0).rgb * 0.5 + textureLod(uDofT, uv, 5.0).rgb * 0.5;
+        vec3 c = mix(sharp, dof.rgb, smoothstep(0.3, 0.9, dof.a));
+        vec3 bl = textureLod(uDofT, uv, 2.0).rgb * 0.5 + textureLod(uDofT, uv, 4.0).rgb * 0.5;
         c += bl * 0.035;
         c *= uExpo;
         /* vignette, over the whole wall */
@@ -1056,7 +1060,7 @@ static GLuint scene_fbo, scene_col, scene_dep;
 static RT half_rt, dof_rt;
 
 static void scene_targets(void) {
-    float s = opt_scale > 0 ? opt_scale : fminf(1.0f, sqrtf(1.15e6f / ((float)W * H)));
+    float s = opt_scale > 0 ? opt_scale : fminf(1.0f, sqrtf(1.0e6f / ((float)W * H)));
     int iw = (int)lroundf(W * s), ih = (int)lroundf(H * s);
     if (iw == IW && ih == IH && scene_fbo) return;
     IW = iw; IH = ih;
@@ -1082,8 +1086,8 @@ static void scene_targets(void) {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, scene_dep, 0);
     static const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     glDrawBuffers(2, bufs);
-    rt_make(&half_rt, (IW + 1) / 2, (IH + 1) / 2, GL_RGBA16F, GL_LINEAR, 0);
-    rt_make(&dof_rt, (IW + 1) / 2, (IH + 1) / 2, GL_RGBA16F, GL_LINEAR, 1);
+    rt_make(&half_rt, (IW + 2) / 3, (IH + 2) / 3, GL_RGBA16F, GL_LINEAR, 1);
+    rt_make(&dof_rt, (IW + 2) / 3, (IH + 2) / 3, GL_RGBA16F, GL_LINEAR, 1);
 }
 
 /* the view: wall units are wall heights, y up, origin at the wall's bottom left */
@@ -1349,8 +1353,12 @@ static struct {
 
 #define BUB_D 1.7f                     /* the eye's distance from the screen plane */
 
-static float vis_hw(float z) { return wallA * 0.5f * (BUB_D + z) / BUB_D; }
-static float vis_hh(float z) { return 0.5f * (BUB_D + z) / BUB_D; }
+/* the wall seen through at depth z: x0, x1, y0, y1 */
+static void vis(float z, float *v) {
+    float k = (BUB_D + z) / BUB_D;
+    v[0] = eye_x - eye_x * k; v[1] = eye_x + (wallA - eye_x) * k;
+    v[2] = eye_y - eye_y * k; v[3] = eye_y + (1 - eye_y) * k;
+}
 
 static void air(const float *p, float t, float *v) {
     v[0] = 0.022f; v[1] = 0.003f; v[2] = 0;
@@ -1362,7 +1370,7 @@ static void air(const float *p, float t, float *v) {
 }
 
 static int bub_count(void) { int n = 0; for (int i = 0; i < NB; i++) n += bs.b[i].on; return n; }
-static int bub_target(void) { return (int)lroundf(8.5f * wallA) + 3; }
+static int bub_target(void) { return (int)lroundf(11.0f * wallA) + 6; }
 
 static void bub_new(Bub *b, float t, int entering) {
     memset(b, 0, sizeof *b);
@@ -1372,14 +1380,19 @@ static void bub_new(Bub *b, float t, int entering) {
     float z = frange(-0.3f, 1.6f);
     if (frand() < 0.18f) z = frange(1.6f, 3.2f);       /* some far off, small in the dark */
     b->p[2] = z;
-    float hw = vis_hw(z), hh = vis_hh(z);
-    if (entering) {
+    float v[4];
+    vis(z, v);
+    if (entering && frand() < 0.35f) {
+        /* drifting down from above */
+        b->p[0] = v[0] + (v[1] - v[0]) * frange(0.05f, 0.8f);
+        b->p[1] = v[3] + b->r * 1.2f;
+    } else if (entering) {
         /* blown in from the left */
-        b->p[0] = eye_x - hw - b->r * 1.2f;
-        b->p[1] = 0.5f + frange(-0.8f, 0.8f) * hh;
+        b->p[0] = v[0] - b->r * 1.2f;
+        b->p[1] = v[2] + (v[3] - v[2]) * frange(0.1f, 0.9f);
     } else {
-        b->p[0] = eye_x + frange(-1, 1) * hw;
-        b->p[1] = 0.5f + frange(-0.85f, 0.85f) * hh;
+        b->p[0] = v[0] + (v[1] - v[0]) * frand();
+        b->p[1] = v[2] + (v[3] - v[2]) * frange(0.08f, 0.92f);
     }
     b->v[0] = frange(0.01f, 0.04f); b->v[1] = frange(-0.01f, 0.012f);
     b->born = t - (entering ? 0 : frange(0, 30));
@@ -1449,8 +1462,9 @@ static void bubbles_step(void) {
             continue;
         }
         /* drifted out of sight */
-        float hw = vis_hw(b->p[2]), hh = vis_hh(b->p[2]);
-        if (b->p[0] > eye_x + hw + b->r * 1.5f || b->p[1] > 0.5f + hh + b->r * 2 || b->p[1] < 0.5f - hh - b->r * 2 ||
+        float v[4];
+        vis(b->p[2], v);
+        if (b->p[0] > v[1] + b->r * 1.5f || b->p[1] > v[3] + b->r * 2 || b->p[1] < v[2] - b->r * 2 ||
             b->p[2] < -0.9f || b->p[2] > 4.0f) { unlink_bub(i); b->on = 0; }
     }
     /* forget old pops */
@@ -1492,7 +1506,7 @@ static void bubbles_step(void) {
         if (bub_count() < bub_target())
             for (int i = 0; i < NB; i++)
                 if (!bs.b[i].on) { bub_new(&bs.b[i], t, 1); break; }
-        bs.next_spawn = t + frange(1.5f, 5.0f);
+        bs.next_spawn = t + frange(0.8f, 3.5f) * 1.6f / fmaxf(wallA, 0.6f);
     }
     bs.rng = rng;
     bs.steps++;
@@ -1560,6 +1574,423 @@ static void mist_bubbles(float t) {
         }
     }
     rng = save;
+}
+
+static float dof_focus, dof_aperture;
+static void bind_scene_tex(void);
+
+/* ================= foam =================
+ * A raft of bubbles pressed into cells, seen from above: a power diagram
+ * (Laguerre cells; centres and weights) kept close to a relaxed foam by
+ * rasterising it coarsely on the CPU a few times a second (each cell moves
+ * to its centroid, its weight chases its target area, neighbours are
+ * counted), coarsening by von Neumann's law dA/dt = k (n - 6), with films
+ * between cells rupturing (the border retracts to its ends and the two
+ * merge) and caps bursting (the cell opens and its neighbours close in).
+ * On the GPU each pixel finds its cell and nearest border among the cells
+ * binned near it: the face is a shallow dome of film, the border a glassy
+ * Plateau border, wider at the junctions. */
+#define NCELL 900
+#define FOAMHZ 6
+#define FBIN 0.08f
+#define FBCAP 48
+typedef struct {
+    int on;
+    float x, y, w, target, area, cx, cy;
+    float px, py, pw;                  /* before the last step, to glide from */
+    float born, h0, seed;
+    int partner;                       /* ruptured into this one (-1 none) */
+    float rup_t;                       /* when the film between them broke */
+    float burst_t;                     /* when its cap burst (< 0 never) */
+    int nn;
+} Cell;
+static struct {
+    int act;
+    long steps;
+    uint32_t rng;
+    float x0, y0, x1, y1;              /* the simulated domain (wall units) */
+    int n;
+    float next_rup, next_burst;
+    Cell c[NCELL];
+} fo = {.act = -1};
+#define RUPD 0.35f                     /* a border retracting */
+#define BURSTD 0.45f                   /* a cap opening */
+
+static int *fbin;                      /* the CPU raster's bins: FBCAP ids each */
+static int fbx, fby, fbin_over;
+#define FST 0.011f                     /* the CPU raster's spacing */
+static int fo_nb[NCELL][16], fo_nnb[NCELL], fo_gw, fo_gh, fo_own_dirty;
+static float *fo_own;
+
+static void foam_bins(float grow) {
+    fbx = (int)ceilf((fo.x1 - fo.x0) / FBIN); fby = (int)ceilf((fo.y1 - fo.y0) / FBIN);
+    fbin = realloc(fbin, sizeof(int) * (size_t)fbx * fby * FBCAP);
+    for (int i = 0; i < fbx * fby * FBCAP; i++) fbin[i] = -1;
+    for (int i = 0; i < fo.n; i++) {
+        Cell *c = &fo.c[i];
+        if (!c->on) continue;
+        float a = fmaxf(fmaxf(c->area, c->target), fminf(c->w * PI, 3 * fmaxf(c->area, c->target)));
+        float r = sqrtf(fmaxf(a / PI, 1e-5f)) * grow + 0.012f;
+        int bx0 = (int)floorf((c->x - r - fo.x0) / FBIN), bx1 = (int)floorf((c->x + r - fo.x0) / FBIN);
+        int by0 = (int)floorf((c->y - r - fo.y0) / FBIN), by1 = (int)floorf((c->y + r - fo.y0) / FBIN);
+        for (int by = by0 < 0 ? 0 : by0; by <= by1 && by < fby; by++)
+            for (int bx = bx0 < 0 ? 0 : bx0; bx <= bx1 && bx < fbx; bx++) {
+                /* the bin's nearest point to the centre */
+                float qx = clampf(c->x, fo.x0 + bx * FBIN, fo.x0 + (bx + 1) * FBIN), qy = clampf(c->y, fo.y0 + by * FBIN, fo.y0 + (by + 1) * FBIN);
+                if ((qx - c->x) * (qx - c->x) + (qy - c->y) * (qy - c->y) > r * r) continue;
+                int *b = fbin + (by * fbx + bx) * FBCAP;
+                int k = 0;
+                while (k < FBCAP && b[k] >= 0) k++;
+                if (k < FBCAP) b[k] = i;
+                else fbin_over++;
+            }
+    }
+}
+
+static int foam_owner(float x, float y) {
+    int bx = (int)((x - fo.x0) / FBIN), by = (int)((y - fo.y0) / FBIN);
+    if (bx < 0 || by < 0 || bx >= fbx || by >= fby) return -1;
+    int *b = fbin + (by * fbx + bx) * FBCAP, best = -1;
+    float bd = 1e9f;
+    for (int k = 0; k < FBCAP && b[k] >= 0; k++) {
+        Cell *c = &fo.c[b[k]];
+        float d = (x - c->x) * (x - c->x) + (y - c->y) * (y - c->y) - c->w;
+        if (d < bd) { bd = d; best = b[k]; }
+    }
+    return best;
+}
+
+static float foam_rm(void) { return 0.052f; }
+
+static void foam_init(int act, uint32_t seed) {
+    memset(&fo, 0, sizeof fo);
+    fo.act = act;
+    rng = mix32(seed ^ 0xf0a3U);
+    float m = 0.1f;
+    fo.x0 = -m; fo.y0 = -m; fo.x1 = wallA + m; fo.y1 = 1 + m;
+    float rm = foam_rm(), area = (fo.x1 - fo.x0) * (fo.y1 - fo.y0);
+    int n = (int)(area / (PI * rm * rm * 0.92f));
+    if (n > NCELL) n = NCELL;
+    fo.n = n;
+    for (int i = 0; i < n; i++) {
+        Cell *c = &fo.c[i];
+        c->on = 1;
+        c->x = frange(fo.x0, fo.x1); c->y = frange(fo.y0, fo.y1);
+        float s = expf(frange(-0.6f, 0.6f));             /* a spread of sizes */
+        c->target = PI * rm * rm * s * s;
+        c->w = c->target / PI * 0.5f;
+        c->area = c->target;
+        c->born = -frange(0, 60);
+        c->h0 = frange(0.18f, 0.5f);
+        c->seed = frand() * 40;
+        c->partner = -1;
+        c->burst_t = -1;
+    }
+    fo.next_rup = frange(1, 3);
+    fo.next_burst = frange(2, 5);
+    fo.rng = rng;
+}
+
+/* one relaxation and coarsening step (dt = 1 / FOAMHZ) */
+static void foam_step(int prewarm) {
+    float dt = 1.0f / FOAMHZ, t = (float)fo.steps / FOAMHZ;
+    rng = fo.rng;
+    foam_bins(2.0f);
+    /* rasterise: areas, centroids, neighbours */
+    static float sa[NCELL], sx[NCELL], sy[NCELL];
+    int (*nb)[16] = fo_nb, *nnb = fo_nnb;
+    for (int i = 0; i < fo.n; i++) { fo.c[i].px = fo.c[i].x; fo.c[i].py = fo.c[i].y; fo.c[i].pw = fo.c[i].w; }
+    memset(sa, 0, sizeof sa); memset(sx, 0, sizeof sx); memset(sy, 0, sizeof sy); memset(fo_nnb, 0, sizeof fo_nnb);
+    float st = FST;
+    int gw = (int)((fo.x1 - fo.x0) / st), gh = (int)((fo.y1 - fo.y0) / st);
+    if (gw > 1024) gw = 1024;
+    fo_gw = gw; fo_gh = gh;
+    fo_own = realloc(fo_own, sizeof(float) * (size_t)gw * gh);
+    static int row[2][1024];
+    for (int gy = 0; gy < gh; gy++) {
+        int *cur = row[gy & 1], *prev = row[(gy & 1) ^ 1];
+        for (int gx = 0; gx < gw && gx < 1024; gx++) {
+            float x = fo.x0 + (gx + 0.5f) * st, y = fo.y0 + (gy + 0.5f) * st;
+            int o = foam_owner(x, y);
+            cur[gx] = o;
+            fo_own[gy * gw + gx] = (float)o;
+            if (o < 0) continue;
+            sa[o] += 1; sx[o] += x; sy[o] += y;
+            int others[2] = {gx ? cur[gx - 1] : -1, gy ? prev[gx] : -1};
+            for (int k = 0; k < 2; k++) {
+                int q = others[k];
+                if (q < 0 || q == o) continue;
+                int seen = 0;
+                for (int m = 0; m < nnb[o]; m++) seen |= nb[o][m] == q;
+                if (!seen && nnb[o] < 16) nb[o][nnb[o]++] = q;
+                seen = 0;
+                for (int m = 0; m < nnb[q]; m++) seen |= nb[q][m] == o;
+                if (!seen && nnb[q] < 16) nb[q][nnb[q]++] = o;
+            }
+        }
+    }
+    float mean = 0;
+    int live = 0;
+    for (int i = 0; i < fo.n; i++) {
+        Cell *c = &fo.c[i];
+        if (!c->on) continue;
+        c->nn = nnb[i];
+        c->area = sa[i] * st * st;
+        if (sa[i] > 0) { c->cx = sx[i] / sa[i]; c->cy = sy[i] / sa[i]; } else { c->cx = c->x; c->cy = c->y; }
+        mean += c->target; live++;
+    }
+    mean /= live ? live : 1;
+    for (int i = 0; i < fo.n; i++) {
+        Cell *c = &fo.c[i];
+        if (!c->on) continue;
+        /* Lloyd, and the weight after the target area */
+        float k = prewarm ? 0.6f : 0.25f;
+        c->x += (c->cx - c->x) * k; c->y += (c->cy - c->y) * k;
+        c->x = clampf(c->x, fo.x0, fo.x1); c->y = clampf(c->y, fo.y0, fo.y1);
+        int dying = (c->partner >= 0 && t > c->rup_t + RUPD) || (c->burst_t >= 0 && t > c->burst_t + BURSTD);
+        if (dying) c->w -= dt * (c->partner >= 0 ? 0.004f : 0.0025f) * (mean / 0.009f);
+        else {
+            c->w += (c->target - c->area) / PI * (prewarm ? 0.7f : 0.35f);
+            if (c->w < 1e-5f) c->w = 1e-5f;
+        }
+        /* von Neumann */
+        if (!prewarm && c->partner < 0 && c->burst_t < 0) c->target += 0.00006f * (c->nn - 6) * dt * (mean / 0.009f);
+        /* merged away, burst, or shrunk to nothing */
+        if (dying) c->target *= expf(-dt / 0.6f);
+        if (dying && (c->area < mean * 0.03f || c->w < -mean * 2.0f)) {
+            c->on = 0;
+            for (int j = 0; j < fo.n; j++) if (fo.c[j].partner == i) fo.c[j].partner = -1;
+        }
+    }
+    /* a film breaks between two neighbours: they become one */
+    if (!prewarm && t >= fo.next_rup) {
+        for (int tries = 0; tries < 20; tries++) {
+            int i = irange(0, fo.n - 1);
+            Cell *c = &fo.c[i];
+            if (!c->on || c->partner >= 0 || c->burst_t >= 0 || !nnb[i]) continue;
+            int j = nb[i][irange(0, nnb[i] - 1)];
+            Cell *d = &fo.c[j];
+            if (!d->on || d->partner >= 0 || d->burst_t >= 0) continue;
+            int busy = 0;
+            for (int q = 0; q < fo.n; q++) busy |= fo.c[q].on && (fo.c[q].partner == i || fo.c[q].partner == j);
+            if (busy) continue;
+            /* the smaller is absorbed by the larger */
+            if (c->target > d->target) { Cell *s = c; c = d; d = s; int x = i; i = j; j = x; }
+            c->partner = j; c->rup_t = t;
+            d->target += c->target;
+            break;
+        }
+        fo.next_rup = t + frange(1.5f, 4.0f) / fmaxf(wallA / 1.6f, 0.6f);
+    }
+    /* a cap bursts */
+    if (!prewarm && t >= fo.next_burst) {
+        for (int tries = 0; tries < 20; tries++) {
+            int i = irange(0, fo.n - 1);
+            Cell *c = &fo.c[i];
+            if (!c->on || c->partner >= 0 || c->burst_t >= 0) continue;
+            if (c->x < eye_x - wallA * 0.5f || c->x > eye_x + wallA * 0.5f) continue;
+            int busy = 0;
+            for (int q = 0; q < fo.n; q++) busy |= fo.c[q].on && fo.c[q].partner == i;
+            if (busy) continue;
+            c->burst_t = t;
+            /* its share goes to the neighbours */
+            for (int k = 0; k < nnb[i]; k++) fo.c[nb[i][k]].target += c->target / nnb[i];
+            break;
+        }
+        fo.next_burst = t + frange(3.0f, 7.0f) / fmaxf(wallA / 1.6f, 0.6f);
+    }
+    fo.rng = rng;
+    fo_own_dirty = 1;
+    if (!prewarm) fo.steps++;
+}
+
+static GLuint tex_cells, tex_fbin;
+static float *cell_buf;
+
+static void foam_upload(float t, float frac) {
+    if (!cell_buf) cell_buf = malloc(sizeof(float) * NCELL * 28);
+    memset(cell_buf, 0, sizeof(float) * NCELL * 28);
+    /* between steps the cells glide from where they were to where they're going */
+    for (int i = 0; i < fo.n; i++) {
+        Cell *c = &fo.c[i];
+        float *o = cell_buf + i * 28;
+        for (int k = 0; k < 16; k++) o[12 + k] = k < fo_nnb[i] ? (float)fo_nb[i][k] : -1;
+        if (!c->on) { o[2] = -1; o[3] = -1; continue; }
+        o[0] = c->px + (c->x - c->px) * frac; o[1] = c->py + (c->y - c->py) * frac; o[2] = c->pw + (c->w - c->pw) * frac;
+        o[3] = (float)c->partner;
+        o[4] = c->partner >= 0 ? (t - c->rup_t) / RUPD : -1;
+        o[5] = c->burst_t >= 0 ? (t - c->burst_t) / BURSTD : -1;
+        o[6] = fmaxf(c->h0 * expf(-(t - c->born) / 500.0f), 0.13f);
+        o[7] = c->seed;
+        o[8] = sqrtf(fmaxf(c->area, 1e-5f) / PI);
+    }
+    glBindTexture(GL_TEXTURE_2D, tex_cells);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 7, NCELL, GL_RGBA, GL_FLOAT, cell_buf);
+    if (fo_own_dirty) {
+        glBindTexture(GL_TEXTURE_2D, tex_fbin);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, fo_gw, fo_gh, 0, GL_RED, GL_FLOAT, fo_own);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        fo_own_dirty = 0;
+    }
+}
+
+static const char *FS_FOAM = GLSL(
+    uniform sampler2D uCells, uBins;
+    uniform vec4 uDom;          /* domain x0, y0, bin size, bins across */
+    uniform vec2 uBinN;
+    uniform float uDepth0, uTilt;
+    vec4 cl(int i, int k) { return texelFetch(uCells, ivec2(k, i), 0); }
+
+    void main() {
+        vec2 P = wallPos();
+        float px = uMap.z;
+        vec3 rd = normalize(vec3(P, 0.0) - uEye);
+        ivec2 b = clamp(ivec2(floor((P - uDom.xy) / uDom.z)), ivec2(0), ivec2(uBinN) - 1);
+        int o0 = int(texelFetch(uBins, b, 0).r);
+        int best = -1;
+        float bd = 1e9;
+        vec4 ci = vec4(0.0);
+        /* the cell under the raster sample, and its neighbours: who owns P */
+        for (int k = 0; k < 17; k++) {
+            if (o0 < 0) break;
+            int id = k == 0 ? o0 : int(cl(o0, 3 + (k - 1) / 4)[(k - 1) & 3]);
+            if (id < 0) break;
+            vec4 c = cl(id, 0);
+            float d = dot(P - c.xy, P - c.xy) - c.z;
+            if (d < bd) { bd = d; best = id; ci = c; }
+        }
+        vec3 col = backdrop(P);
+        if (best < 0) { oCol = vec4(col * uFade, 1.0); oDep = vec2(uDepth0, 1.0); return; }
+        int me = best;
+        vec4 c0 = ci, c1 = cl(me, 1), c2 = cl(me, 2);
+        /* the nearest two borders, among its neighbours */
+        float e1 = 1e9, e2 = 1e9;
+        vec2 dir1 = vec2(1.0, 0.0);
+        float gapHalf = -1.0;
+        for (int k = 0; k < 16; k++) {
+            int jd = int(cl(me, 3 + k / 4)[k & 3]);
+            if (jd < 0) break;
+            vec4 cj = cl(jd, 0);
+            vec2 dv = cj.xy - ci.xy;
+            float dl = length(dv);
+            if (dl < 1e-5) continue;
+            float pj = dot(P - cj.xy, P - cj.xy) - cj.z;
+            float e = (pj - bd) / (2.0 * dl);
+            /* a ruptured film between these two: its border retracting */
+            float gh = -1.0;
+            if (int(c0.w) == jd && c1.x >= 0.0) gh = c1.x;
+            else if (int(cj.w) == me) gh = cl(jd, 1).x;
+            if (gh >= 0.0) {
+                if (gh >= 1.0) continue;
+                /* along the border from its middle */
+                vec2 u = dv / dl;
+                vec2 m = ci.xy + u * (dl * 0.5 + (ci.z - cj.z) / (2.0 * dl));
+                float along = abs(dot(P - m, vec2(-u.y, u.x)));
+                float L = gh * gh * 0.16;
+                if (along < L) continue;
+                gapHalf = max(gapHalf, exp(-(along - L) / 0.004));
+            }
+            if (e < e1) { e2 = e1; e1 = e; dir1 = dv / dl; }
+            else if (e < e2) e2 = e;
+        }
+        /* which film: a cell absorbed in a rupture shows its new owner's */
+        vec4 film = c1;
+        vec3 cc = ci.xyz;
+        float rr = c2.x;
+        if (c0.w >= 0.0 && c1.x >= 1.0) { int o = int(c0.w); film = cl(o, 1); cc = cl(o, 0).xyz; rr = cl(o, 2).x; }
+
+        float depth = uDepth0 + uTilt * (P.y - uEye.y);
+        float wb = 0.0026 + 0.035 * rr;
+        float node = exp(-(e2 - e1) / (wb * 1.6));
+        float wid = wb * (1.0 + 1.6 * node);
+
+        /* the face: a shallow dome */
+        vec2 d = P - cc.xy;
+        float Rc = rr * 1.45;
+        vec3 nrm = normalize(vec3(d, -sqrt(max(Rc * Rc - dot(d, d), Rc * Rc * 0.05))));
+        float h;
+        {
+            float sn = sin(film.w), cs = cos(film.w);
+            vec2 q = mat2(cs, sn, -sn, cs) * d / max(rr, 0.01);
+            vec3 s = vec3(q * 0.55, film.w * 0.37 + uTime * 0.004);
+            vec3 w = texture(uN3, s * 0.9 + vec3(0.0, 0.0, uTime * 0.006)).rgb - 0.5;
+            float nz = texture(uN3, (s + 1.4 * w) * 0.8 + film.w).g;
+            h = film.z * (0.6 + 0.8 * nz);
+            h += 1.4 * exp(-max(e1, 0.0) / 0.006);       /* thicker against the border */
+        }
+        vec3 R = tfilm(h, abs(dot(rd, nrm)));
+        vec3 L = env(reflect(rd, nrm));
+        /* under the film: the foam going down, dim */
+        vec3 under = backdrop(P) * 0.6 + vec3(0.010, 0.008, 0.007) * texture(uNoise, P * 1.7).r;
+        vec3 face = under * (1.0 - R) + R * L;
+        /* a burst cap: the film gone inside a ragged hole */
+        if (c1.y >= 0.0) {
+            vec2 hc = c0.xy + vec2(0.3, 0.2) * rr;
+            float ang = atan(P.y - hc.y, P.x - hc.x) / 6.2831853;
+            float hr = min(c1.y, 1.5) * rr * 1.6 * (1.0 + 0.12 * (texture(uNoise, vec2(ang, film.w)).r - 0.5));
+            float into = hr - length(P - hc);
+            face = mix(face, under, clamp(into / px + 0.5, 0.0, 1.0));
+            if (c1.y < 1.4) face += exp(-pow((into + 0.002) / 0.0022, 2.0)) * (L * 0.1 + 0.04);
+        }
+        col = face;
+        if (gapHalf > 0.0) col += gapHalf * (L * 0.12 + 0.03);
+
+        /* the Plateau border: a glassy channel of liquid */
+        if (e1 < wid + px) {
+            float s = clamp(e1 / wid, 0.0, 1.0);
+            vec3 bn = normalize(vec3(-dir1 * s, -sqrt(max(1.0 - s * s, 0.0))));
+            float cosb = abs(dot(rd, bn));
+            float F = 0.02 + 0.98 * pow(1.0 - cosb, 5.0);
+            vec3 inside = under * 0.5 + env(refract(rd, bn, 0.75)) * 0.08;
+            vec3 pb = F * env(reflect(rd, bn)) + (1.0 - F) * inside;
+            col = mix(col, pb, clamp((wid - e1) / px + 0.5, 0.0, 1.0));
+        }
+        oCol = vec4(col * uFade, 1.0);
+        oDep = vec2(depth, 1.0);
+    });
+
+static GLuint p_foam;
+
+static void render_foam(const Act *a, int ai, double lt) {
+    long want = (long)(lt * FOAMHZ);
+    if (fo.act != ai || fo.steps > want) {
+        foam_init(ai, a->seed);
+        for (int i = 0; i < 40; i++) foam_step(1);
+        for (int i = 0; i < fo.n; i++) { fo.c[i].px = fo.c[i].x; fo.c[i].py = fo.c[i].y; fo.c[i].pw = fo.c[i].w; }
+    }
+    long cap = offline ? want : fo.steps + (want - fo.steps > 12 ? 60 : 2);
+    double tq = now();
+    while (fo.steps < want && fo.steps < cap) foam_step(0);
+    if (getenv("SOAP_PROF")) fprintf(stderr, "step %.2f ms\n", (now() - tq) * 1e3);
+    foam_upload((float)lt, clampf((float)(lt * FOAMHZ - fo.steps) + 1, 0, 1));
+    if (getenv("SOAP_DEBUG")) fprintf(stderr, "foam: %d cells, bin overflow %d\n", fo.n, fbin_over);
+    fbin_over = 0;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo);
+    glViewport(0, 0, IW, IH);
+    glDisable(GL_BLEND);
+    bind_scene_tex();
+    GLuint p = p_foam;
+    set_common(p, BUB_D);
+    tex_unit(3, GL_TEXTURE_2D, tex_cells);
+    tex_unit(4, GL_TEXTURE_2D, tex_fbin);
+    glUniform1i(U(p, "uCells"), 3);
+    glUniform1i(U(p, "uBins"), 4);
+    glUniform4f(U(p, "uDom"), fo.x0, fo.y0, FST, 0);
+    glUniform2f(U(p, "uBinN"), (float)fo_gw, (float)fo_gh);
+    glUniform1f(U(p, "uDepth0"), BUB_D);
+    glUniform1f(U(p, "uTilt"), 0.9f);
+    light_frame(p, "uBoxD", "uBoxU", "uBoxV", -0.35f, 0.4f, -1.0f);
+    glUniform4f(U(p, "uBox"), 0.26f, 0.34f, 0.05f, 8.0f);
+    light_frame(p, "uStrD", "uStrU", "uStrV", 0.9f, 0.2f, -0.3f);
+    glUniform4f(U(p, "uStr"), 0.06f, 0.8f, 0.04f, 3.0f);
+    glUniform1f(U(p, "uBars"), 1.0f);
+    glUniform1f(U(p, "uAmb"), 2.0f);
+    glUniform1f(U(p, "uFill"), 3.2f);
+    draw_fs();
+    dof_focus = BUB_D;
+    dof_aperture = 0.035f;
 }
 
 /* ================= caption ================= */
@@ -1730,6 +2161,13 @@ static void gl_init(void) {
                        compile(GL_FRAGMENT_SHADER, "#version 330 core\n", FS_COMMON, FS_MIST));
     p_text = link_prog(compile(GL_VERTEX_SHADER, VS_TEXT, NULL, NULL), compile(GL_FRAGMENT_SHADER, FS_TEXT, NULL, NULL));
 
+    p_foam = fs_prog(FS_COMMON, FS_FOAM);
+    glGenTextures(1, &tex_cells);
+    glBindTexture(GL_TEXTURE_2D, tex_cells);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 7, NCELL, 0, GL_RGBA, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glGenTextures(1, &tex_fbin);
     glGenTextures(1, &tex_bub);
     glBindTexture(GL_TEXTURE_2D, tex_bub);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 8, NB, 0, GL_RGBA, GL_FLOAT, NULL);
@@ -1765,7 +2203,6 @@ static void bind_scene_tex(void) {
     tex_unit(2, GL_TEXTURE_3D, tex_noise3);
 }
 
-static float dof_focus, dof_aperture;
 
 /* the film act at act-local time lt */
 static void render_film(const Act *a, int ai, double lt) {
@@ -1818,8 +2255,14 @@ static void render_film(const Act *a, int ai, double lt) {
     glUniform4fv(U(p, "uPop"), 1, pop);
     glUniform1f(U(p, "uDepth0"), BUB_D);
     glUniform1f(U(p, "uTilt"), 0.35f);
-    light_frame(p, "uBoxD", "uBoxU", "uBoxV", -0.12f, 0.1f, -1.0f);
-    glUniform4f(U(p, "uBox"), 0.42f, 0.3f, 0.36f, 7.5f);
+    {
+        /* a softbox behind the camera, aimed at the film's middle and big
+         * enough that the whole wall reflects it, falling off to the edges */
+        float dx = (cx - eye_x) / BUB_D, dy = (cy - eye_y) / BUB_D;
+        float sx = hw / BUB_D, sy = hh / BUB_D;
+        light_frame(p, "uBoxD", "uBoxU", "uBoxV", dx - 0.12f * sx, dy + 0.06f * sy, -1.0f);
+        glUniform4f(U(p, "uBox"), 0.8f * sx, 0.75f * sy, 0.5f * fmaxf(sx, sy), 7.5f);
+    }
     light_frame(p, "uStrD", "uStrU", "uStrV", 0.9f, 0.1f, -0.4f);
     glUniform4f(U(p, "uStr"), 0.08f, 0.7f, 0.06f, 3.0f);
     glUniform1f(U(p, "uBars"), 0.0f);
@@ -1868,7 +2311,24 @@ static void render_bubbles(const Act *a, int ai, double lt) {
     dof_aperture = 0.03f;
 }
 
+/* GPU time per stage, for --bench with SOAP_PROF set */
+static GLuint tq[4];
+static double tq_sum[4];
+static int tq_on = -1, tq_n;
+static void tq_mark(int i) {
+    if (tq_on < 0) tq_on = getenv("SOAP_PROF") != NULL;
+    if (!tq_on) return;
+    if (!tq[0]) glGenQueries(4, tq);
+    if (i) glEndQuery(GL_TIME_ELAPSED);
+    if (i < 3) glBeginQuery(GL_TIME_ELAPSED, tq[i]);
+    if (i == 3) {
+        for (int k = 0; k < 3; k++) { GLuint64 ns = 0; glGetQueryObjectui64v(tq[k], GL_QUERY_RESULT, &ns); tq_sum[k] += ns * 1e-6; }
+        tq_n++;
+    }
+}
+
 static void render(double t, GLuint target) {
+    tq_mark(0);
     view_update();
     scene_targets();
     double lt;
@@ -1880,7 +2340,7 @@ static void render(double t, GLuint target) {
     switch (a->scene) {
     case S_FILM: render_film(a, ai, lt); break;
     case S_BUBBLES: render_bubbles(a, ai, lt); break;
-    default: render_bubbles(a, ai, lt); break;
+    default: render_foam(a, ai, lt); break;
     }
     /* mist over whichever scene */
     if (mist_n) {
@@ -1892,9 +2352,12 @@ static void render(double t, GLuint target) {
         mist_draw();
     }
 
+    tq_mark(1);
     /* depth of field */
-    float pxw = out_w0[3] / IH * 2.0f;        /* wall units per half-res pixel */
-    float maxc = 9.0f;
+    static int nodof = -1;
+    if (nodof < 0) nodof = getenv("SOAP_NODOF") != NULL;
+    float pxw = out_w0[3] / IH * 3.0f;        /* wall units per DOF pixel (a third of the scene's) */
+    float maxc = 7.0f;
     rt_bind(&half_rt);
     glUseProgram(p_down);
     tex_unit(0, GL_TEXTURE_2D, scene_col);
@@ -1907,6 +2370,9 @@ static void render(double t, GLuint target) {
     glUniform1f(U(p_down, "uPxW"), pxw);
     glUniform1f(U(p_down, "uMaxC"), maxc);
     draw_fs();
+    if (!nodof) {
+    glBindTexture(GL_TEXTURE_2D, half_rt.tex);
+    glGenerateMipmap(GL_TEXTURE_2D);
     rt_bind(&dof_rt);
     glUseProgram(p_dof);
     tex_unit(0, GL_TEXTURE_2D, half_rt.tex);
@@ -1916,7 +2382,9 @@ static void render(double t, GLuint target) {
     draw_fs();
     glBindTexture(GL_TEXTURE_2D, dof_rt.tex);
     glGenerateMipmap(GL_TEXTURE_2D);
+    }
 
+    tq_mark(2);
     /* the print */
     glBindFramebuffer(GL_FRAMEBUFFER, target);
     glViewport(0, 0, W, H);
@@ -1935,6 +2403,7 @@ static void render(double t, GLuint target) {
     glUniform1f(U(p_final, "uGrainT"), (float)fmod(t * 24.0, 997.0));
     draw_fs();
     caption_draw(target);
+    tq_mark(3);
 }
 
 /* ---- --layer: a native Wayland wallpaper (wlr-layer-shell + EGL) ---- */
@@ -2181,6 +2650,7 @@ int main(int argc, char **argv) {
             sum += ms;
             if (ms > worst) worst = ms;
         }
+        if (tq_n) printf("gpu: scene %.3f ms, dof %.3f ms, print %.3f ms\n", tq_sum[0] / tq_n, tq_sum[1] / tq_n, tq_sum[2] / tq_n);
         printf("soapfilm: %d frames at %dx%d (internal %dx%d) from %.1f s: avg %.3f ms, worst %.3f ms\nrenderer: %s\n",
                opt_bench, W, H, IW, IH, opt_at, sum / opt_bench, worst, (const char *)glGetString(GL_RENDERER));
         return 0;
