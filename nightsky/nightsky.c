@@ -18,8 +18,11 @@
  * real direction, so its phase and the tilt of the crescent are right, with
  * its seas where they are; it is drawn three times its true size (--moon).
  * Over it all: a faint Milky Way with its dust lanes, the odd meteor, thin
- * drifting cloud (--clouds 0 for none) and, with --lines, the constellation
- * figures in dim gold. Below: made-up mountain ridges, rim-lit when the Moon
+ * drifting cloud (--clouds 0 for none) and the constellation figures in dim
+ * gold (--no-lines to leave them out), named like an old star atlas: the
+ * constellations in spaced capitals, the planets and brightest stars in
+ * italic beside them (--no-labels; --font NAME, EB Garamond by default).
+ * Names only come out once it's dark, and stand back from the land. Below: made-up mountain ridges, rim-lit when the Moon
  * or the twilight is behind them, and a still lake mirroring the lot.
  *
  * Where: --lat LAT --lon LON (degrees, north and east positive), else the
@@ -47,7 +50,7 @@
  * then twice the angle from there to the far edge of the wall (default 280),
 
  * and the horizon sits 80% of the way down the front output unless --pitch
- * is given. Constellation lines are drawn on the front output only.
+ * is given. The figures and names run across every output.
  *
  * Same plumbing as stir: Xlib + GLX for --window / --root, a native
  * wlr-layer-shell surface over EGL for --layer (swaylock-plugin), --shot
@@ -68,6 +71,10 @@
 #include <EGL/eglext.h>
 #include <wayland-client.h>
 #include <wayland-egl.h>
+#include <fontconfig/fontconfig.h>
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#include <ctype.h>
 #include <math.h>
 #include <poll.h>
 #include <stdint.h>
@@ -80,7 +87,8 @@
 #include "stars.h"
 
 static int W = 1280, H = 800;
-static int opt_root, opt_layer, opt_lines, opt_bench, opt_info;
+static int opt_root, opt_layer, opt_lines = 1, opt_labels = 1, opt_bench, opt_info;
+static const char *opt_font = "EB Garamond";
 static double opt_lat = 51.48, opt_lon = 0.0;   /* Greenwich */
 static int loc_given;
 static const char *opt_time;
@@ -437,16 +445,59 @@ static void build_stars(void) {
     rng = keep;
 }
 
-/* constellation figures as pairs of star indices */
+/* constellation figures as pairs of star indices, and where to name each */
 static int *seg, nseg;
+static struct { v3 c; const char *name; } fig[NFIGURES];
+
+static const char *const CON_NAME[][2] = {
+    {"And", "Andromeda"}, {"Aql", "Aquila"}, {"Aqr", "Aquarius"}, {"Ara", "Ara"}, {"Ari", "Aries"},
+    {"Aur", "Auriga"}, {"Boo", "Bootes"}, {"Cnc", "Cancer"}, {"CVn", "Canes Venatici"},
+    {"CMa", "Canis Major"}, {"CMi", "Canis Minor"}, {"Cap", "Capricornus"}, {"Car", "Carina"},
+    {"Cas", "Cassiopeia"}, {"Cen", "Centaurus"}, {"Cep", "Cepheus"}, {"Cet", "Cetus"},
+    {"Col", "Columba"}, {"Com", "Coma Berenices"}, {"CrA", "Corona Australis"},
+    {"CrB", "Corona Borealis"}, {"Crv", "Corvus"}, {"Crt", "Crater"}, {"Cru", "Crux"},
+    {"Cyg", "Cygnus"}, {"Del", "Delphinus"}, {"Dra", "Draco"}, {"Eri", "Eridanus"},
+    {"Gem", "Gemini"}, {"Gru", "Grus"}, {"Her", "Hercules"}, {"Hya", "Hydra"}, {"Hyi", "Hydrus"},
+    {"Ind", "Indus"}, {"Lac", "Lacerta"}, {"Leo", "Leo"}, {"LMi", "Leo Minor"}, {"Lep", "Lepus"},
+    {"Lib", "Libra"}, {"Lup", "Lupus"}, {"Lyn", "Lynx"}, {"Lyr", "Lyra"}, {"Mon", "Monoceros"},
+    {"Mus", "Musca"}, {"Oph", "Ophiuchus"}, {"Ori", "Orion"}, {"Pav", "Pavo"}, {"Peg", "Pegasus"},
+    {"Per", "Perseus"}, {"Phe", "Phoenix"}, {"Psc", "Pisces"}, {"PsA", "Piscis Austrinus"},
+    {"Pup", "Puppis"}, {"Sge", "Sagitta"}, {"Sgr", "Sagittarius"}, {"Sco", "Scorpius"},
+    {"Ser", "Serpens"}, {"Tau", "Taurus"}, {"Tri", "Triangulum"}, {"TrA", "Triangulum Australe"},
+    {"Tuc", "Tucana"}, {"UMa", "Ursa Major"}, {"UMi", "Ursa Minor"}, {"Vel", "Vela"}, {"Vir", "Virgo"},
+};
+
+/* the brightest stars, by their proper names */
+static const char *const STAR_NAME[][2] = {
+    {"alp CMa", "Sirius"}, {"alp Car", "Canopus"}, {"alp Boo", "Arcturus"}, {"alp Lyr", "Vega"},
+    {"alp Aur", "Capella"}, {"bet Ori", "Rigel"}, {"alp CMi", "Procyon"}, {"alp Eri", "Achernar"},
+    {"alp Ori", "Betelgeuse"}, {"bet Cen", "Hadar"}, {"alp Aql", "Altair"}, {"alp Tau", "Aldebaran"},
+    {"alp Sco", "Antares"}, {"alp Vir", "Spica"}, {"bet Gem", "Pollux"}, {"alp PsA", "Fomalhaut"},
+    {"alp Cyg", "Deneb"}, {"alp Leo", "Regulus"}, {"alp Gem", "Castor"}, {"alp UMi", "Polaris"},
+    {"gam Ori", "Bellatrix"}, {"alp UMa", "Dubhe"}, {"alp Per", "Mirfak"}, {"alp And", "Alpheratz"},
+    {"bet Per", "Algol"}, {"alp Ari", "Hamal"}, {"eps Ori", "Alnilam"}, {"eta UMa", "Alkaid"},
+};
+#define NSTARNAME ((int)(sizeof STAR_NAME / sizeof *STAR_NAME))
+static int star_name_idx[NSTARNAME];
+
 static void build_figures(void) {
     seg = malloc(sizeof(int) * 2 * 1024);
+    for (int i = 0; i < NSTARNAME; i++) {
+        star_name_idx[i] = -1;
+        for (int j = 0; j < NBRIGHT; j++)
+            if (!strcmp(BRIGHT[j].name, STAR_NAME[i][0])) { star_name_idx[i] = j; break; }
+    }
     for (int f = 0; f < NFIGURES; f++) {
         char con[8], tok[16];
         const char *p = FIGURES[f];
         int n = 0;
         sscanf(p, "%7s%n", con, &n);
         p += n;
+        fig[f].name = NULL;
+        for (int i = 0; i < (int)(sizeof CON_NAME / sizeof *CON_NAME); i++)
+            if (!strcmp(CON_NAME[i][0], con)) fig[f].name = CON_NAME[i][1];
+        int seen[96], nseen = 0;
+        v3 sum = vec(0, 0, 0);
         int prev = -1;
         while (*p) {
             while (*p == ' ') p++;
@@ -461,9 +512,19 @@ static void build_figures(void) {
             if (dot) { *dot = 0; s = find_star(tok, dot + 1); }
             else s = find_star(tok, con);
             if (s < 0) fprintf(stderr, "nightsky: figure %s: no star %s\n", con, tok);
+            if (s >= 0) {
+                int dup = 0;
+                for (int i = 0; i < nseen; i++) dup |= seen[i] == s;
+                if (!dup && nseen < 96) {
+                    seen[nseen++] = s;
+                    sum = add(sum, vec(starv[8 * s], starv[8 * s + 1], starv[8 * s + 2]));
+                }
+            }
             if (s >= 0 && prev >= 0 && nseg < 1024) { seg[2 * nseg] = prev; seg[2 * nseg + 1] = s; nseg++; }
             prev = s;
         }
+        fig[f].c = nseen ? norm(sum) : vec(0, 0, 1);
+        if (!nseen) fig[f].name = NULL;
     }
 }
 
@@ -996,7 +1057,29 @@ static const char *FS_LINE = GLSL(
         o = vec4(uColor * vAlpha * w * (1.0 - cloudAt(d)), 1.0);
     });
 
-static GLuint prog_sky, prog_star, prog_line, prog_bake, vao_full;
+/* labels: glyphs from the atlas, hidden by the land and dimmed by cloud like the lines */
+static const char *VS_TEXT = GLSL(
+    layout(location = 0) in vec4 aP;        /* x, y (NDC), u, v (atlas) */
+    layout(location = 1) in vec3 aC;        /* colour, alpha already in */
+    out vec2 vUV;
+    out vec3 vC;
+    void main() { vUV = aP.zw; vC = aC; gl_Position = vec4(aP.xy, 0.0, 1.0); });
+
+static const char *FS_TEXT = GLSL(
+    in vec2 vUV;
+    in vec3 vC;
+    uniform sampler2D uAtlas;
+    out vec4 o;
+    void main() {
+        vec3 d = dirAt(gl_FragCoord.xy);
+        vec4 R = ridgeAt(d);
+        if (d.z <= 0.0 || altDeg(d) < max(max(R.r, R.g), R.b) + 0.03) discard;
+        float a = texture(uAtlas, vUV).r;
+        o = vec4(vC * a * (1.0 - 0.8 * cloudAt(d)), 1.0);
+    });
+
+static GLuint prog_sky, prog_star, prog_line, prog_text, prog_bake, vao_full;
+static GLuint tex_atlas, vao_text, vbo_text;
 static GLuint tex_ridge, tex_noise, tex_mw, tex_bg, fbo_bg;
 static int bg_w, bg_h;
 static GLuint vao_star, vbo_star, vao_planet, vbo_planet, vao_strip, vbo_strip;
@@ -1093,6 +1176,7 @@ static void gl_init(void) {
     prog_sky = mk_prog(full_body, FS_SKY, 1);
     prog_star = mk_prog(VS_STAR, FS_STAR, 1);
     prog_line = mk_prog(VS_LINE, FS_LINE, 1);
+    prog_text = mk_prog(VS_TEXT, FS_TEXT, 1);
     glGenVertexArrays(1, &vao_full);
 
     tex_ridge = mk_tex(GL_RGBA32F, RIDGE_N, 1, GL_RGBA, GL_FLOAT, ridge, GL_REPEAT, GL_CLAMP_TO_EDGE);
@@ -1117,15 +1201,24 @@ static void gl_init(void) {
     glBindBuffer(GL_ARRAY_BUFFER, vbo_strip);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 16, (void *)0);
+    glGenVertexArrays(1, &vao_text);
+    glBindVertexArray(vao_text);
+    glGenBuffers(1, &vbo_text);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_text);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 28, (void *)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 28, (void *)16);
     glBindVertexArray(0);
 
-    GLuint progs[3] = {prog_sky, prog_star, prog_line};
-    for (int i = 0; i < 3; i++) {
+    GLuint progs[4] = {prog_sky, prog_star, prog_line, prog_text};
+    for (int i = 0; i < 4; i++) {
         glUseProgram(progs[i]);
         glUniform1i(U(progs[i], "uRidge"), 0);
         glUniform1i(U(progs[i], "uNoise"), 1);
         glUniform1i(U(progs[i], "uMW"), 2);
         glUniform1i(U(progs[i], "uBg"), 3);
+        glUniform1i(U(progs[i], "uAtlas"), 4);
     }
     glEnable(GL_PROGRAM_POINT_SIZE);
 }
@@ -1311,6 +1404,195 @@ static void strip_seg(double x0, double y0, double x1, double y1, double w0, dou
     }
 }
 
+/* ================= labels ================= */
+/* printable ASCII in three styles: constellations (spaced roman capitals),
+ * stars and planets (italic), as on an old star atlas */
+typedef struct { short x, y, w, h, left, top, adv; } Glyph;
+enum { ST_CON, ST_STAR, ST_PLANET, NST };
+static Glyph glyphs[NST][95];
+static int atlas_px;                    /* the size it was built for, 0: not yet */
+static FT_Library ft;
+static FT_Face faces[2];                /* regular, italic */
+#define AW 1024
+#define AH 512
+
+static void fonts_init(void) {
+    if (!FcInit() || FT_Init_FreeType(&ft)) die("font init failed");
+    for (int i = 0; i < 2; i++) {
+        char pat_s[256];
+        snprintf(pat_s, sizeof pat_s, "%s:%s", opt_font, i ? "italic" : "weight=regular");
+        FcPattern *pat = FcNameParse((const FcChar8 *)pat_s);
+        FcConfigSubstitute(NULL, pat, FcMatchPattern);
+        FcDefaultSubstitute(pat);
+        FcResult res;
+        FcPattern *m = FcFontMatch(NULL, pat, &res);
+        FcChar8 *file = NULL;
+        if (!m || FcPatternGetString(m, FC_FILE, 0, &file) != FcResultMatch) die("no font matched");
+        if (FT_New_Face(ft, (const char *)file, 0, &faces[i])) die("can't load the font");
+        FcPatternDestroy(m);
+        FcPatternDestroy(pat);
+    }
+}
+
+static double style_px(int st, double px) {
+    static const double base[NST] = {14, 14.5, 16.5};
+    return fmax(9, base[st] * px);
+}
+
+static void build_atlas(double px) {
+    int key = (int)lround(px * 100);
+    if (key == atlas_px) return;
+    atlas_px = key;
+    unsigned char *a = calloc((size_t)AW * AH, 1);
+    int x = 1, y = 1, shelf = 0;
+    for (int st = 0; st < NST; st++) {
+        FT_Face f = faces[st == ST_CON ? 0 : 1];
+        FT_Set_Pixel_Sizes(f, 0, (FT_UInt)lround(style_px(st, px)));
+        for (int c = 0; c < 95; c++) {
+            Glyph *g = &glyphs[st][c];
+            memset(g, 0, sizeof *g);
+            if (FT_Load_Char(f, (FT_ULong)(32 + c), FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT)) continue;
+            FT_GlyphSlot s = f->glyph;
+            int w = (int)s->bitmap.width, h = (int)s->bitmap.rows;
+            if (x + w + 2 > AW) { x = 1; y += shelf + 2; shelf = 0; }
+            if (y + h + 2 > AH) break;          /* absurd sizes: drop the rest */
+            for (int yy = 0; yy < h; yy++)
+                memcpy(a + (size_t)(y + yy) * AW + x, s->bitmap.buffer + yy * s->bitmap.pitch, (size_t)w);
+            *g = (Glyph){(short)x, (short)y, (short)w, (short)h, (short)s->bitmap_left, (short)s->bitmap_top,
+                         (short)(s->advance.x >> 6)};
+            x += w + 2;
+            if (h > shelf) shelf = h;
+        }
+    }
+    if (!tex_atlas) {
+        glGenTextures(1, &tex_atlas);
+        glBindTexture(GL_TEXTURE_2D, tex_atlas);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    glBindTexture(GL_TEXTURE_2D, tex_atlas);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, AW, AH, 0, GL_RED, GL_UNSIGNED_BYTE, a);
+    free(a);
+}
+
+static const Glyph *glyph_of(int st, char c) {
+    return &glyphs[st][(unsigned char)c >= 32 && (unsigned char)c < 127 ? c - 32 : 0];
+}
+static double text_w(int st, const char *str, double track) {
+    double w = 0;
+    for (const char *p = str; *p; p++) w += glyph_of(st, *p)->adv + (p[1] ? track : 0);
+    return w;
+}
+
+#define TEXT_MAX (6 * 4096)
+static float textv[TEXT_MAX * 7];
+static int ntext;
+static float placed[256][4];            /* label boxes so far this frame */
+static int nplaced;
+
+static void text_vert(double x, double y, double u, double v, const float *c) {
+    float *o = textv + 7 * ntext++;
+    o[0] = (float)(x / W * 2 - 1); o[1] = (float)(y / H * 2 - 1);
+    o[2] = (float)(u / AW); o[3] = (float)(v / AH);
+    o[4] = c[0]; o[5] = c[1]; o[6] = c[2];
+}
+
+/* set str with its baseline at y (pixels, y up) from x, unless it would land
+ * on a label already placed; returns whether it did */
+static int label(int st, double x, double y, const char *str, double track, const float *col) {
+    double w = text_w(st, str, track), cap = glyph_of(st, 'H')->top, pad = 0.35 * cap;
+    double bx0 = x - pad, by0 = y - 0.3 * cap - pad, bx1 = x + w + pad, by1 = y + cap + pad;
+    if (bx1 < 0 || bx0 > W || by1 < 0 || by0 > H) return 0;
+    for (int i = 0; i < nplaced; i++)
+        if (bx0 < placed[i][2] && bx1 > placed[i][0] && by0 < placed[i][3] && by1 > placed[i][1]) return 0;
+    if (nplaced < 256) { float *b = placed[nplaced++]; b[0] = (float)bx0; b[1] = (float)by0; b[2] = (float)bx1; b[3] = (float)by1; }
+    double pen = round(x);
+    y = round(y);
+    for (const char *p = str; *p; p++) {
+        const Glyph *g = glyph_of(st, *p);
+        if (g->w && ntext + 6 <= TEXT_MAX) {
+            double x0 = pen + g->left, x1 = x0 + g->w, y1 = y + g->top, y0 = y1 - g->h;
+            double u0 = g->x, u1 = g->x + g->w, v0 = g->y, v1 = g->y + g->h;   /* v0: the glyph's top row */
+            text_vert(x0, y1, u0, v0, col); text_vert(x1, y1, u1, v0, col); text_vert(x1, y0, u1, v1, col);
+            text_vert(x0, y1, u0, v0, col); text_vert(x1, y0, u1, v1, col); text_vert(x0, y0, u0, v1, col);
+        }
+        pen += g->adv + track;
+    }
+    return 1;
+}
+
+/* the land's highest point (degrees) between two bearings (radians) */
+static double ridge_max(double az0, double az1) {
+    double top = -90;
+    int i0 = (int)floor(az0 / (2 * PI) * RIDGE_N), i1 = (int)ceil(az1 / (2 * PI) * RIDGE_N);
+    for (int i = i0; i <= i1; i++) {
+        const float *r = ridge + 4 * (((i % RIDGE_N) + RIDGE_N) % RIDGE_N);
+        top = fmax(top, fmax(r[0], fmax(r[1], r[2])));
+    }
+    return top;
+}
+
+static double label_pxrad;              /* radians per pixel, near enough */
+
+/* where a local direction lands, if a label from dx0 to dx1 pixels across it
+ * and dy below it would stand clear of the land */
+static int sky_spot(v3 d, double min_alt, double dx0, double dx1, double dy, double *x, double *y) {
+    if (d.z < sin(min_alt * D2R)) return 0;
+    double h = hypot(d.x, d.y), az = atan2(d.x, d.y), alt = asin(d.z) * R2D;
+    double k = label_pxrad / fmax(h, 0.05);         /* bearing per pixel, wider towards the zenith */
+    if (alt - dy * label_pxrad * R2D < ridge_max(az + dx0 * k, az + dx1 * k) + 0.6) return 0;
+    return project(d, x, y);
+}
+
+static v3 star_dir(int i) { return refract(norm(mvec(sky.eq2hor, vec(starv[8 * i], starv[8 * i + 1], starv[8 * i + 2])))); }
+
+static void labels(double px, double pxrad, double fade, double moon_amt, double lim) {
+    ntext = nplaced = 0;
+    if (fade <= 0) return;
+    build_atlas(px);
+    label_pxrad = pxrad;
+    double dim = fade * (1 - 0.35 * moon_amt);
+    double x, y, gap = 7 * px + 2;
+    char buf[64];
+    /* the planets first: they're what people look for */
+    static const char *const PNAME[5] = {"Mercury", "Venus", "Mars", "Jupiter", "Saturn"};
+    float pc[3] = {(float)(0.95 * 0.55 * dim), (float)(0.86 * 0.55 * dim), (float)(0.64 * 0.55 * dim)};
+    for (int i = 0; i < 5; i++) {
+        const float *o = sky.planet[i];
+        if (o[6] > lim) continue;
+        v3 d = refract(norm(mvec(sky.eq2hor, vec(o[0], o[1], o[2]))));
+        int st = ST_PLANET;
+        if (!sky_spot(d, 1, -gap, gap + text_w(st, PNAME[i], 0), glyph_of(st, 'x')->top, &x, &y)) continue;
+        label(st, x + gap, y - glyph_of(st, 'x')->top * 0.5, PNAME[i], 0, pc);
+    }
+    /* the Moon's own place is plain enough; the bright stars by name */
+    float sc[3] = {(float)(0.80 * 0.40 * dim), (float)(0.77 * 0.40 * dim), (float)(0.70 * 0.40 * dim)};
+    for (int i = 0; i < NSTARNAME; i++) {
+        int k = star_name_idx[i];
+        if (k < 0 || BRIGHT[k].v > lim - 0.5) continue;
+        int st = ST_STAR;
+        if (!sky_spot(star_dir(k), 2, -gap, gap + text_w(st, STAR_NAME[i][1], 0), glyph_of(st, 'x')->top, &x, &y)) continue;
+        label(st, x + gap, y - glyph_of(st, 'x')->top * 0.5, STAR_NAME[i][1], 0, sc);
+    }
+    /* constellations, in spaced capitals at the middle of the figure */
+    float cc[3] = {(float)(0.84 * 0.50 * dim), (float)(0.63 * 0.50 * dim), (float)(0.17 * 0.50 * dim)};
+    for (int f = 0; f < NFIGURES; f++) {
+        if (!fig[f].name) continue;
+        v3 d = refract(norm(mvec(sky.eq2hor, fig[f].c)));
+        int n = 0;
+        for (const char *p = fig[f].name; *p && n < 63; p++) buf[n++] = (char)toupper((unsigned char)*p);
+        buf[n] = 0;
+        int st = ST_CON;
+        double track = 0.22 * style_px(st, px);
+        double w = text_w(st, buf, track);
+        if (!sky_spot(d, 4, -w / 2, w / 2, glyph_of(st, 'H')->top, &x, &y)) continue;
+        label(st, x - w / 2, y - glyph_of(st, 'H')->top * 0.5, buf, track, cc);
+    }
+}
+
 static void render(double el, GLuint target) {
     double t = t_base + el * opt_timelapse;
     sky_compute(t);
@@ -1348,8 +1630,8 @@ static void render(double el, GLuint target) {
 
     double wind_t = el * sqrt(fmax(opt_timelapse, 1));
     double wa = (hash32(opt_seed, 5) % 360) * D2R;
-    GLuint progs[3] = {prog_sky, prog_star, prog_line};
-    for (int i = 0; i < 3; i++) {
+    GLuint progs[4] = {prog_sky, prog_star, prog_line, prog_text};
+    for (int i = 0; i < 4; i++) {
         GLuint p = progs[i];
         glUseProgram(p);
         u2f(p, "uRes", W, H);
@@ -1441,7 +1723,6 @@ static void render(double el, GLuint target) {
 
     /* ---- constellation figures ---- */
     double la = opt_lines ? 0.20 * smoothd(-3, -10, s) * (1 - 0.4 * moon_amt) : 0;
-    if (span_me >= 0 && span_me != span_front) la = 0;   /* spanning: once, on the front output */
     nstrip = 0;
     if (la > 0) {
         double lw = 0.75 * px + 0.6, gap = 6 * px;
@@ -1490,6 +1771,20 @@ static void render(double el, GLuint target) {
         glDrawArrays(GL_POINTS, 0, nstars);
         glBindVertexArray(vao_planet);
         glDrawArrays(GL_POINTS, 0, 5);
+    }
+
+    /* ---- names: planets, bright stars, constellations ---- */
+    if (opt_labels) {
+        labels(px, pxrad, smoothd(-3, -10, s), moon_amt, limit_mag(s) + 0.4 * night - 1.1 * moon_amt * night);
+        if (ntext) {
+            glUseProgram(prog_text);
+            glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, tex_atlas);
+            glActiveTexture(GL_TEXTURE0);
+            glBindVertexArray(vao_text);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_text);
+            glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 7 * ntext, textv, GL_STREAM_DRAW);
+            glDrawArrays(GL_TRIANGLES, 0, ntext);
+        }
     }
 
     /* ---- meteors ---- */
@@ -1667,7 +1962,8 @@ static void info(void) {
 static void usage(void) {
     fprintf(stderr,
         "usage: nightsky [--window | --root | --layer] [--lat LAT --lon LON] [--time \"YYYY-MM-DD HH:MM\"]\n"
-        "                [--timelapse X] [--az DEG] [--pitch DEG] [--fov DEG] [--lines] [--clouds X | --no-clouds]\n"
+        "                [--timelapse X] [--az DEG] [--pitch DEG] [--fov DEG] [--no-lines] [--no-labels] [--font NAME]\n"
+        "                [--clouds X | --no-clouds]\n"
         "                [--moon SCALE] [--fps N] [--seed N] [--epoch UNIXTIME]\n"
         "                [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
 
@@ -1788,6 +2084,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-layout") && i + 1 < argc) parse_layout(argv[++i]);
         else if (!strcmp(a, "-output") && i + 1 < argc) span_me = atoi(argv[++i]);
         else if (!strcmp(a, "-lines")) opt_lines = 1;
+        else if (!strcmp(a, "-no-lines")) opt_lines = 0;
+        else if (!strcmp(a, "-labels")) opt_labels = 1;
+        else if (!strcmp(a, "-no-labels")) opt_labels = 0;
+        else if (!strcmp(a, "-font") && i + 1 < argc) opt_font = argv[++i];
         else if (!strcmp(a, "-clouds") && i + 1 < argc) opt_clouds = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-no-clouds")) opt_clouds = 0;
         else if (!strcmp(a, "-moon") && i + 1 < argc) opt_moon = strtof(argv[++i], NULL);
@@ -1863,6 +2163,7 @@ int main(int argc, char **argv) {
 
     build_stars();
     build_figures();
+    if (opt_labels) fonts_init();
     bake_ridge(opt_seed);
     gl_init();
     camera();

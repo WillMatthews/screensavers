@@ -1,4 +1,5 @@
 CFLAGS ?= -O2 -Wall -Wextra
+FT = $(shell pkg-config --cflags --libs fontconfig freetype2)
 
 # Wayland protocol glue (generated): wlr-layer-shell for --layer, and the
 # xdg-shell it refers to for popups
@@ -8,7 +9,7 @@ PROTO_H = proto-layer-shell.h
 PROTO_C = proto-layer-shell.c proto-xdg-shell.c
 
 nightsky: nightsky.c stars.h $(PROTO_H) $(PROTO_C)
-	$(CC) $(CFLAGS) -o $@ nightsky.c $(PROTO_C) -lGL -lX11 -lEGL -lwayland-client -lwayland-egl -lm
+	$(CC) $(CFLAGS) -o $@ nightsky.c $(PROTO_C) $(FT) -lGL -lX11 -lEGL -lwayland-client -lwayland-egl -lm
 
 proto-layer-shell.h: $(LAYER_XML)
 	wayland-scanner client-header $< $@

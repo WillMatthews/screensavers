@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch the night-sky screensaver fullscreen. Extra args go to the hack
-# (e.g. --lines --timelapse 300 --lat 55.9 --lon -3.2 --time "2026-12-21 22:00").
+# (e.g. --no-labels --timelapse 300 --lat 55.9 --lon -3.2 --time "2026-12-21 22:00").
 # Built from nightsky.c (make).
 # Press q to quit.
 dir="$(cd "$(dirname "$0")" && pwd)"
