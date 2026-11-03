@@ -51,6 +51,14 @@ case $pick in
         fi
       fi ;;
 esac
+# Only these savers accept geographic coordinates. With auto mode disabled or
+# unavailable, omit the flags so each saver reads the saved manual location.
+case $pick in
+  nightsky|atc|clocktower)
+    if read -r lat lon < <(python3 "$dir/location.py" resolve); then
+      cmd+=(--lat "$lat" --lon "$lon")
+    fi ;;
+esac
 # pipes and maze are X11 hacks, run on the root window of a private Xwayland
 # that windowtolayer turns into a layer surface (that path tears under load,
 # hence everything else being native Wayland layer-shell clients)

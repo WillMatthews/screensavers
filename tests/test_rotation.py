@@ -16,7 +16,7 @@ class RotationTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        for name in ("savers.sh", "pick-saver.sh", "lock-bg.sh"):
+        for name in ("savers.sh", "pick-saver.sh", "lock-bg.sh", "location.py"):
             shutil.copy2(ROOT / name, self.root / name)
         self.savers = subprocess.check_output(
             ["bash", "-c", '. "$1"; printf "%s\\n" "${SAVERS[@]}"',
@@ -30,7 +30,9 @@ class RotationTests(unittest.TestCase):
         wrapper = self.root / "build/swaylock-plugin/example_xwayland_wrapper.py"
         wrapper.parent.mkdir(parents=True)
         wrapper.touch()
-        self.env = dict(os.environ, XDG_STATE_HOME=str(self.root / "state"))
+        self.env = dict(os.environ, XDG_STATE_HOME=str(self.root / "state"),
+                        XDG_CONFIG_HOME=str(self.root / "config"),
+                        XDG_CACHE_HOME=str(self.root / "cache"))
         self.env.pop("SWAYLOCK_PLUGIN_OUTPUT_NAME", None)
 
     def executable(self, name, content):
@@ -101,6 +103,13 @@ class RotationTests(unittest.TestCase):
     def test_spanning_saver_keeps_shared_seed_and_epoch(self):
         args = self.launch("nightsky")
         self.assertEqual(args, ["--layer", "--seed", "12345", "--epoch", "1790000000"])
+
+    def test_detected_coordinates_only_go_to_geographic_savers(self):
+        (self.root / "location.py").write_text('print("55.95 -3.19")\n')
+        for saver in ("nightsky", "atc"):
+            args = self.launch(saver)
+            self.assertEqual(args[-4:], ["--lat", "55.95", "--lon", "-3.19"])
+        self.assertNotIn("--lat", self.launch("stir"))
 
 
 if __name__ == "__main__":

@@ -180,7 +180,22 @@ L='0,0,1440,2560;1440,560,1969,1231;3409,560,2560,1440'
 - **Location:** `nightsky` and `atc` read an optional `~/.config/wallpapers/location`
   containing `LAT LON` (north and east positive), or take `--lat/--lon`.
   Without it, nightsky uses Greenwich and atc simulates traffic.
-- **Network:** only `atc` ever uses the network, and only when a location is
+- **Automatic location (opt-in):** run `python3 location.py auto` to enable
+  approximate public-IP geolocation for lock backgrounds (`nightsky`, `atc`,
+  and `clocktower`). Run `python3 location.py manual` to disable it, or
+  `python3 location.py status` to check the mode without making a request.
+  The default is manual. Your saved `~/.config/wallpapers/location` is never
+  overwritten and remains the fallback if detection fails. Standalone saver
+  binaries still use their manual file or explicit `--lat/--lon` flags.
+  Automatic mode contacts [ipapi.co](https://ipapi.co/api/) over HTTPS, exposing
+  your public IP to that service; it sends no saved address or coordinates.
+  This is an approximate area, not GPS, and a VPN may locate its exit server.
+  Successful results are cached for an hour; failures are retried after five
+  minutes. Requests time out after three seconds and concurrent outputs share
+  a nonblocking cache lock. While another output fetches, a saver uses its
+  manual fallback. Cache lives under `~/.cache/wallpapers/` and config under
+  `~/.config/wallpapers/` (both respect XDG directory overrides).
+- **Network:** `atc` uses the network when a location is
   set. It polls `api.adsb.lol` every 15 s with the coordinates rounded to two
   decimals, plus a check for the Goodyear airships every 5 minutes. It shares
   one cached fetch between all outputs and backs off on errors. A local
