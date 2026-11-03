@@ -34,7 +34,7 @@ Binaries aren't committed; each host builds what it wants (`make -C <saver>`).
 `lock-bg.sh` only ever picks savers that are built on the current host, so an
 unbuilt one can never leave the lock screen blank.
 
-The shuffle bag shows every built, non-benched saver once per cycle (12
+The shuffle bag shows every built, non-benched saver once per cycle (13
 when all are built). Both locking and skipping consume a pick. A new cycle
 is shuffled again and never starts with the previous cycle's last saver;
 repeats can still be close together across a cycle boundary, so this does
@@ -95,6 +95,7 @@ a wide layout so its swirling wake travels onto the neighbouring screen.
 | ![atc](docs/img/atc.jpg) | **atc**: an air-traffic radar scope, a paper flight-strip board and an approach view. Real ADS-B from a local receiver or, if a location is set, adsb.lol; otherwise simulated traffic. Airships (the Goodyear blimps) get special attention. |
 | ![pendulums](docs/img/pendulums.jpg) | **pendulums**: chaos made visible. A thousand double pendulums started a hair apart swing as one line, fray into a rainbow ribbon and bloom into chaos; also the flip-time chaos map and a Poincaré section building up. Live Lyapunov and energy-error readouts. |
 | ![voronoi](docs/img/voronoi.jpg) | **voronoi**: Lloyd's relaxation: hundreds of Voronoi cells settle into a honeycomb, are stirred by ripples, swirls and wind, divide and fuse, and now and then bud into the time or the hostname. Stained glass, giraffe, crackle, blueprint, paper and honey. |
+| ![papercut](docs/img/papercut.jpg) | **papercut**: a cut-paper shadow box: eight sheets of card over a base, each cut along a slowly changing line, every edge throwing a soft shadow that widens with the depth it falls. Nested tunnels, a drifting layered landscape, stacked topography and layered paper flowers, re-cut front sheets first every minute and a half; now and then a window is cut and the time or the host name rises through it in stepped outlines. On a wall, one continuous stack. Palettes: paper (white on white), dusk, sea, forest, kraft, ember, brass; `--scene` holds one. |
 | ![currents](docs/img/currents.jpg) | **currents**: a chrome sphere in a violet striped flow, a scarlet ribbon streaming into it and an animated wake of alternating vortices. Inspired by Robert Beatty's artwork for [Tame Impala's *Currents*](https://portofsoundrecords.com/products/currents); drawn procedurally with no image assets. |
 | ![pipes](docs/img/pipes.jpg) | **pipes**: xscreensaver's classic 3D pipes, growing until they fill the screen. Vendored as a binary from XScreenSaver 6.08. |
 | ![maze](docs/img/maze.jpg) | **maze**: xscreensaver's Maze3D, a walk through a brick labyrinth. Vendored as a binary from XScreenSaver 6.08. |
@@ -128,7 +129,6 @@ in `savers.sh`.
 | ![fdtd](docs/img/fdtd.jpg) | **fdtd**: Maxwell's equations solved live on a GPU Yee grid with absorbing boundaries: dipoles, a steered phased array, a Yagi, a horn, a dish, lenses, a waveguide bend, a photonic crystal, slits, total internal reflection and a ringing cavity, with far-field polar plots measured from the field. |
 | ![quantum](docs/img/quantum.jpg) | **quantum**: the time-dependent Schrödinger equation solved live on the GPU (split-step Fourier): tunnelling through a barrier, the double slit building up particle by particle, coherent and squeezed states, revival in a box beside its quantum carpet, Bragg scattering off a crystal, and scars in a stadium. Hue is phase, brightness is probability. |
 | ![sand](docs/img/sand.jpg) | **sand**: a falling-sand world that runs itself on the GPU: a side-on country of sea, forest, mountains and a volcano over folded strata, caves and a magma chamber. Water evaporates into clouds and rains back, lightning starts forest fires, the volcano erupts, lakes freeze in a 24-minute year; on a wall, one continuous world. |
-| ![papercut](docs/img/papercut.jpg) | **papercut**: a cut-paper shadow box: eight sheets of card over a base, each cut along a slowly changing line, every edge throwing a soft shadow that widens with the depth it falls. Nested tunnels, a drifting layered landscape, stacked topography and layered paper flowers, re-cut front sheets first every minute and a half; now and then a window is cut and the time or the host name rises through it in stepped outlines. On a wall, one continuous stack. Palettes: paper (white on white), dusk, sea, forest, kraft, ember, brass; `--scene` holds one. |
 
 ## Building
 
