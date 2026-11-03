@@ -72,9 +72,9 @@ class RotationTests(unittest.TestCase):
     def test_unavailable_savers_are_removed_from_saved_bag(self):
         state = Path(self.env["XDG_STATE_HOME"])
         state.mkdir()
-        (state / "lock-saver-bag").write_text("retired soapfilm bridge\n")
+        (state / "lock-saver-bag").write_text("retired soapfilm currents\n")
         self.assertEqual(self.pick(), "soapfilm")
-        self.assertEqual(self.pick(), "bridge")
+        self.assertEqual(self.pick(), "currents")
 
     def launch(self, saver, output=None):
         env = self.env.copy()
