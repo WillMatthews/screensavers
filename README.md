@@ -34,7 +34,7 @@ Binaries aren't committed; each host builds what it wants (`make -C <saver>`).
 `lock-bg.sh` only ever picks savers that are built on the current host, so an
 unbuilt one can never leave the lock screen blank.
 
-The shuffle bag shows every built, non-benched saver once per cycle (16
+The shuffle bag shows every built, non-benched saver once per cycle (14
 when all are built). Both locking and skipping consume a pick. A new cycle
 is shuffled again and never starts with the previous cycle's last saver;
 repeats can still be close together across a cycle boundary, so this does
@@ -88,8 +88,6 @@ a wide layout so its swirling wake travels onto the neighbouring screen.
 |---|---|
 | ![stir](docs/img/stir.jpg) | **stir**: away messages ("Will is away from this computer…") and live details on a grid of letters, twisted like Midjourney's home page, on an old monitor with phosphor trails and a clock that fades in. Palettes: brass, paper, phosphor, amber, ice. `--text FILE` uses your own messages. |
 | ![gauges](docs/img/gauges.jpg) | **gauges**: the machine's vital signs on a brass instrument panel: CPU temperature and load, a clock, memory, battery, and odometers for uptime and time away. |
-| ![contours](docs/img/contours.jpg) | **contours**: a drifting topographic map of terrain carved by its own drainage, with streams, villages, roads and invented place names. The sun moves and hills cast shadows. Palettes: brass, cream, slate, blueprint, survey. |
-| ![clockwork](docs/img/clockwork.jpg) | **clockwork**: an opened-up clock movement ticking at the real time; on a wall the side screens show the escapement and the gear train. |
 | ![nightsky](docs/img/nightsky.jpg) | **nightsky**: the real sky for your place and time over a mountain lake: stars, Milky Way, Moon phase, planets, meteors, twilight. `--lines` draws constellations. |
 | ![flightsim](docs/img/flightsim.jpg) | **flightsim**: flying low over procedural mountains, forests and lakes with a head-up display; spans a wall as one camera. |
 | ![orrery](docs/img/orrery.jpg) | **orrery**: a brass and enamel orrery in a dim study, planets where they really are tonight, its gear train turning in true ratios; now and then it winds forward months and back. |
@@ -114,6 +112,8 @@ in `savers.sh`.
 
 | | |
 |---|---|
+| ![contours](docs/img/contours.jpg) | **contours**: a drifting topographic map of terrain carved by its own drainage, with streams, villages, roads and invented place names. The sun moves and hills cast shadows. Palettes: brass, cream, slate, blueprint, survey. |
+| ![clockwork](docs/img/clockwork.jpg) | **clockwork**: an opened-up clock movement ticking at the real time; on a wall the side screens show the escapement and the gear train. |
 | ![splitflap](docs/img/splitflap.jpg) | **splitflap**: a railway departures board that clatters at each minute. Portrait screens get a tall platform board; a wall gets departures, arrivals and platform boards. Palettes: brass, classic, blue, led. |
 | ![lavalamp](docs/img/lavalamp.jpg) | **lavalamp**: a lava lamp warming up from cold, its wax swelling, necking, pinching off, rising and sinking back; on a wall, one lamp per screen along a shared shelf. |
 | ![ink](docs/img/ink.jpg) | **ink**: drops of ink falling into a tank of water and rolling into vortex rings and curling wisps, on a GPU fluid sim. Palettes: indigo, sumi, botanical, neon, sunset. |
