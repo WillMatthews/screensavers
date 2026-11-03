@@ -1764,24 +1764,35 @@ static const char *FS_RELIGHT = GLSL(
  * needs clamping where things do */
 static const char *FS_TAA = GLSL(
     in vec2 vUV;
-    uniform sampler2D uCur, uHist;
+    uniform sampler2D uCur, uHist, uAux, uShafts;
     uniform float uAlpha;
     uniform int uClamp;
+    /* the light shafts march from a fresh offset every frame, so they go
+     * through the history too, and widen the clamp by their own spread */
+    vec3 shaft(ivec2 p, vec2 o) {
+        return texture(uShafts, (vec2(p) + 0.5) / vec2(textureSize(uCur, 0)) + o / vec2(textureSize(uShafts, 0))).rgb;
+    }
     void main() {
         ivec2 p = ivec2(gl_FragCoord.xy);
         vec3 c = texelFetch(uCur, p, 0).rgb;
         vec3 h = texelFetch(uHist, p, 0).rgb;
+        vec2 aux = texelFetch(uAux, p, 0).rg;
+        float wet = aux.r > 0.0 || abs(aux.g) > 0.02 ? 1.0 : 0.0;
+        vec3 sh = shaft(p, vec2(0.0)) * wet;
         if (uClamp == 1) {
-            vec3 mn = c, mx = c;
+            vec3 mn = c, mx = c, smn = sh, smx = sh;
             for (int k = 0; k < 4; k++) {
                 ivec2 o = k == 0 ? ivec2(1, 0) : k == 1 ? ivec2(-1, 0) : k == 2 ? ivec2(0, 1) : ivec2(0, -1);
                 vec3 s = texelFetch(uCur, p + o, 0).rgb;
                 mn = min(mn, s); mx = max(mx, s);
+                s = shaft(p, vec2(o)) * wet;
+                smn = min(smn, s); smx = max(smx, s);
             }
+            mn += smn; mx += smx;
             vec3 ext = (mx - mn) * 0.25;
             h = clamp(h, mn - ext, mx + ext);
         }
-        o0 = vec4(mix(h, c, uAlpha), 1.0);
+        o0 = vec4(mix(h, c + sh, uAlpha), 1.0);
     });
 
 /* the view ray through a pixel: from the glass point G into the water */
@@ -1837,7 +1848,6 @@ static const char *FS_COMP = GLSL(
     in vec2 vUV;
     uniform sampler2D uCol;
     uniform sampler2D uAux;
-    uniform sampler2D uShafts;
     uniform vec4 uLay;       /* the whole canvas rect */
     uniform float uExpo;
     uniform float uCA;
@@ -1891,7 +1901,6 @@ static const char *FS_COMP = GLSL(
                 c.b = texture(uCol, uv - off).b;
             }
         }
-        if (aux.r > 0.0 || abs(mk) > 0.02) c += texture(uShafts, uv).rgb;
         c *= uExpo;
         /* a soft vignette over the whole wall */
         vec2 lv = (cv - uLay.xy) / uLay.zw - 0.5;
@@ -4761,31 +4770,12 @@ static void render(double t, double wt, GLuint target) {
     tq_end();
     glDisable(GL_DEPTH_TEST);
 
-    /* temporal antialiasing */
-    tq_begin(3);
-    int prev = taa_cur;
-    taa_cur ^= 1;
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_taa[taa_cur]);
-    glUseProgram(p_taa);
-    glUniform1i(U(p_taa, "uCur"), 3);
-    glUniform1i(U(p_taa, "uHist"), 4);
-    glUniform1f(U(p_taa, "uAlpha"), taa_frames ? taa_alpha : 1.0f);
-    glUniform1i(U(p_taa, "uClamp"), taa_clamp);
-    glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D, tex_cur);
-    glActiveTexture(GL_TEXTURE4);
-    glBindTexture(GL_TEXTURE_2D, tex_taa[prev]);
-    glActiveTexture(GL_TEXTURE0);
-    fullscreen();
-    taa_frames++;
-    tq_end();
-
-    /* light shafts, at a quarter size */
+    /* light shafts, at a quarter size, for the antialiasing to fold in */
+    float vr[4] = {view_x, view_y, view_w, view_h}, cc[3] = {cam_cx, cam_cy, cam_f};
     tq_begin(4);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_sh);
     glViewport(0, 0, (sw_ + 3) / 4, (sh_ + 3) / 4);
     set_common(p_shafts);
-    float vr[4] = {view_x, view_y, view_w, view_h}, cc[3] = {cam_cx, cam_cy, cam_f};
     glUniform4fv(U(p_shafts, "uView"), 1, vr);
     glUniform3fv(U(p_shafts, "uCanCam"), 1, cc);
     glUniform1i(U(p_shafts, "uAux"), 3);
@@ -4799,6 +4789,32 @@ static void render(double t, double wt, GLuint target) {
     fullscreen();
     tq_end();
 
+    /* temporal antialiasing */
+    tq_begin(3);
+    int prev = taa_cur;
+    taa_cur ^= 1;
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_taa[taa_cur]);
+    glViewport(0, 0, sw_, sh_);
+    glUseProgram(p_taa);
+    glUniform1i(U(p_taa, "uCur"), 3);
+    glUniform1i(U(p_taa, "uHist"), 4);
+    glUniform1f(U(p_taa, "uAlpha"), taa_frames ? taa_alpha : 1.0f);
+    glUniform1i(U(p_taa, "uClamp"), taa_clamp);
+    glUniform1i(U(p_taa, "uAux"), 5);
+    glUniform1i(U(p_taa, "uShafts"), 6);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, tex_cur);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, tex_taa[prev]);
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D, tex_aux);
+    glActiveTexture(GL_TEXTURE6);
+    glBindTexture(GL_TEXTURE_2D, tex_sh);
+    glActiveTexture(GL_TEXTURE0);
+    fullscreen();
+    taa_frames++;
+    tq_end();
+
     /* the composite */
     tq_begin(5);
     glBindFramebuffer(GL_FRAMEBUFFER, target);
@@ -4810,15 +4826,12 @@ static void render(double t, double wt, GLuint target) {
     glUniform4fv(U(p_comp, "uLay"), 1, lay);
     glUniform1i(U(p_comp, "uCol"), 4);
     glUniform1i(U(p_comp, "uAux"), 3);
-    glUniform1i(U(p_comp, "uShafts"), 5);
     glUniform1f(U(p_comp, "uExpo"), 1.0f);
     glUniform1f(U(p_comp, "uCA"), focus_on ? 0.0f : 1.0f);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, tex_aux);
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, tex_taa[taa_cur]);
-    glActiveTexture(GL_TEXTURE5);
-    glBindTexture(GL_TEXTURE_2D, tex_sh);
     glActiveTexture(GL_TEXTURE0);
     fullscreen();
     tq_end();
