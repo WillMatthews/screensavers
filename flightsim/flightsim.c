@@ -205,13 +205,14 @@ static void choose_palette(void) {
 }
 
 /* ---- flight model (an autopilot, really) ---- */
-static struct {
+typedef struct {
     double x, z;
     float y, yaw, pitch, roll, vy;
     float speed, turn, turn_target, clearance, next_change;
     float plan_turn, vy_avoid;       /* from the last avoidance plan */
     int replan;                      /* steps until the next one */
-} fl;
+} Flight;
+static Flight fl, previous_fl;
 static uint32_t rng_state;
 static float frand(void) {
     rng_state = rng_state * 1664525u + 1013904223u;
@@ -476,8 +477,7 @@ static GLuint program_full(const char *name, const char *vs, const char *tcs, co
         GLint l = glGetUniformLocation(p, units[i]);
         if (l >= 0) glUniform1i(l, i);
     }
-    GLint l = glGetUniformLocation(p, "uHist");                 /* unit 7 is the upload scratch unit */
-    if (l < 0) l = glGetUniformLocation(p, "uCloudTex");
+    GLint l = glGetUniformLocation(p, "uCloudTex");            /* unit 7 is the upload scratch unit */
     if (l >= 0) glUniform1i(l, 8);
     if ((l = glGetUniformLocation(p, "uDepth")) >= 0) glUniform1i(l, 9);
     if ((l = glGetUniformLocation(p, "uShaft")) >= 0) glUniform1i(l, 10);
@@ -486,7 +486,7 @@ static GLuint program_full(const char *name, const char *vs, const char *tcs, co
     if ((l = glGetUniformLocation(p, "uSSR")) >= 0) glUniform1i(l, 13);
     if ((l = glGetUniformLocation(p, "uWave")) >= 0) glUniform1i(l, 14);
     if ((l = glGetUniformLocation(p, "uDetail")) >= 0) glUniform1i(l, 15);
-    if ((l = glGetUniformLocation(p, "uHistory")) >= 0) glUniform1i(l, 16);
+    if ((l = glGetUniformLocation(p, "uHistory")) >= 0) glUniform1i(l, 8);
     return p;
 }
 
@@ -528,16 +528,6 @@ vec2 turn(vec2 w, vec2 m, float S) { return vec2(m.x * w.x + m.y * w.y, -m.y * w
 /* a slope read in turned texture space, back into world axes */
 vec2 unturn(vec2 g, vec2 m) { return vec2(m.x * g.x - m.y * g.y, m.y * g.x + m.x * g.y) / length(m); }
 
-/* The HDR buffers are R11G11B10 floats: 5-6 bit mantissas, which band a
- * smooth sky into faint lines along the horizon (they sweep across as the
- * view pitches). A +-half-step dither before storing, reshuffled every frame
- * and averaged by the TAA, turns the steps into a smooth gradient. */
-vec3 hdrDither(vec3 c, vec2 fc) {
-    float n = fract(52.9829189 * fract(dot(fc + uDitherOff * 1.37, vec2(0.06711056, 0.00583715)))) - 0.5;
-    return c * (1.0 + n * 0.035);
-}
-/* interleaved gradient noise: a jitter that tiles smoothly, unlike white noise */
-float ign(vec2 p) { p += uDitherOff; return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
 float hash13(vec3 p3) {
     p3 = fract(p3 * .1031);
     p3 += dot(p3, p3.zyx + 31.32);
@@ -567,7 +557,7 @@ vec3 stars(vec3 rd) {
     float b = (h - 0.991) / 0.009;
     float tw = 0.75 + 0.25 * sin(uTime * (2.0 + 5.0 * hash13(id + 7.0)) + h * 60.0);
     return mix(vec3(1.0, 0.8, 0.6), vec3(0.7, 0.8, 1.0), hash13(id + 3.0)) *
-           smoothstep(0.3, 0.0, length(f)) * b * b * 2.5 * tw * uStars * smoothstep(0.0, 0.2, rd.y);
+           (1.0 - smoothstep(0.0, 0.3, length(f))) * b * b * 2.5 * tw * uStars * smoothstep(0.0, 0.2, rd.y);
 }
 
 /* weight of the fine heightmap (+-4 km around the camera) over the coarse one */
@@ -596,7 +586,7 @@ float mistDepth(vec3 rd, float t) {
     float u0 = uCamY - uMistTop0, u1 = uCamY + e.y - mistTop(e.xz);
     /* antiderivative of the density profile (over height above the top) */
     vec2 F = vec2(u0, u1);
-    F = mix(F, Hm * (1.0 - exp(-F / Hm)), step(0.0, F));
+    F = mix(F, Hm * (1.0 - exp(-max(F, vec2(0.0)) / Hm)), step(0.0, F));
     float du = u1 - u0;
     float od = abs(du) > 1e-3 ? (F.y - F.x) / du : (u0 < 0.0 ? 1.0 : exp(-u0 / Hm));
     /* patchy, drifting slowly */
@@ -643,9 +633,7 @@ float cloudShadow(vec3 p) {
 }
 float hg(float mu, float g) { return (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * mu, 1.5); }
 
-float gCloudT;                   /* clouds(): opacity-weighted distance of what it hit */
-vec4 clouds(vec3 rd, float tmax, int steps, float jit) {
-    gCloudT = 4000.0;
+vec4 clouds(vec3 rd, float tmax, float stepMetres) {
     if (uCloudsOn < 0.5) return vec4(0.0, 0.0, 0.0, 1.0);
     float top = uCloudBase + uCloudThick, t0, t1;
     if (abs(rd.y) < 1e-4) {
@@ -657,16 +645,20 @@ vec4 clouds(vec3 rd, float tmax, int steps, float jit) {
     }
     t1 = min(t1, uFogFar);
     if (t1 <= t0) return vec4(0.0, 0.0, 0.0, 1.0);
-    float dt = (t1 - t0) / float(steps), T = 1.0, tw = 0.0, wsum = 0.0;
-    gCloudT = 0.5 * (t0 + t1);
+    float T = 1.0;
     vec3 L = vec3(0.0), fc = fogColor(rd);
     float mu = dot(rd, uSunDir);
     float phase = mix(hg(mu, -0.15), hg(mu, 0.7), 0.3);
-    for (int i = 0; i < steps; i++) {
-        float t = t0 + (float(i) + jit) * dt;
+    /* Fixed sample counts stretch into widely separated horizontal layers
+     * near the horizon. Bound the spacing in world metres instead. Keep
+     * interior samples fixed as the interval changes; only the last segment
+     * is shortened, so adding a segment does not move every other sample. */
+    for (float start = t0; start < t1; start += stepMetres) {
+        float dt = min(stepMetres, t1 - start);
+        float t = start + dt * 0.5;
         vec3 p = vec3(0.0, uCamY, 0.0) + rd * t;
-        /* footprint: a pixel's width out here (the jitter, averaged over
-         * frames, takes care of the gaps between steps) */
+        /* Filter both the pixel footprint and the distance between samples,
+         * so an under-sampled billow cannot pop in and out along the ray. */
         float fp = t * uPixAng;
         float cov = cloudCovLod(p.xz, fp);
         if (cov <= 0.0) continue;
@@ -674,8 +666,9 @@ vec4 clouds(vec3 rd, float tmax, int steps, float jit) {
         float d = min(cov * 1.1 - h * h * 1.3 - 0.05, h * 2.0);
         if (d <= -0.3) continue;
         vec3 q = vec3(uCloudMod.x + p.x, p.y * 1.6 - uTime * 1.5, uCloudMod.y + p.z) / 1024.0;
-        float lod = log2(fp / 16.0);
-        float bil = textureLod(uNoise3, q, lod).r * 0.65 + textureLod(uNoise3, q * 3.7, lod + 1.89).r * 0.35;
+        float lod = log2(max(fp, dt * 0.25) / 16.0);
+        /* Integer octaves preserve the noise period when world/time wraps. */
+        float bil = textureLod(uNoise3, q, lod).r * 0.65 + textureLod(uNoise3, q * 4.0, lod + 2.0).r * 0.35;
         d -= (1.0 - bil) * (0.30 + 0.25 * (1.0 - cov));
         float dens = clamp(d * 3.0, 0.0, 1.0);
         if (dens <= 0.0) continue;
@@ -689,11 +682,9 @@ vec4 clouds(vec3 rd, float tmax, int steps, float jit) {
         float a = 1.0 - exp(-dens * uCloudDens * dt);
         float fT = fogTrans(rd, t);
         L += T * a * (lum * fT + fc * (1.0 - fT));
-        tw += T * a * t; wsum += T * a;
         T *= 1.0 - a;
         if (T < 0.02) break;
     }
-    if (wsum > 1e-3) gCloudT = tw / wsum;
     return vec4(L, T);
 }
 
@@ -701,26 +692,26 @@ vec4 clouds(vec3 rd, float tmax, int steps, float jit) {
 vec2 terrShadow(vec3 p) { return texture(uShadow, (uT1Cam + p.xz / 32.0 + 0.5) / 1024.0).rg; }
 
 /* atmos() as col * a + rgb (for per-vertex use: small things like trees) */
-vec4 atmosParts(vec3 rd, float t, int steps, float jit) {
+vec4 atmosParts(vec3 rd, float t, float cloudStep) {
     float T = fogTrans(rd, t);
     vec3 add = fogColor(rd) * (1.0 - T);
     float Tm = max(exp(-mistDepth(rd, t)), 0.25);
     add = add * Tm + mistColor(rd) * (1.0 - Tm);
     float mul = T * Tm;
     if (uCloudsOn > 0.5 && (uCamY > uCloudBase || rd.y > 0.0)) {
-        vec4 c = clouds(rd, t, steps, jit);
+        vec4 c = clouds(rd, t, cloudStep);
         add = add * c.a + c.rgb;
         mul *= c.a;
     }
     return vec4(add, mul);
 }
 /* fog, then any cloud in front of a surface t metres away */
-vec3 atmos(vec3 col, vec3 rd, float t, int steps, float jit) {
+vec3 atmos(vec3 col, vec3 rd, float t, float cloudStep) {
     float T = fogTrans(rd, t);
     col = col * T + fogColor(rd) * (1.0 - T);
     col = applyMist(col, rd, t, 1.0);
     if (uCloudsOn > 0.5 && (uCamY > uCloudBase || rd.y > 0.0)) {
-        vec4 c = clouds(rd, t, steps, jit);
+        vec4 c = clouds(rd, t, cloudStep);
         col = col * c.a + c.rgb;
     }
     return col;
@@ -736,25 +727,14 @@ void main() {
 }
 );
 
-/* Sky clouds, accumulated over frames: each frame marches with a fresh jitter
- * and blends into last frame's result, reprojected to where the cloud it hit
- * was then (camera turn and travel both), so ~56 steps look like hundreds. */
+/* Closely spaced midpoint samples; the scene's TAA handles pixel edges. */
 static const char *FS_CLOUD = GLSL(
 in vec2 vUV;
 uniform vec4 uViewTan; uniform mat3 uCamRot;
-uniform vec4 uPrevTan; uniform mat3 uPrevRot; uniform vec3 uPrevCam;   /* uPrevCam: last camera, relative to this one */
-uniform sampler2D uHist; uniform float uHistW; uniform float uFrame;
 out vec4 oCol;
 void main() {
     vec3 rd = normalize(uCamRot * vec3(uViewTan.x + vUV.x * uViewTan.z, uViewTan.y + vUV.y * uViewTan.w, -1.0));
-    vec4 c = clouds(rd, 1e9, 32, fract(ign(gl_FragCoord.xy) + uFrame * 0.618034));
-    vec3 v = transpose(uPrevRot) * (rd * gCloudT - uPrevCam);
-    if (uHistW > 0.0 && v.z < -1.0) {
-        vec2 uv = (v.xy / -v.z - uPrevTan.xy) / uPrevTan.zw;
-        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0))))
-            c = mix(c, texture(uHist, uv), uHistW);
-    }
-    oCol = c;
+    oCol = clouds(rd, 1e9, 24.0);
 }
 );
 
@@ -768,7 +748,7 @@ void main() {
     vec3 col = skyBase(rd) + sunDisc(rd) + stars(rd);
     col = applyMist(col, rd, uFogFar, 1.0);
     vec4 c = uCloudsOn > 0.5 ? texture(uCloudTex, vUV) : vec4(0.0, 0.0, 0.0, 1.0);
-    oCol = vec4(hdrDither(col * c.a + c.rgb, gl_FragCoord.xy), 1.0);
+    oCol = vec4(col * c.a + c.rgb, 1.0);
 }
 );
 
@@ -959,9 +939,9 @@ void main() {
     float rockAmt = smoothstep(0.26, 0.40, slope + (n2 - 0.5) * 0.18) + smoothstep(1250.0, 1500.0, hN) * 0.6;
     col = mix(col, rc, clamp(rockAmt, 0.0, 1.0));
     float snowline = 1080.0 + (n1 - 0.5) * 260.0;
-    float snowAmt = smoothstep(snowline - 40.0, snowline + 60.0, hN) * smoothstep(0.42, 0.22, slope + (n3 - 0.5) * 0.15);
+    float snowAmt = smoothstep(snowline - 40.0, snowline + 60.0, hN) * (1.0 - smoothstep(0.22, 0.42, slope + (n3 - 0.5) * 0.15));
     col = mix(col, snow, snowAmt);
-    if (h < 0.5) col = mix(wet, sand * 0.6, smoothstep(0.0, -8.0, h));
+    if (h < 0.5) col = mix(wet, sand * 0.6, 1.0 - smoothstep(-8.0, 0.0, h));
 
     /* lighting */
     vec2 sa = terrShadow(p);
@@ -971,7 +951,7 @@ void main() {
     vec3 lit = col * (uSunCol * diff * sh + amb);
     vec3 H = normalize(uSunDir - rd);
     lit += uSunCol * snowAmt * sh * pow(max(dot(n, H), 0.0), 40.0) * 0.25;
-    oCol = vec4(hdrDither(atmos(lit, rd, dist, 10, ign(gl_FragCoord.xy)), gl_FragCoord.xy), 1.0);
+    oCol = vec4(atmos(lit, rd, dist, 48.0), 1.0);
 }
 );
 
@@ -1041,16 +1021,14 @@ void main() {
     body *= uAmbSky * 1.5 + uSunCol * max(uSunDir.y, 0.0) * 0.35 * sh;
     float aBody = 1.0 - exp(-depth / 3.5);
     float fn = texture(uNoise2, w / 9.0 + vec2(uTime * 0.02, 0.0)).a;
-    float foam = smoothstep(1.4, 0.2, depth + (fn - 0.5) * 1.6) * (0.55 + 0.45 * sin(uTime * 1.7 - depth * 5.0 + fn * 8.0));
+    float foam = (1.0 - smoothstep(0.2, 1.4, depth + (fn - 0.5) * 1.6)) * (0.55 + 0.45 * sin(uTime * 1.7 - depth * 5.0 + fn * 8.0));
     foam *= 1.0 - smoothstep(600.0, 2500.0, dist);
     vec3 col = F * refl + (1.0 - F) * body * aBody + spec;
     float alpha = clamp(F + (1.0 - F) * aBody, 0.0, 1.0);
     col = mix(col, (uSunCol * max(uSunDir.y, 0.0) * sh + uAmbSky) * 0.7, foam * 0.8);
     alpha = mix(alpha, 1.0, foam * 0.8);
-    float T = fogTrans(rd, dist);
-    col = col * T + fogColor(rd) * (1.0 - T) * alpha;
-    col = applyMist(col, rd, dist, alpha);
-    oCol = vec4(col, alpha);
+    vec4 atm = atmosParts(rd, dist, 48.0);
+    oCol = vec4(col * atm.a + atm.rgb * alpha, alpha);
 }
 );
 
@@ -1087,7 +1065,7 @@ void main() {
     vShadow = terrShadow(iA.xyz).r * cloudShadow(iA.xyz);
     vec3 d = vRel - vec3(0.0, uCamY, 0.0);
     float dl = length(d);
-    vAtm = atmosParts(d / dl, dl, 4, 0.5);
+    vAtm = atmosParts(d / dl, dl, 96.0);
     gl_Position = uVP * vec4(vRel, 1.0);
 }
 );
@@ -1168,7 +1146,7 @@ void main() {
     vN = n;
     vec3 d = vRel - vec3(0.0, uCamY, 0.0);
     float dl = length(d);
-    vAtm = atmosParts(d / dl, dl, 4, 0.5);
+    vAtm = atmosParts(d / dl, dl, 96.0);
     gl_Position = uVP * vec4(vRel, 1.0);
 }
 );
@@ -1379,9 +1357,9 @@ void main() {
 static const char *FS_TAA = GLSL(
 in vec2 vUV;
 uniform sampler2D uSrc; uniform sampler2D uDepth; uniform sampler2D uHistory;
-uniform vec4 uViewTan; uniform mat3 uCamRot;   /* unjittered */
-uniform mat4 uPrevVP; uniform vec3 uCamDelta;  /* last frame's unjittered VP; camera travel since */
-uniform float uHistOK;
+uniform vec4 uViewTan; uniform mat3 uCamRot;   /* matches the jittered depth buffer */
+uniform mat4 uPrevVP; uniform vec3 uCamDelta;  /* last frame's steady VP; camera travel since */
+uniform float uHistOK; uniform vec2 uJitter;
 out vec4 oCol;
 vec3 catmull(sampler2D t, vec2 uv) {
     vec2 sz = vec2(textureSize(t, 0)), p = uv * sz - 0.5, c = floor(p) + 0.5, f = p - floor(p);
@@ -1396,8 +1374,12 @@ vec3 catmull(sampler2D t, vec2 uv) {
     return max(r / wsum, vec3(0.0));
 }
 void main() {
-    ivec2 ic = ivec2(gl_FragCoord.xy), sz = textureSize(uSrc, 0);
-    vec3 c = texelFetch(uSrc, ic, 0).rgb, mn = c, mx = c;
+    ivec2 sz = textureSize(uSrc, 0);
+    /* Resolve onto a steady pixel grid. Reprojecting correctly is not enough:
+     * the current sample must also have its camera jitter removed. */
+    vec2 uv = clamp(vUV - uJitter / vec2(sz), 0.5 / vec2(sz), 1.0 - 0.5 / vec2(sz));
+    ivec2 ic = ivec2(uv * vec2(sz));
+    vec3 c = texture(uSrc, uv).rgb, mn = c, mx = c;
     for (int i = 0; i < 4; i++) {
         ivec2 o = i == 0 ? ivec2(1, 0) : i == 1 ? ivec2(-1, 0) : i == 2 ? ivec2(0, 1) : ivec2(0, -1);
         vec3 q = texelFetch(uSrc, clamp(ic + o, ivec2(0), sz - 1), 0).rgb;
@@ -1406,13 +1388,13 @@ void main() {
     if (uHistOK < 0.5) { oCol = vec4(c, 1.0); return; }
     /* where this was last frame */
     float d = texelFetch(uDepth, ic, 0).r;
-    vec3 v = vec3(uViewTan.x + vUV.x * uViewTan.z, uViewTan.y + vUV.y * uViewTan.w, -1.0);
+    vec3 v = vec3(uViewTan.x + uv.x * uViewTan.z, uViewTan.y + uv.y * uViewTan.w, -1.0);
     vec4 pc = d > 0.0 ? uPrevVP * vec4(uCamRot * (v * (1.5 / d)) + vec3(0.0, uCamY, 0.0) + uCamDelta, 1.0)
                       : uPrevVP * vec4(uCamRot * v, 0.0);
     vec2 pu = pc.xy / pc.w * 0.5 + 0.5;
     if (pc.w <= 0.0 || any(lessThan(pu, vec2(0.0))) || any(greaterThan(pu, vec2(1.0)))) { oCol = vec4(c, 1.0); return; }
     vec3 h = clamp(catmull(uHistory, pu), mn, mx);
-    oCol = vec4(hdrDither(mix(h, c, 0.12), gl_FragCoord.xy + 71.0), 1.0);   /* the history is R11G11B10 too */
+    oCol = vec4(mix(h, c, 0.12), 1.0);
 }
 );
 
@@ -1444,7 +1426,7 @@ void main() {
     /* reach at most ~0.7 of the screen toward the sun */
     float len = length(d * vec2(uAspect, 1.0));
     d *= min(1.0, 0.7 / max(len, 1e-4)) / float(N);
-    vec2 p = vUV + d * ign(gl_FragCoord.xy);
+    vec2 p = vUV + d * 0.5;
     vec3 sum = vec3(0.0);
     float w = 1.0;
     for (int i = 0; i < N; i++) {
@@ -1467,9 +1449,8 @@ static GLuint fbo_refl, tex_refl, tex_refl_d;
 static GLuint fbo_ssr, tex_ssr;                /* the water's reflections, quarter res */              /* half res copy of the scene for the water to reflect */
 static GLuint fbo_shaft[2], tex_shaft[2];     /* light shafts at quarter res: the mask, then its radial blur */
 static int shaft_w, shaft_h;
-static GLuint fbo_cloud[2], tex_cloud[2];     /* sky clouds at half res, this frame's and last's (ping-pong) */
+static GLuint fbo_cloud, tex_cloud;           /* stable sky clouds at half res */
 static int cloud_w, cloud_h;
-static int cloud_cur, cloud_hist;             /* cloud_hist: tex_cloud[!cloud_cur] is valid */
 static int scene_w, scene_h;
 #define NBLOOM 5
 static GLuint fbo_bloom[NBLOOM], tex_bloom[NBLOOM];
@@ -1503,15 +1484,13 @@ static void resize_scene(int w, int h) {
         glDeleteTextures(1, &tex_refl); glDeleteTextures(1, &tex_refl_d); glDeleteFramebuffers(1, &fbo_refl);
         glDeleteTextures(1, &tex_ssr); glDeleteFramebuffers(1, &fbo_ssr);
         glDeleteTextures(NBLOOM, tex_bloom); glDeleteFramebuffers(NBLOOM, fbo_bloom);
-        glDeleteTextures(2, tex_cloud); glDeleteFramebuffers(2, fbo_cloud);
+        glDeleteTextures(1, &tex_cloud); glDeleteFramebuffers(1, &fbo_cloud);
     }
-    for (int i = 0; i < 2; i++) {
-        cloud_w = (w + 1) / 2; cloud_h = (h + 1) / 2;
-        tex_cloud[i] = mk_tex2d(GL_RGBA16F, cloud_w, cloud_h, GL_RGBA, GL_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
-        fbo_cloud[i] = mk_fbo(tex_cloud[i]);
-    }
-    cloud_hist = 0;
-    tex_scene = mk_tex2d(GL_R11F_G11F_B10F, w, h, GL_RGB, GL_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);   /* HDR; alpha unused */
+    cloud_w = (w + 1) / 2; cloud_h = (h + 1) / 2;
+    tex_cloud = mk_tex2d(GL_RGBA16F, cloud_w, cloud_h, GL_RGBA, GL_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
+    fbo_cloud = mk_fbo(tex_cloud);
+    /* Half floats keep sky gradients smooth without injecting HDR noise. */
+    tex_scene = mk_tex2d(GL_RGB16F, w, h, GL_RGB, GL_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
     /* depth as a texture: the light shafts read where the sky shows through */
     tex_depth = mk_tex2d(GL_DEPTH_COMPONENT32F, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, NULL, GL_NEAREST, GL_CLAMP_TO_EDGE);
     fbo_scene = mk_fbo(tex_scene);
@@ -1976,13 +1955,13 @@ static int W = 800, H = 600;
 /* The virtual camera: canvas point (cx, cy) is straight ahead, cam_f is the
  * focal length in canvas units, and this window shows canvas rect view_*.
  * Canvas y grows downward. Without --layout the canvas is just the window. */
-static float cam_cx, cam_cy, cam_f, view_x, view_y, view_w, view_h, hud_h;
+static float cam_cx, cam_cy, cam_f, view_x, view_y, view_w, view_h, hud_w, hud_h;
 static float lay_x0, lay_y0, lay_w, lay_h;
 
 static void setup_view(void) {
     if (span_me < 0) {
         view_x = view_y = 0; view_w = W; view_h = H;
-        cam_cx = W / 2.0f; cam_cy = H / 2.0f; hud_h = H;
+        cam_cx = W / 2.0f; cam_cy = H / 2.0f; hud_w = W; hud_h = H;
         cam_f = H / 2.0f / tanf(opt_fov / 2 / DEG);
         lay_x0 = lay_y0 = 0; lay_w = W; lay_h = H;
         return;
@@ -2000,7 +1979,7 @@ static void setup_view(void) {
         if (span[i][0] <= mx && mx < span[i][0] + span[i][2]) { mid = i; break; }
     cam_cx = span[mid][0] + span[mid][2] / 2;
     cam_cy = span[mid][1] + span[mid][3] / 2;
-    hud_h = span[mid][3];
+    hud_w = span[mid][2]; hud_h = span[mid][3];
     /* --fov is the horizontal angle across the whole layout here */
     float halfw = fmaxf(cam_cx - x0, x1 - cam_cx);
     cam_f = halfw / tanf((opt_fov_set ? opt_fov : 120.0f) / 2 / DEG);
@@ -2028,22 +2007,21 @@ static void cam_rot(float m[9]) {
         }
 }
 
-static float view_tan[4], rot3[9], vp[16];
+static float view_tan[4], rot3[9], vp[16], vp_stable[16];
 /* TAA state (see render()) */
 static GLuint fbo_taa[2], tex_taa[2], p_taa;
 static int taa_w, taa_h, taa_cur, taa_hist;
 static float taa_jx, taa_jy;
 static unsigned taa_frame;
 
-static float vp_nj[16], view_tan_nj[4];      /* the same without the TAA jitter */
 static void build_vp(float l, float r, float b, float t, float *out);
 /* jx, jy: this frame's TAA jitter, in scene pixels over a scene sw x sh */
 static void setup_matrices(float jx, float jy, int sw, int sh) {
     float l = (view_x - cam_cx) / cam_f, r = (view_x + view_w - cam_cx) / cam_f;
     float b = (cam_cy - view_y - view_h) / cam_f, t = (cam_cy - view_y) / cam_f;
     cam_rot(rot3);
-    view_tan_nj[0] = l; view_tan_nj[1] = b; view_tan_nj[2] = r - l; view_tan_nj[3] = t - b;
-    build_vp(l, r, b, t, vp_nj);
+    build_vp(l, r, b, t, vp_stable);
+    taa_jx = jx; taa_jy = jy;
     /* shifting the frustum by +j pixels moves the image by -j */
     float ox = jx * (r - l) / sw, oy = jy * (t - b) / sh;
     l += ox; r += ox; b += oy; t += oy;
@@ -2207,32 +2185,15 @@ static void draw_trees(void) {
     glDisable(GL_CULL_FACE);
 }
 
-/* any water in the coarse map ahead (a cheap scan): else skip the water
- * and its reflection passes altogether */
-static int water_ahead(void) {
-    const HMap *m = &hm[1];
-    double sp = m->unit * BASE;
-    float fx = -sinf(fl.yaw), fz = -cosf(fl.yaw);
-    for (int j = -48; j <= 48; j++)
-        for (int i = -48; i <= 48; i++) {
-            float dx = i * 4 * (float)sp, dz = j * 4 * (float)sp;   /* every 4th texel: 128 m */
-            if (dx * fx + dz * fz < -600) continue;                    /* well behind */
-            int32_t tx = (int32_t)floor((fl.x + dx) / sp), tz = (int32_t)floor((fl.z + dz) / sp);
-            if (m->data[2 * ((size_t)(tz & (m->n - 1)) * m->n + (tx & (m->n - 1)))] < 0.5f) return 1;
-        }
-    return 0;
-}
-
 static void draw_water(void) {
     set_common(p_water);
     glUniform2f(UL(p_water, "uSceneSize"), (float)scene_w, (float)scene_h);
     glUniform1f(UL(p_water, "uExtent"), FOG_FAR);
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);
+    /* Temporal reprojection needs the water surface's depth, not the lakebed. */
     glBindVertexArray(vao_water);
     glDrawArrays(GL_TRIANGLES, 0, 6);
-    glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
 }
 
@@ -2362,7 +2323,7 @@ static float draw_shafts(void) {
     glActiveTexture(GL_TEXTURE9);
     glBindTexture(GL_TEXTURE_2D, tex_depth);
     glActiveTexture(GL_TEXTURE8);
-    glBindTexture(GL_TEXTURE_2D, tex_cloud[cloud_cur]);
+    glBindTexture(GL_TEXTURE_2D, tex_cloud);
     fullscreen();
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_shaft[1]);
     set_common(p_shaft_blur);
@@ -2386,41 +2347,39 @@ static void prof_mark(int i) { if (prof_on) glQueryCounter(prof_q[i], GL_TIMESTA
 static void taa_resolve(void) {
     static float prev_vp[16];
     static double prev_x, prev_z;
-    GLuint old_tex = 0, old_fbo = 0;
     if (taa_w != scene_w || taa_h != scene_h) {
-        /* new size (dynamic resolution): the history is read by uv, so the
-         * old one still serves this frame; then it goes */
-        if (tex_taa[0]) {
-            old_tex = tex_taa[!taa_cur]; old_fbo = fbo_taa[!taa_cur];
-            glDeleteTextures(1, &tex_taa[taa_cur]); glDeleteFramebuffers(1, &fbo_taa[taa_cur]);
-        }
+        /* A size change starts fresh. Keep one clear read/write ownership
+         * rule instead of retaining a third, differently sized history. */
+        glDeleteTextures(2, tex_taa);
+        glDeleteFramebuffers(2, fbo_taa);
         for (int i = 0; i < 2; i++) {
-            tex_taa[i] = mk_tex2d(GL_R11F_G11F_B10F, scene_w, scene_h, GL_RGB, GL_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
+            tex_taa[i] = mk_tex2d(GL_RGB16F, scene_w, scene_h, GL_RGB, GL_FLOAT, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE);
             fbo_taa[i] = mk_fbo(tex_taa[i]);
         }
         taa_w = scene_w; taa_h = scene_h;
+        taa_hist = 0;
     }
     double jump = fabs(prev_x - fl.x) + fabs(prev_z - fl.z);
-    GLuint hist = old_tex ? old_tex : tex_taa[!taa_cur];
+    GLuint hist = tex_taa[taa_cur];
     taa_cur ^= 1;
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_taa[taa_cur]);
     glViewport(0, 0, scene_w, scene_h);
     set_common(p_taa);
-    glUniform4fv(UL(p_taa, "uViewTan"), 1, view_tan_nj);
+    glUniform4fv(UL(p_taa, "uViewTan"), 1, view_tan);
     glUniformMatrix3fv(UL(p_taa, "uCamRot"), 1, GL_FALSE, rot3);
     glUniformMatrix4fv(UL(p_taa, "uPrevVP"), 1, GL_FALSE, prev_vp);
     glUniform3f(UL(p_taa, "uCamDelta"), (float)(fl.x - prev_x), 0.0f, (float)(fl.z - prev_z));
     glUniform1f(UL(p_taa, "uHistOK"), taa_hist && jump < 200 ? 1.0f : 0.0f);
+    glUniform2f(UL(p_taa, "uJitter"), taa_jx, taa_jy);
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, tex_scene);
     glActiveTexture(GL_TEXTURE9);
     glBindTexture(GL_TEXTURE_2D, tex_depth);
-    glActiveTexture(GL_TEXTURE16);
+    glActiveTexture(GL_TEXTURE8);
     glBindTexture(GL_TEXTURE_2D, hist);
     glActiveTexture(GL_TEXTURE7);
     fullscreen();
-    if (old_tex) { glDeleteTextures(1, &old_tex); glDeleteFramebuffers(1, &old_fbo); }
-    memcpy(prev_vp, vp_nj, sizeof prev_vp);
+    memcpy(prev_vp, vp_stable, sizeof prev_vp);
     prev_x = fl.x; prev_z = fl.z;
     taa_hist = 1;
 }
@@ -2495,7 +2454,8 @@ static void seg_number(float x, float y, float h, int v, int min_digits, int rig
 }
 
 static void draw_hud(void) {
-    float s = hud_h / 720.0f;
+    /* Keep both readouts inside the centre output, including in portrait. */
+    float s = fminf(hud_h / 720.0f, hud_w / 840.0f);
     /* canvas units, origin at the camera centre, y up */
     float ox = view_x - cam_cx, oy = cam_cy - view_y - view_h, px = W / view_w, py = H / view_h;
     glUseProgram(0);
@@ -2585,32 +2545,16 @@ static void draw_hud(void) {
 static float render_scale = 1.0f;
 
 static void draw_clouds(void) {
-    static float prev_tan[4], prev_rot[9];
-    static double prev_x, prev_y, prev_z;
-    static unsigned frame;
-    cloud_cur ^= 1;
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_cloud[cloud_cur]);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_cloud);
     glViewport(0, 0, cloud_w, cloud_h);
     set_common(p_cloud);
     glUniform4fv(UL(p_cloud, "uViewTan"), 1, view_tan);
     glUniformMatrix3fv(UL(p_cloud, "uCamRot"), 1, GL_FALSE, rot3);
-    glUniform4fv(UL(p_cloud, "uPrevTan"), 1, prev_tan);
-    glUniformMatrix3fv(UL(p_cloud, "uPrevRot"), 1, GL_FALSE, prev_rot);
-    glUniform3f(UL(p_cloud, "uPrevCam"), (float)(prev_x - fl.x), (float)(prev_y - fl.y), (float)(prev_z - fl.z));
-    /* a big jump (seek, first frame) means the history is someone else's sky */
-    double jump = fabs(prev_x - fl.x) + fabs(prev_z - fl.z);
-    glUniform1f(UL(p_cloud, "uHistW"), cloud_hist && jump < 200 ? 0.85f : 0.0f);
-    glUniform1f(UL(p_cloud, "uFrame"), (float)(frame++ & 1023));
     glUniform1f(UL(p_cloud, "uPixAng"), pix_ang * 2);        /* half res */
-    glActiveTexture(GL_TEXTURE8);
-    glBindTexture(GL_TEXTURE_2D, tex_cloud[!cloud_cur]);
     fullscreen();
-    glBindTexture(GL_TEXTURE_2D, tex_cloud[cloud_cur]);     /* for the sky pass */
+    glActiveTexture(GL_TEXTURE8);
+    glBindTexture(GL_TEXTURE_2D, tex_cloud);               /* for the sky pass */
     glActiveTexture(GL_TEXTURE7);
-    memcpy(prev_tan, view_tan, sizeof prev_tan);
-    memcpy(prev_rot, rot3, sizeof prev_rot);
-    prev_x = fl.x; prev_y = fl.y; prev_z = fl.z;
-    cloud_hist = 1;
 }
 
 static void prof_collect(void) {
@@ -2678,7 +2622,6 @@ static void render(GLuint target) {
     glDepthMask(GL_TRUE);
 
     prof_mark(PR_WATER);
-    if (water_ahead()) {
     /* what the water reflects: the scene so far, at half res */
     glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_refl);
@@ -2706,8 +2649,6 @@ static void render(GLuint target) {
     glViewport(0, 0, scene_w, scene_h);
     glEnable(GL_DEPTH_TEST);
     draw_water();
-    }
-
     glClipControl(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
     glDepthFunc(GL_LESS);
     prof_mark(PR_TAA);
@@ -2935,10 +2876,31 @@ static const double STEP = 1.0 / 120;
 static long steps;
 static void advance(double t) {
     while ((steps + 1) * STEP <= t) {
+        previous_fl = fl;
         fly((float)STEP, (float)(steps * STEP));
         steps++;
     }
     sim_time = (float)(steps * STEP);
+}
+
+/* Keep the deterministic 120 Hz autopilot, but draw between its ticks.
+ * Rendering one tick behind supplies two known poses without predicting or
+ * changing the route. All outputs use the same time and interpolation. */
+static void render_at(double t, GLuint target) {
+    advance(t);
+    Flight state = fl;
+    if (steps) {
+        double a = fmin(fmax((t - steps * STEP) / STEP, 0), 1);
+        fl.x = previous_fl.x + (state.x - previous_fl.x) * a;
+        fl.z = previous_fl.z + (state.z - previous_fl.z) * a;
+        fl.y = previous_fl.y + (state.y - previous_fl.y) * a;
+        fl.yaw = previous_fl.yaw + (state.yaw - previous_fl.yaw) * a;
+        fl.pitch = previous_fl.pitch + (state.pitch - previous_fl.pitch) * a;
+        fl.roll = previous_fl.roll + (state.roll - previous_fl.roll) * a;
+    }
+    sim_time = (float)fmax(t - STEP, 0);
+    render(target);
+    fl = state;
 }
 
 static void save_ppm(const char *path) {
@@ -3034,11 +2996,10 @@ int main(int argc, char **argv) {
         tex_final = mk_tex2d(GL_RGBA8, W, H, GL_RGBA, GL_UNSIGNED_BYTE, NULL, GL_NEAREST, GL_CLAMP_TO_EDGE);
         fbo_final = mk_fbo(tex_final);
         render_scale = opt_scale > 0 ? opt_scale : 1.0f;
-        advance(opt_at);
-        render(fbo_final);                 /* warm-up: streams everything, full bake */
+        render_at(opt_at, fbo_final);       /* warm-up: streams everything, full bake */
         glFinish();
         if (opt_shot) {
-            for (int i = 0; i < 24; i++) render(fbo_final);   /* let the cloud accumulation settle */
+            for (int i = 0; i < 24; i++) render_at(opt_at, fbo_final);   /* settle scene TAA */
             save_ppm(opt_shot);
             return 0;
         }
@@ -3047,8 +3008,7 @@ int main(int argc, char **argv) {
         prof_on = 1;
         for (int i = 0; i < opt_bench; i++) {
             double f0 = now();
-            advance(opt_at + (i + 1) / 60.0);
-            render(fbo_final);
+            render_at(opt_at + (i + 1) / 60.0, fbo_final);
             glFinish();
             prof_collect();
             worst = fmax(worst, now() - f0);
@@ -3081,8 +3041,7 @@ int main(int argc, char **argv) {
             }
         }
         double t = now();
-        advance(wallclock() - epoch + opt_at);
-        render(0);
+        render_at(wallclock() - epoch + opt_at, 0);
         glFinish();
         double took = now() - t;
         if (opt_layer) eglSwapBuffers(wl.ed, wl.es);         /* waits for the compositor's frame */

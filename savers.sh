@@ -3,14 +3,14 @@
 # in git, so a saver nobody has built here yet must never be picked: a pick
 # that can't start leaves swaylock-plugin re-running it over a blank screen.
 
-SAVERS=(pipes maze flightsim stir gauges nightsky soapfilm aquarium atc voronoi pendulums currents papercut)
+SAVERS=(pipes maze flightsim stir nightsky soapfilm atc voronoi pendulums currents papercut)
 
 # kept and buildable, but out of the rotation while they're being worked on
-BENCHED=(bridge orrery contours clockwork marbling ink lavalamp billiards algorithms netflow splitflap kalman clocktower neural orbits fdtd quantum sand origami)
+BENCHED=(bridge orrery contours clockwork marbling ink lavalamp billiards netflow splitflap kalman clocktower neural orbits fdtd quantum sand aquarium gauges)
 
 # savers launched with --epoch/--layout/--output as one wall. Soapfilm and
 # aquarium can span too, but each monitor gets its own full scene when locked.
-SPANNING=(flightsim stir nightsky marbling splitflap gauges clockwork ink orrery lavalamp atc billiards pendulums algorithms voronoi netflow kalman clocktower neural bridge currents orbits fdtd quantum sand papercut origami)
+SPANNING=(flightsim stir nightsky marbling splitflap gauges clockwork ink orrery lavalamp atc billiards pendulums voronoi netflow kalman clocktower neural bridge currents orbits fdtd quantum sand papercut)
 
 # the executable for a saver
 saver_bin() {

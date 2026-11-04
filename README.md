@@ -30,11 +30,11 @@ swaylock-plugin --command-each lock-bg.sh      one instance per output
 | `BENCHED` | built and runnable, but kept out of the rotation while being worked on |
 | `SPANNING` | savers launched with `--epoch --layout --output` to treat all outputs as one wall |
 
-Binaries aren't committed; each host builds what it wants (`make -C <saver>`).
+Binaries aren't committed; each host builds what it wants (`make <saver>`).
 `lock-bg.sh` only ever picks savers that are built on the current host, so an
 unbuilt one can never leave the lock screen blank.
 
-The shuffle bag shows every built, non-benched saver once per cycle (13
+The shuffle bag shows every built, non-benched saver once per cycle (11
 when all are built). Both locking and skipping consume a pick. A new cycle
 is shuffled again and never starts with the previous cycle's last saver;
 repeats can still be close together across a cycle boundary, so this does
@@ -87,11 +87,9 @@ a wide layout so its swirling wake travels onto the neighbouring screen.
 | | |
 |---|---|
 | ![stir](docs/img/stir.jpg) | **stir**: away messages ("Will is away from this computer…") and live details on a grid of letters, twisted like Midjourney's home page, on an old monitor with phosphor trails and a clock that fades in. Palettes: brass, paper, phosphor, amber, ice. `--text FILE` uses your own messages. |
-| ![gauges](docs/img/gauges.jpg) | **gauges**: the machine's vital signs on a brass instrument panel: CPU temperature and load, a clock, memory, battery, and odometers for uptime and time away. |
 | ![nightsky](docs/img/nightsky.jpg) | **nightsky**: the real sky for your place and time over a mountain lake: stars, Milky Way, Moon phase, planets, meteors, twilight. Constellation figures are drawn in dim gold and named like an old star atlas, with the planets and brightest stars labelled in italic; the names come out once it's dark and stay clear of the mountains. `--no-lines` and `--no-labels` turn them off. |
-| ![flightsim](docs/img/flightsim.jpg) | **flightsim**: flying low over procedural mountains, forests and lakes with a head-up display; spans a wall as one camera. |
+| ![flightsim](docs/img/flightsim.jpg) | **flightsim**: flying low over procedural mountains, forests and reflective lakes with a head-up display. Smooth HDR skies in day, golden-hour, dusk and night lighting; spans a wall as one camera. |
 | ![soapfilm](docs/img/soapfilm.jpg) | **soapfilm**: physically computed thin-film colour: a draining film in a wire frame that turns black and bursts, alternating with drifting bubbles that merge and pop. A separate scene on each monitor; coarsening foam is opt-in with `--scene foam`. |
-| ![aquarium](docs/img/aquarium.jpg) | **aquarium**: a planted freshwater tank through the front glass: schooling neon tetras, angelfish, discus and corys with lofted bodies and rayed fins, a fire eel that burrows into the sand, cherry and Amano shrimp picking at the stones. Caustics, light shafts and real time-of-day lighting; a thermometer on the glass reads the CPU temperature. |
 | ![atc](docs/img/atc.jpg) | **atc**: an air-traffic radar scope, a paper flight-strip board and an approach view. Real ADS-B from a local receiver or, if a location is set, adsb.lol; otherwise simulated traffic. Airships (the Goodyear blimps) get special attention. |
 | ![pendulums](docs/img/pendulums.jpg) | **pendulums**: chaos made visible. A thousand double pendulums started a hair apart swing as one line, fray into a rainbow ribbon and bloom into chaos; also the flip-time chaos map and a Poincaré section building up. Live Lyapunov and energy-error readouts. |
 | ![voronoi](docs/img/voronoi.jpg) | **voronoi**: Lloyd's relaxation: hundreds of Voronoi cells settle into a honeycomb, are stirred by ripples, swirls and wind, divide and fuse, and now and then bud into the time or the hostname. Stained glass, giraffe, crackle, blueprint, paper and honey. |
@@ -111,6 +109,8 @@ in `savers.sh`.
 
 | | |
 |---|---|
+| ![gauges](docs/img/gauges.jpg) | **gauges**: the machine's vital signs on a brass instrument panel: CPU temperature and load, a clock, memory, battery, and odometers for uptime and time away. |
+| ![aquarium](docs/img/aquarium.jpg) | **aquarium**: a planted freshwater tank through the front glass: schooling neon tetras, angelfish, discus and corys with lofted bodies and rayed fins, a fire eel that burrows into the sand, cherry and Amano shrimp picking at the stones. Caustics, light shafts and real time-of-day lighting; a thermometer on the glass reads the CPU temperature. |
 | ![orrery](docs/img/orrery.jpg) | **orrery**: a brass and enamel orrery in a dim study, planets where they really are tonight, its gear train turning in true ratios; now and then it winds forward months and back. |
 | ![bridge](docs/img/bridge.jpg) | **bridge**: a structural-analysis screen with the finite-element solver written from scratch: Warren, Pratt, arch, cable-stayed and suspension bridges with trains crossing (stress-coloured members, the deck ringing after), a plate with a hole against Kirsch, a cantilever and a bracket, and topology optimisation growing a truss out of grey. |
 | ![contours](docs/img/contours.jpg) | **contours**: a drifting topographic map of terrain carved by its own drainage, with streams, villages, roads and invented place names. The sun moves and hills cast shadows. Palettes: brass, cream, slate, blueprint, survey. |
@@ -120,7 +120,6 @@ in `savers.sh`.
 | ![ink](docs/img/ink.jpg) | **ink**: drops of ink falling into a tank of water and rolling into vortex rings and curling wisps, on a GPU fluid sim. Palettes: indigo, sumi, botanical, neon, sunset. |
 | ![marbling](docs/img/marbling.jpg) | **marbling**: paper marbling made live: inks dropped, combed and raked into stone, chevron, nonpareil and bouquet patterns, then the sheet is lifted. |
 | ![billiards](docs/img/billiards.jpg) | **billiards**: mathematical billiards. Ideal balls in circles, ellipses, stadia, cardioids and mushrooms trace glowing orbits next to their phase portraits: integrable, mixed and chaotic tables side by side. |
-| ![algorithms](docs/img/algorithms.jpg) | **algorithms**: sorting and maze algorithms at work: 22 sorts shown as bars, dots, a colour wheel, a picture sorting itself back together and sorting networks; 11 maze generators and 6 solvers. On a wall, sorts race each other screen by screen, or one maze spans them all. |
 | ![netflow](docs/img/netflow.jpg) | **netflow**: the machine's own networking as a live stack diagram: packets flowing through interfaces, IP and TCP/UDP/ICMP to the sockets, per-interface scopes and connection-state dials. Aggregate counters from /proc only: no addresses, ports or captures. |
 | ![clocktower](docs/img/clocktower.jpg) | **clocktower**: a lonely stone clock tower on a rock in the bay, its broken wall showing the movement and pendulum. The dials keep real time and the bell strikes the hours; the causeway floods and drains with a tide worked out from the real Moon and Sun; drums on the turret count the time away. |
 | ![kalman](docs/img/kalman.jpg) | **kalman**: state estimation in nine acts: Kalman, extended and unscented filters, an IMM tracker through manoeuvres, a particle filter on bearings only, multi-target tracking in clutter, an RTS smoother through GPS outages, sensor fusion in information form with covariance intersection, float32 square-root vs naive updates, and EKF-SLAM closing a loop. Typeset equations, χ² consistency charts and the filters' matrices as live heatmaps. |
@@ -129,7 +128,6 @@ in `savers.sh`.
 | ![fdtd](docs/img/fdtd.jpg) | **fdtd**: Maxwell's equations solved live on a GPU Yee grid with absorbing boundaries: dipoles, a steered phased array, a Yagi, a horn, a dish, lenses, a waveguide bend, a photonic crystal, slits, total internal reflection and a ringing cavity, with far-field polar plots measured from the field. |
 | ![quantum](docs/img/quantum.jpg) | **quantum**: the time-dependent Schrödinger equation solved live on the GPU (split-step Fourier): tunnelling through a barrier, the double slit building up particle by particle, coherent and squeezed states, revival in a box beside its quantum carpet, Bragg scattering off a crystal, and scars in a stadium. Hue is phase, brightness is probability. |
 | ![sand](docs/img/sand.jpg) | **sand**: a falling-sand world that runs itself on the GPU: a side-on country of sea, forest, mountains and a volcano over folded strata, caves and a magma chamber. Water evaporates into clouds and rains back, lightning starts forest fires, the volcano erupts, lakes freeze in a 24-minute year; on a wall, one continuous world. |
-| ![origami](docs/img/origami.jpg) | **origami**: a big sheet of paper under a low lamp, folding itself into origami tessellations: Miura-ori, curved-crease pleats, waterbomb, hexagonal pyramids and square twists. The fold drifts in slow swells, so facets tilt through the light and twists turn; then a front sweeps across, the old folds relax flat and the next pattern's creases rise behind it. Every third pattern a clearing opens (its creases still faintly there) and the time or the host name is blind-embossed into the paper. On a wall, one continuous sheet. Palettes: paper, washi, kraft, indigo, rose, sage, ink, brass; `--scene` holds one pattern. |
 
 ## Building
 
@@ -140,13 +138,37 @@ sudo apt install build-essential pkg-config libgl-dev libegl-dev libx11-dev \
     libwayland-dev wayland-protocols libfontconfig-dev libfreetype-dev
 ```
 
-Then build whichever savers you want on this host:
+From the repository root:
 
 ```sh
-make -C stir
-make -C nightsky
-for s in $(. ./savers.sh; echo "${SAVERS[@]}"); do [ -f $s/Makefile ] && make -C $s; done
+make -j4             # build all native C savers, including benched ones
+make papercut         # or build just one
+make active          # build native savers in the lock-screen rotation
+make benched         # build native savers on the bench
+make clean-papercut   # remove one saver's binary and generated protocols
+make clean           # remove them for every native saver
+make check           # Python tests
+make help            # list build commands
 ```
+
+The root Makefile delegates to each saver's Makefile, so unchanged binaries
+are reused and `make -C papercut` still works. Compiler overrides are forwarded
+(for example, `make papercut CC=clang`). Building a benched saver keeps it
+benched; rotation membership comes from `savers.sh`. The vendored `pipes`
+and `maze` binaries and optional tools under `build/` are managed separately.
+
+`make check` needs Python 3. Render tests need an X display; Currents also
+needs a built `currents` binary and Pillow, and Flightsim needs its generated
+protocol files (`make -C flightsim`) and the C/GL build dependencies above.
+They skip when their prerequisites are unavailable. On a headless host, run
+`make currents flightsim`, then `xvfb-run -a make check` with Xvfb and Pillow
+installed. Flightsim's GPU checks cover temporal blending, camera jitter,
+flight through resolution changes, water-surface depth and deep valley mist.
+They also check a stationary world stays still through the sampling cycle,
+camera movement between simulation ticks, stable clouds across coordinate
+wraps, and both HUD readouts on portrait displays.
+Cloud quality and flicker during small camera movements are checked against
+a dense reference render to catch under-sampling bands.
 
 `flightsim/protocols/` holds the wlr-layer-shell protocol XML that every
 saver's Makefile turns into Wayland glue.
@@ -166,6 +188,20 @@ Every saver has the same interface:
 Common options: `--seed N`, `--palette NAME` (where there are palettes),
 `--epoch UNIXTIME --layout 'x,y,w,h;...' --output N` (spanning). Run any
 saver with `--help` for its own options.
+
+Flightsim uses `--time day|golden|dusk|night|random` for lighting. `--no-hud`,
+`--no-trees` and `--no-clouds` hide individual layers; `--scale 0.75` fixes
+the scene resolution instead of adapting it to the frame budget. On a wall,
+the HUD stays on the centre monitor and fits its width, including in portrait.
+The camera interpolates between the autopilot's fixed simulation ticks.
+Sky clouds use ray steps no more than 24 metres apart, including near the
+horizon, and share the scene's final smoothing pass. The last ray segment is
+shortened rather than redistributing samples as the visible interval changes.
+To reproduce its README screenshot:
+
+```sh
+./flightsim/flightsim --shot flightsim.ppm --size 1280x800 --seed 42 --time day --at 30
+```
 
 To try the multi-monitor behaviour on one screen, render each output's slice
 offscreen and paste them together:
@@ -211,7 +247,7 @@ L='0,0,1440,2560;1440,560,1969,1231;3409,560,2560,1440'
 1. Create `NAME/` with `NAME.c`, a `Makefile`, `run.sh` and a `.gitignore`
    for the binary and the generated `proto-*` files. Copy the plumbing
    (window, layer surface, `--shot`, `--bench`, layout) from an existing
-   saver such as `gauges/`.
+   saver such as `gauges/`. The root Makefile discovers it automatically.
 2. Add `NAME` to `BENCHED` in `savers.sh` (and to `SPANNING` if it takes
    `--epoch/--layout/--output`), and to the `pkill` pattern in `lock-next.sh`.
 3. When it's ready, move it from `BENCHED` to `SAVERS`.

@@ -72,7 +72,7 @@ class RotationTests(unittest.TestCase):
     def test_unavailable_savers_are_removed_from_saved_bag(self):
         state = Path(self.env["XDG_STATE_HOME"])
         state.mkdir()
-        (state / "lock-saver-bag").write_text("retired soapfilm currents\n")
+        (state / "lock-saver-bag").write_text("retired aquarium gauges algorithms soapfilm currents\n")
         self.assertEqual(self.pick(), "soapfilm")
         self.assertEqual(self.pick(), "currents")
 
@@ -86,6 +86,11 @@ class RotationTests(unittest.TestCase):
         ).splitlines()
 
     def test_independent_savers_have_repeatable_monitor_seeds(self):
+        # Temporarily promote Aquarium in this fixture to keep its per-output
+        # behavior covered while it is benched in the real rotation.
+        with (self.root / "savers.sh").open("a") as savers:
+            savers.write("\nSAVERS+=(aquarium)\n")
+        self.executable("aquarium/aquarium", '#!/bin/sh\nprintf "%s\\n" "$@"\n')
         for saver in ("soapfilm", "aquarium"):
             with self.subTest(saver=saver):
                 seeds = []
