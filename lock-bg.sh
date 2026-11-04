@@ -59,6 +59,20 @@ case $pick in
       cmd+=(--lat "$lat" --lon "$lon")
     fi ;;
 esac
+# Native savers draw at each output's full pixel resolution. A saver too heavy
+# for this host's GPU can be told to draw a fraction of that instead: lines of
+# "SAVER FACTOR" in ~/.config/wallpapers/render-scale (FACTOR in (0, 1];
+# "* FACTOR" sets the rest; lines starting # are skipped). Set them after
+# benchmarking, e.g. ./flightsim/flightsim --bench 200 --size 3840x2400.
+conf=${XDG_CONFIG_HOME:-$HOME/.config}/wallpapers/render-scale
+if [[ $pick != pipes && $pick != maze && -r $conf ]]; then
+  rs=$(awk -v s="$pick" '$1 !~ /^#/ && NF >= 2 {
+         if ($1 == s) { print $2; found = 1; exit }
+         if ($1 == "*") dflt = $2 }
+       END { if (!found && dflt != "") print dflt }' "$conf")
+  # only a fraction below 1 changes anything; ignore malformed values
+  [[ $rs =~ ^0?\.[0-9]*[1-9][0-9]*$ ]] && cmd+=(--render-scale "$rs")
+fi
 # pipes and maze are X11 hacks, run on the root window of a private Xwayland
 # that windowtolayer turns into a layer surface (that path tears under load,
 # hence everything else being native Wayland layer-shell clients)

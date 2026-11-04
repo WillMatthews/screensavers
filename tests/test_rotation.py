@@ -116,6 +116,19 @@ class RotationTests(unittest.TestCase):
             self.assertEqual(args[-4:], ["--lat", "55.95", "--lon", "-3.19"])
         self.assertNotIn("--lat", self.launch("stir"))
 
+    def test_render_scale_comes_from_the_host_config(self):
+        conf = self.root / "config/wallpapers/render-scale"
+        conf.parent.mkdir(parents=True)
+        conf.write_text("# heavy here\nstir 0.5\n# voronoi 0.1\n* .75\nnightsky 1\natc banana\n")
+        self.assertEqual(self.launch("stir")[-2:], ["--render-scale", "0.5"])
+        self.assertEqual(self.launch("voronoi")[-2:], ["--render-scale", ".75"])
+        self.assertNotIn("--render-scale", self.launch("nightsky"))   # 1 = full resolution
+        self.assertNotIn("--render-scale", self.launch("atc"))        # malformed: ignored
+        self.assertNotIn("--render-scale", self.launch("pipes"))      # X11 hacks: not ours to scale
+
+    def test_no_render_scale_without_a_config(self):
+        self.assertNotIn("--render-scale", self.launch("stir"))
+
 
 if __name__ == "__main__":
     unittest.main()
