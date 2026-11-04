@@ -78,8 +78,10 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 static int W = 1280, H = 800;
+static float dpr = 1;                  /* buffer px per logical px: > 1 under --layer on a HiDPI output */
 static int opt_root, opt_layer, opt_clock = 1, opt_plain;
 static float opt_cell;                 /* row height in px; 0 = from the screen height */
 static float opt_speed = 0.5f;          /* x Midjourney's 0.1 rad/s: half as fast, calmer for a lock screen */
@@ -668,6 +670,7 @@ static const char *FS_TRAIL = "#version 330 core\n" GLSL(
 static const char *FS_CRT = "#version 330 core\n" GLSL(
     uniform sampler2D uAcc;     /* the phosphor, with mips for the glow */
     uniform vec2 uRes;
+    uniform float uPx;          /* buffer px per logical px: the scanlines, glow and edge keep their logical size */
     uniform float uCurve;
     uniform float uBulgeY;      /* 0 when spanning: rows stay level to the side edges, so they meet the next monitor's */
     uniform vec3 uBg;
@@ -677,16 +680,17 @@ static const char *FS_CRT = "#version 330 core\n" GLSL(
         q *= 1.0 + 0.1 * uCurve;
         q *= 1.0 - 0.085 * uCurve + 0.05 * uCurve * pow(abs(q.yx), vec2(2.0)) * vec2(1.0, uBulgeY);
         vec2 uv = q * 0.5 + 0.5;
-        vec2 px = 1.5 / uRes;                              /* soft glass edge */
+        vec2 px = 1.5 * uPx / uRes;                              /* soft glass edge */
         vec2 e = smoothstep(vec2(0.0), px, uv) * smoothstep(vec2(0.0), px, 1.0 - uv);
         if (e.x * e.y <= 0.0) { o = vec4(0.0, 0.0, 0.0, 1.0); return; }
 
         vec2 d = (uv - 0.5) * 0.0025 * dot(q, q);
         vec3 col = vec3(texture(uAcc, uv + d).r, texture(uAcc, uv).g, texture(uAcc, uv - d).b);
-        vec3 glow = textureLod(uAcc, uv, 2.5).rgb * 0.45 + textureLod(uAcc, uv, 4.0).rgb * 0.35 +
-                    textureLod(uAcc, uv, 5.5).rgb * 0.3;
+        float lb = log2(uPx);
+        vec3 glow = textureLod(uAcc, uv, 2.5 + lb).rgb * 0.45 + textureLod(uAcc, uv, 4.0 + lb).rgb * 0.35 +
+                    textureLod(uAcc, uv, 5.5 + lb).rgb * 0.3;
         col += max(glow - uBg, 0.0) * 0.55;
-        float line = 0.5 + 0.5 * cos(uv.y * uRes.y * 6.2831853 / 3.0);
+        float line = 0.5 + 0.5 * cos(uv.y * uRes.y * 6.2831853 / (3.0 * uPx));
         col *= 0.84 + 0.16 * line;
         col *= mix(0.5, 1.0, smoothstep(1.75, 0.55, length(q * vec2(0.85, 1.0))));
         o = vec4(col * e.x * e.y, 1.0);
@@ -745,7 +749,7 @@ static void place_grid(void) {
         fr_c0 = fr_r0 = 0; fr_cols = cols; fr_rows = rows;
         return;
     }
-    /* logical units -> this window's px (1 under layer-shell) */
+    /* logical units -> this window's px (the output's scale under layer-shell) */
     float sc = W / span[span_me][2], b[4];
     layout_box(b);
     /* the grid's corner in logical units, the same in every instance */
@@ -763,10 +767,11 @@ static void place_grid(void) {
 
 static void grid_init(void) {
     /* spanning: one cell size everywhere, from the front output's height */
-    float sc = span_me >= 0 ? W / span[span_me][2] : 1.0f;
-    float ref_h = span_me >= 0 ? span[span_front][3] : H;
+    /* sc: logical px -> this window's px; --cell is in logical px */
+    float sc = span_me >= 0 ? W / span[span_me][2] : dpr;
+    float ref_h = span_me >= 0 ? span[span_front][3] : H / dpr;
     int cell_h = opt_cell > 0 ? (int)(opt_cell * sc) : (int)(ref_h * sc / 50.0f + 0.5f);
-    if (cell_h < 10) cell_h = 10;
+    if (cell_h < (int)(10 * sc)) cell_h = (int)(10 * sc);
     build_atlas(cell_h);
     if (span_me >= 0) {
         float b[4];
@@ -957,6 +962,7 @@ static void render(double tw, double el, double dt, GLuint target) {
     glBindFramebuffer(GL_FRAMEBUFFER, target);
     glUseProgram(prog_crt);
     glUniform2f(glGetUniformLocation(prog_crt, "uRes"), (float)W, (float)H);
+    glUniform1f(glGetUniformLocation(prog_crt, "uPx"), span_me >= 0 ? W / span[span_me][2] : dpr);
     double cu = el / 3.0 > 1 ? 1 : el / 3.0;
     glUniform1f(glGetUniformLocation(prog_crt, "uCurve"), (float)(cu * (2 - cu)));
     glUniform1f(glGetUniformLocation(prog_crt, "uBulgeY"), span_me >= 0 ? 0.0f : 1.0f);
@@ -976,9 +982,12 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static struct hidpi hd;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -990,23 +999,33 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    /* the grid is sized once; a later resize just recentres it */
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    dpr = (float)hidpi_factor(&hd, W);
+    /* the grid is sized once; a later resize just recentres it */
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "stir");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -1019,6 +1038,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -1046,6 +1067,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -1053,9 +1075,10 @@ static void usage(void) {
     fprintf(stderr,
         "usage: stir [--window | --root | --layer] [--cell PX] [--speed X] [--twist RAD] [--seed N]\n"
         "            [--name NAME] [--text FILE] [--no-clock] [--plain] [--font FONTCONFIG-PATTERN]\n"
-        "            [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "            [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX] [--render-scale F]\n"
         "            [--palette brass|paper|phosphor|amber|ice] [--shot FILE.ppm [--size WxH] [--at SECONDS]]\n"
-        "  --palette  colours; default: picked from the seed, so each session differs\n");
+        "  --palette  colours; default: picked from the seed, so each session differs\n"
+        "  --render-scale  with --layer, draw F (0-1] of the output's native pixels (default 1)\n");
     exit(1);
 }
 
@@ -1100,6 +1123,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-speed") && i + 1 < argc) opt_speed = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-twist") && i + 1 < argc) opt_twist = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-font") && i + 1 < argc) opt_font = argv[++i];
         else if (!strcmp(a, "-text") && i + 1 < argc) opt_text = argv[++i];
         else if (!strcmp(a, "-name") && i + 1 < argc) opt_name = argv[++i];

@@ -77,6 +77,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 static int W = 1280, H = 800;
 static int opt_root, opt_layer, opt_caption = 1, opt_schedule;
@@ -1282,9 +1283,12 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static struct hidpi hd;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -1296,22 +1300,31 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "papercut");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -1324,6 +1337,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -1351,6 +1366,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -1360,13 +1376,14 @@ static void usage(void) {
         "                [--palette paper|dusk|sea|forest|kraft|ember|brass]\n"
         "                [--scene tunnel|hills|islands|bloom] [--no-caption]\n"
         "                [--text WORD] [--font FAMILY] [--schedule]\n"
-        "                [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "                [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX] [--render-scale F]\n"
         "                [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH]\n"
         "  --palette   the card; default: picked from the seed\n"
         "  --scene     hold one scene (re-cut every %.0f s) instead of cycling\n"
         "  --text      what the host-name cuts spell instead of the host name\n"
         "  --fps       frame rate (default 30: it moves slowly)\n"
-        "  --schedule  print what happens when (seconds after the epoch) and exit\n", ACT);
+        "  --schedule  print what happens when (seconds after the epoch) and exit\n"
+        "  --render-scale  with --layer, draw F (0-1] of the output's native pixels (default 1)\n", ACT);
     exit(1);
 }
 
@@ -1412,6 +1429,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-window")) opt_root = 0;
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-palette") && i + 1 < argc) opt_palette = argv[++i];
         else if (!strcmp(a, "-scene") && i + 1 < argc) opt_scene = argv[++i];
@@ -1447,7 +1465,8 @@ int main(int argc, char **argv) {
     Window root = 0, win = 0;
     Atom wm_delete = 0;
     int dw = W, dh = H;
-    if (opt_layer && !offscreen) { wl_init(); dw = W; dh = H; }
+    /* the domain is in logical px (the view scales it to the buffer), so a HiDPI output cuts the same shapes */
+    if (opt_layer && !offscreen) { wl_init(); dw = hd.lw > 0 ? hd.lw : W; dh = hd.lh > 0 ? hd.lh : H; }
     else {
         dpy = XOpenDisplay(NULL);
         if (!dpy) die("can't open display");

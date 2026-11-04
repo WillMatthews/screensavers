@@ -89,10 +89,15 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 #define PI 3.14159265358979323846
 
 static int W = 1280, H = 800;
+/* --layer: W x H is the output's logical size x its scale (hidpi.h); px1 is
+ * a logical pixel in buffer pixels (1 otherwise), the floor of a hairline */
+static struct hidpi hd;
+static float px1 = 1;
 static int opt_root, opt_layer, opt_bench, opt_check;
 static uint32_t opt_seed;
 static const char *opt_shot;
@@ -1006,7 +1011,7 @@ static Box m_seq(const char **s, float px, float x, float y, int emit, int uprig
             if (cmd == 'q') { b.w += px * 1.0f; continue; }
             if (cmd == 'o') {
                 Box g = m_group(s, px, x + b.w, y, emit, upright, face);
-                float th = fmaxf(1.0f, px * 0.045f), yl = y - g.asc - px * 0.12f;
+                float th = fmaxf(px1, px * 0.045f), yl = y - g.asc - px * 0.12f;
                 if (emit) fill(x + b.w + px * 0.04f, yl - th * 0.5f, x + b.w + g.w - px * 0.02f, yl + th * 0.5f, m_col);
                 b.w += g.w; b.asc = fmaxf(b.asc, g.asc + px * 0.18f); b.desc = fmaxf(b.desc, g.desc); last_w = g.w;
                 continue;
@@ -1017,7 +1022,7 @@ static Box m_seq(const char **s, float px, float x, float y, int emit, int uprig
                 continue;
             }
             if (cmd == 'f') {
-                float sp = px * 0.86f, axis = px * 0.25f, gap = px * 0.16f, th = fmaxf(1.0f, px * 0.045f);
+                float sp = px * 0.86f, axis = px * 0.25f, gap = px * 0.16f, th = fmaxf(px1, px * 0.045f);
                 const char *s0 = *s;
                 Box n = m_group(s, sp, 0, 0, 0, upright, face);
                 Box d = m_group(s, sp, 0, 0, 0, upright, face);
@@ -2040,7 +2045,7 @@ static float my_(const Map *m, double y) { return m->r.y1 - (float)((y - m->v[1]
 
 /* a hairline frame with ticks along the bottom and left, in world units */
 static void frame(const Map *m, double step, const char *xl, const char *yl, int labels) {
-    float lw = fmaxf(1.0f, u_ * 0.9f), tk = u_ * 7;
+    float lw = fmaxf(px1, u_ * 0.9f), tk = u_ * 7;
     float *fc = col(c_dim, 0.45f), *tc = col(c_dim, 0.8f);
     Rect r = m->r;
     line(r.x0, r.y0, r.x1, r.y0, lw, fc); line(r.x0, r.y1, r.x1, r.y1, lw, fc);
@@ -2096,7 +2101,7 @@ static float title_head(float x, float y, float width, float scale) {
     y += 26 * s;
     text(F_LIGHT, 15 * s, x, y, -1, A.sub, col(c_dim, 0.95f * lift), 0, 0);
     y += 22 * s;
-    line(x, y, x + fminf(width, 60 * s), y, fmaxf(1, s * 0.9f), col(c_dim, 0.5f));
+    line(x, y, x + fminf(width, 60 * s), y, fmaxf(px1, s * 0.9f), col(c_dim, 0.5f));
     return y;
 }
 /* and the equations under it; y is the top of the first */
@@ -2221,7 +2226,7 @@ static void sim_panel(Rect r, int labels) {
     double span_ = v[2] - v[0];
     double step = span_ > 50 ? 10 : span_ > 20 ? 5 : span_ > 8 ? 2 : 1;
     frame(&m, step, "x", "y", labels);
-    float lw = fmaxf(1, u_ * 1.1f);
+    float lw = fmaxf(px1, u_ * 1.1f);
     switch (A.id) {
     case A_SLIT: {
         /* the screen */
@@ -2280,15 +2285,15 @@ static void sim_panel(Rect r, int labels) {
 /* tunnelling's momentum picture is one-dimensional: the distribution of
  * kx, against the packet's at the start, and what T(k) says comes through */
 static void k_plot_tunnel(Rect r, int labels) {
-    float lw = fmaxf(1, u_ * 1.3f), px = u_ * 12.5f;
+    float lw = fmaxf(px1, u_ * 1.3f), px = u_ * 12.5f;
     caption(r, "MOMENTUM", "|φ(k_{x})|^{2}");
     Rect p = {r.x0, r.y0 + px * 0.6f, r.x1, r.y1 - px * 2.2f};
     double k0 = -6.5, k1 = 6.5, sk = 1 / (2 * A.sigx), p0max = 1 / (sqrt(2 * PI) * sk);
     float *fc = col(c_dim, 0.5f), *tc = col(c_dim, 0.85f);
-    line(p.x0, p.y1, p.x1, p.y1, fmaxf(1, u_ * 0.9f), fc);
+    line(p.x0, p.y1, p.x1, p.y1, fmaxf(px1, u_ * 0.9f), fc);
     for (int k = -6; k <= 6; k += 2) {
         float X = p.x0 + (float)((k - k0) / (k1 - k0)) * rw(p);
-        line(X, p.y1, X, p.y1 + u_ * 5, fmaxf(1, u_ * 0.9f), fc);
+        line(X, p.y1, X, p.y1 + u_ * 5, fmaxf(px1, u_ * 0.9f), fc);
         char b[16];
         snprintf(b, sizeof b, "%d", k);
         text(F_SANS, px, X, p.y1 + px * 1.6f, 0, b, tc, 0, 0);
@@ -2345,7 +2350,7 @@ static void k_panel(Rect r, int labels) {
     Map m = {r, {v[0], v[1], v[2], v[3]}};
     if (!labels) caption(r, "MOMENTUM", "|φ(k)|^{2}");
     frame(&m, kv > 8 ? 5 : 2, "k_{x}", "k_{y}", labels);
-    float lw = fmaxf(1, u_ * 1.0f);
+    float lw = fmaxf(px1, u_ * 1.0f);
     float cx = mx_(&m, 0), cy = my_(&m, 0);
     line(cx - u_ * 5, cy, cx + u_ * 5, cy, lw, col(c_dim, 0.6f));
     line(cx, cy - u_ * 5, cx, cy + u_ * 5, lw, col(c_dim, 0.6f));
@@ -2369,7 +2374,7 @@ static void k_panel(Rect r, int labels) {
 
 /* the plots and pictures that go with each act */
 static void plot_axes(Rect r, double t1, double y0, double y1, const char *xl, const char *yl) {
-    float lw = fmaxf(1, u_ * 0.9f);
+    float lw = fmaxf(px1, u_ * 0.9f);
     float *fc = col(c_dim, 0.5f), *tc = col(c_dim, 0.85f);
     line(r.x0, r.y1, r.x1, r.y1, lw, fc);
     line(r.x0, r.y0, r.x0, r.y1, lw, fc);
@@ -2394,7 +2399,7 @@ static void curve(Rect r, double t1, double y0, double y1, int idx, float lw, co
 }
 
 static void aux_panel(Rect r, int big) {
-    float lw = fmaxf(1, u_ * 1.4f);
+    float lw = fmaxf(px1, u_ * 1.4f);
     float *acc = col(c_acc, 0.95f), *ink = col(c_ink, 0.85f), *dim = col(c_dim, 0.7f);
     float px = u_ * 12.5f;
     switch (A.id) {
@@ -2471,7 +2476,7 @@ static void aux_panel(Rect r, int big) {
             if (vertical) dot(p.x0 + j * strip, p.y1 - a * rh(p), u_ * (big ? 1.6f : 1.2f), col(c_ink, fr));
             else dot(p.x0 + a * rw(p), p.y0 + j * strip, u_ * (big ? 1.6f : 1.2f), col(c_ink, fr));
         }
-        float fl = fmaxf(1, u_ * 0.9f);
+        float fl = fmaxf(px1, u_ * 0.9f);
         line(r.x0, r.y0, r.x1, r.y0, fl, dim); line(r.x0, r.y1, r.x1, r.y1, fl, dim);
         line(r.x0, r.y0, r.x0, r.y1, fl, dim); line(r.x1, r.y0, r.x1, r.y1, fl, dim);
         /* the fringe spacing lambda L / d, marked about the middle */
@@ -2495,8 +2500,8 @@ static void aux_panel(Rect r, int big) {
         frame(&m, 2, "x", "p_{x}", big);
         float cx = mx_(&m, 0), cy = my_(&m, 0), R = mx_(&m, A.x0) - cx;
         ring(cx, cy, R, lw * 0.8f, col(c_dim, 0.5f), 1);
-        line(q.x0, cy, q.x1, cy, fmaxf(1, u_ * 0.7f), col(c_dim, 0.25f));
-        line(cx, q.y0, cx, q.y1, fmaxf(1, u_ * 0.7f), col(c_dim, 0.25f));
+        line(q.x0, cy, q.x1, cy, fmaxf(px1, u_ * 0.7f), col(c_dim, 0.25f));
+        line(cx, q.y0, cx, q.y1, fmaxf(px1, u_ * 0.7f), col(c_dim, 0.25f));
         /* the trail in phase space */
         for (int i = 1; i < hn; i++) {
             if (sim_t - hist[i][0] > 3) continue;
@@ -2534,7 +2539,7 @@ static void aux_panel(Rect r, int big) {
         float expo = (float)(1.0 / (0.22 * (1.0 / (sqrt(2 * PI) * A.s0))));
         panel(q, 2, carpet_tex, CAR_N, CAR_R, grid, v, expo, 0, 1, 0, 0, (float)tau);
         Map m = {q, {0, 0, A.Lbox, 1}};
-        float fl = fmaxf(1, u_ * 0.9f);
+        float fl = fmaxf(px1, u_ * 0.9f);
         line(q.x0, q.y0, q.x1, q.y0, fl, dim); line(q.x0, q.y1, q.x1, q.y1, fl, dim);
         line(q.x0, q.y0, q.x0, q.y1, fl, dim); line(q.x1, q.y0, q.x1, q.y1, fl, dim);
         /* the fractional revivals, marked down the side */
@@ -2564,12 +2569,12 @@ static void aux_panel(Rect r, int big) {
             panel(q, 4, G.kshow, G.nx, G.ny, grid, v, (float)(1.0 / (0.5 * 9 * fmax(M.kmax, 1e-20))), 0, 1, 0, 0, 0);
         }
         float cx = (q.x0 + q.x1) / 2, cy = (q.y0 + q.y1) / 2, R = rw(q) * 0.5f * 0.98f;
-        ring(cx, cy, rw(q) * 0.5f * 0.42f, fmaxf(1, u_ * 0.8f), col(c_dim, 0.4f), 0);
+        ring(cx, cy, rw(q) * 0.5f * 0.42f, fmaxf(px1, u_ * 0.8f), col(c_dim, 0.4f), 0);
         /* the incoming direction and the Bragg direction */
         double gx = -cos(A.lrot) * 2 * PI / A.latt, gy = sin(A.lrot) * 2 * PI / A.latt;
         double bx = A.k0 + gx, by = gy, l = hypot(bx, by);
-        line(cx, cy, cx + R * 1.15f, cy, fmaxf(1, u_ * 0.8f), col(c_dim, 0.6f));
-        line(cx, cy, cx + R * 1.15f * (float)(bx / l), cy - R * 1.15f * (float)(by / l), fmaxf(1, u_ * 0.8f), col(c_acc, 0.7f));
+        line(cx, cy, cx + R * 1.15f, cy, fmaxf(px1, u_ * 0.8f), col(c_dim, 0.6f));
+        line(cx, cy, cx + R * 1.15f * (float)(bx / l), cy - R * 1.15f * (float)(by / l), fmaxf(px1, u_ * 0.8f), col(c_acc, 0.7f));
         math(px * 1.2f, cx + R * 1.22f * (float)(bx / l), cy - R * 1.22f * (float)(by / l), 0, "2θ_{B}", col(c_acc, 0.9f));
         break;
     }
@@ -2580,7 +2585,7 @@ static void aux_panel(Rect r, int big) {
         Rect q = fit(r, (float)view_aspect(), 0.5f);
         float expo = (float)(1.0 / (0.30 * fmax(expo_r, 1e-12) * fmax((double)avg_n, 1) * 0.35));
         panel(q, 3, avg_tex, G.nx, G.ny, grid, v, expo, 0, 1, 0, 0, 0);
-        float fl = fmaxf(1, u_ * 0.9f);
+        float fl = fmaxf(px1, u_ * 0.9f);
         line(q.x0, q.y0, q.x1, q.y0, fl, dim); line(q.x0, q.y1, q.x1, q.y1, fl, dim);
         line(q.x0, q.y0, q.x0, q.y1, fl, dim); line(q.x1, q.y0, q.x1, q.y1, fl, dim);
         break;
@@ -2709,6 +2714,7 @@ static void draw_scene(GLuint target) {
     if (atlas_full || atlas_w != W || atlas_h != H) { atlas_reset(); atlas_w = W; atlas_h = H; }
     u_ = fminf(W, H) / 1000.0f;
     if (W < H) u_ = W / 1000.0f * 1.15f;
+    px1 = (float)hidpi_factor(&hd, W);
     double L = act_len[A.id];
     fade_a = smooth(0.2f, 0.2f + (float)FADE, (float)act_t) * (1 - smooth((float)(L - FADE), (float)L - 0.1f, (float)act_t));
     draw_target = target;
@@ -2825,9 +2831,11 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -2839,22 +2847,31 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "quantum");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -2867,6 +2884,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -2894,6 +2913,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -2965,6 +2985,7 @@ static void usage(void) {
     fprintf(stderr,
         "usage: quantum [--window | --root | --layer] [--seed N] [--palette NAME] [--act NAME] [--no-caption]\n"
         "               [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "               [--render-scale F (--layer: draw F x the output's native pixels, 0 < F <= 1; default 1)]\n"
         "               [--shot FILE.ppm | --bench N] [--size WxH] [--at SECONDS] [--check]\n"
         "palettes: phase mono paper ember (default: from the seed)\n"
         "acts: tunnel slit coherent squeezed revival bragg stadium (default: all, in turn)\n");
@@ -2984,6 +3005,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-no-caption")) opt_nocap = 1;
         else if (!strcmp(a, "-resize-test") && i + 1 < argc) opt_resize_test = atoi(argv[++i]);
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-palette") && i + 1 < argc) {
             const char *n = argv[++i];
             for (int k = 0; k < NPAL; k++) if (!strcmp(n, PALETTES[k].name)) opt_palette = k;

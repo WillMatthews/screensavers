@@ -82,6 +82,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 #define PI 3.14159265f
 #define DEG (PI / 180.0f)
@@ -89,6 +90,8 @@
 
 /* ---- options ---- */
 static int W = 1280, H = 800;
+static struct hidpi hd;                /* --layer: the output's scale (../common/hidpi.h) */
+static double opt_render_scale = 1;
 static int opt_root, opt_layer, opt_bench;
 static uint32_t opt_seed;
 static const char *opt_shot;
@@ -3806,7 +3809,10 @@ static void render(GLuint target, double t, double wt) {
     glUniform1f(U(p_post, "uSharpen"), clampf(1.2f - render_scale, 0.2f, 0.8f));
     glUniform1f(U(p_post, "uRain"), WP.rain);
     glUniform4f(U(p_post, "uVig"), (view_x - lay_x0) / lay_w, 1 - (view_y + view_h - lay_y0) / lay_h, view_w / lay_w, view_h / lay_h);
-    glUniform2f(U(p_post, "uLayoutPx"), lay_w, lay_h);
+    {   /* in logical px, so the rain is the same size on a HiDPI output */
+        float k = span_me < 0 ? (float)hidpi_factor(&hd, W) : 1;
+        glUniform2f(U(p_post, "uLayoutPx"), lay_w / k, lay_h / k);
+    }
     glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, tex_taa[taa_cur]);
     glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, tex_bloom[0]);
     glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, tex_vol);
@@ -3831,6 +3837,7 @@ static struct {
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -3842,22 +3849,31 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "clocktower");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -3870,6 +3886,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -3897,6 +3915,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -3907,6 +3926,7 @@ static void usage(void) {
         "                  [--time 'YYYY-MM-DD HH:MM[:SS]'] [--tide METRES] [--font FAMILY]\n"
         "                  [--scale X] [--budget MS] [--fps N] [--msaa N] [--fov DEG] [--shotcam K]\n"
         "                  [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "                  [--render-scale F (--layer: draw F x the output's native pixels, 0 < F <= 1; default 1)]\n"
         "                  [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH]\n");
     exit(1);
 }
@@ -3957,6 +3977,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-window")) opt_root = 0;
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-weather") && i + 1 < argc) opt_weather = argv[++i];
         else if (!strcmp(a, "-lat") && i + 1 < argc) { opt_lat = strtod(argv[++i], NULL); loc_given = 1; }
         else if (!strcmp(a, "-lon") && i + 1 < argc) { opt_lon = strtod(argv[++i], NULL); loc_given = 1; }
@@ -4058,7 +4079,11 @@ int main(int argc, char **argv) {
     }
 
     if (opt_fps < 5) opt_fps = 5;
-    render_scale = opt_scale > 0 ? opt_scale : 0.5f;
+    /* the scene starts at half the logical size whatever the output's scale
+     * (--layer), and may drop to 0.3 of it: a HiDPI output costs no more
+     * until the budget allows a sharper scene */
+    float dpr = (float)hidpi_factor(&hd, W);
+    render_scale = opt_scale > 0 ? opt_scale : 0.5f / dpr;
     double avg = opt_budget / 1000, last_change = 0;
     for (int frame = 0;; frame++) {
         if (opt_layer && !wl_poll()) return 0;
@@ -4087,7 +4112,8 @@ int main(int argc, char **argv) {
             float s = render_scale, b = opt_budget / 1000;
             if (avg > b * 1.1f) s *= 0.92f;
             else if (avg < b * 0.75f) s *= 1.05f;
-            s = clampf(s, 0.3f, 1.0f);
+            dpr = (float)hidpi_factor(&hd, W);
+            s = clampf(s, 0.3f / dpr, 1.0f);
             if (fabsf(s - render_scale) > 0.02f) { render_scale = s; last_change = t; avg = b; }
         }
         double spare = 1.0 / opt_fps - (now() - t);

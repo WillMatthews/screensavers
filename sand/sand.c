@@ -105,11 +105,16 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 #define PI 3.14159265f
 #define HZ 60                          /* sim ticks a second */
 
 static int W = 1280, H = 800;
+/* --layer: W x H is the output's logical size x its scale (hidpi.h). The
+ * world is laid out in logical px, so it's the same world at any scale */
+static struct hidpi hd;
+static float dpr(void) { return (float)hidpi_factor(&hd, W); }   /* buffer px per logical px */
 static int opt_root, opt_layer, opt_bench;
 static float opt_fps = 60;
 static uint32_t opt_seed;
@@ -328,9 +333,10 @@ static float lapse;                    /* K per row above the sea */
 static float *surf0;                   /* generated ground height per column */
 
 static void setup_world(void) {
-    float bx0 = 0, by0 = 0, bx1 = W, by1 = H;
-    vw_x = 0; vw_y = 0; vw_w = W; vw_h = H;
-    fr_x = 0; fr_y = 0; fr_w = W; fr_h = H;
+    float lw = W / dpr(), lh = H / dpr();
+    float bx0 = 0, by0 = 0, bx1 = lw, by1 = lh;
+    vw_x = 0; vw_y = 0; vw_w = lw; vw_h = lh;
+    fr_x = 0; fr_y = 0; fr_w = lw; fr_h = lh;
     int tall = -1;
     if (span_me >= 0) {
         bx0 = by0 = 1e9f; bx1 = by1 = -1e9f;
@@ -2413,8 +2419,8 @@ static void render(GLuint target, double wt, double secs, int settle) {
     glUniform1f(U(p_comp, "time"), (float)fmod(secs, 1000.0));
     glUniform1f(U(p_comp, "salt"), (float)(opt_seed % 997));
     if (opt_caption && front_me && cap_text[0]) {
-        float s = fmaxf(2, roundf(CS * 0.5f));
-        float mxp = 4 * CS, myp = H - 4 * CS - cap_h * s;     /* top left, in the sky */
+        float s = roundf(fmaxf(2, roundf(CS * 0.5f)) * dpr());  /* whole screen px a font pixel */
+        float mxp = 4 * CS * dpr(), myp = H - 4 * CS * dpr() - cap_h * s;     /* top left, in the sky */
         glUniform4f(U(p_comp, "capr"), mxp, myp, s, 0.85f);
         glUniform2f(U(p_comp, "capsz"), (float)cap_w, (float)cap_h);
     } else glUniform4f(U(p_comp, "capr"), 0, 0, 1, 0);
@@ -2435,9 +2441,11 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -2449,23 +2457,31 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    /* a resize just rescales the view: the world keeps its size */
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "sand");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -2478,6 +2494,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -2505,6 +2523,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -2512,6 +2531,7 @@ static void usage(void) {
     fprintf(stderr,
         "usage: sand [--window | --root | --layer] [--seed N] [--fps N] [--cell PX] [--no-caption]\n"
         "            [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "            [--render-scale F (--layer: draw F x the output's native pixels, 0 < F <= 1; default 1)]\n"
         "            [--hour H] [--season 0..1] [--load 0..1] [--temp C]\n"
         "            [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--when]\n");
     exit(1);
@@ -2548,7 +2568,7 @@ static void make_world(void) {
         gl_world_free();
         free(cells); free(surf0); free(target); free(surf_meas); free(top_meas);
     }
-    world_w = W; world_h = H;
+    world_w = lroundf(W / dpr()); world_h = lroundf(H / dpr());   /* logical: a new scale alone keeps the world */
     setup_world();
     worldgen();
     gl_world();
@@ -2586,6 +2606,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-window")) opt_root = 0;
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-cell") && i + 1 < argc) opt_cell = atoi(argv[++i]);
         else if (!strcmp(a, "-no-caption")) opt_caption = 0;
@@ -2784,7 +2805,7 @@ int main(int argc, char **argv) {
         /* standalone, a new size gets a world of its own once it's settled
          * (a window tiled, then fullscreened; an output's mode changed) */
         if (W != last_w || H != last_h) { last_w = W; last_h = H; t_resized = t; }
-        if (span_me < 0 && (W != world_w || H != world_h) && t - t_resized > 0.5) make_world();
+        if (span_me < 0 && (lroundf(W / dpr()) != world_w || lroundf(H / dpr()) != world_h) && t - t_resized > 0.5) make_world();
         if (tied && t - last_read >= 2) {
             read_sensors();
             if (opt_load < 0 && sens_load >= 0) tie_load = sens_load;

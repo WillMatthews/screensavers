@@ -7,11 +7,13 @@ XDG_SHELL = $(shell pkg-config --variable=pkgdatadir wayland-protocols)/stable/x
 LAYER_XML = ../flightsim/protocols/wlr-layer-shell-unstable-v1.xml
 PROTO_H = proto-layer-shell.h
 PROTO_C = proto-layer-shell.c proto-xdg-shell.c
+HIDPI_H = proto-fractional-scale.h proto-viewporter.h
+HIDPI_C = proto-fractional-scale.c proto-viewporter.c
 
 # -ffp-contract=off: no fused multiply-adds, so every instance integrates the
 # ensemble bit-for-bit the same whatever CFLAGS it was built with
-pendulums: pendulums.c $(PROTO_H) $(PROTO_C)
-	$(CC) $(CFLAGS) -ffp-contract=off -o $@ pendulums.c $(PROTO_C) $(FT) -lGL -lX11 -lEGL -lwayland-client -lwayland-egl -lm -lpthread
+pendulums: pendulums.c ../common/hidpi.h $(PROTO_H) $(PROTO_C) $(HIDPI_H) $(HIDPI_C)
+	$(CC) $(CFLAGS) -ffp-contract=off -I. -o $@ pendulums.c $(PROTO_C) $(HIDPI_C) $(FT) -lGL -lX11 -lEGL -lwayland-client -lwayland-egl -lm -lpthread
 
 proto-layer-shell.h: $(LAYER_XML)
 	wayland-scanner client-header $< $@
@@ -21,4 +23,7 @@ proto-xdg-shell.c: $(XDG_SHELL)
 	wayland-scanner private-code $< $@
 
 clean:
-	rm -f pendulums $(PROTO_H) $(PROTO_C)
+	rm -f pendulums $(PROTO_H) $(PROTO_C) $(HIDPI_H) $(HIDPI_C)
+
+# fractional-scale and viewporter glue for ../common/hidpi.h
+include ../common/hidpi.mk

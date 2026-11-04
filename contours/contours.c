@@ -97,6 +97,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 static int W = 1280, H = 800;
 static int opt_root, opt_layer, opt_bench, opt_fps = 30;
@@ -1244,10 +1245,10 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
             if (mod(k, 2.0) < 0.5) col = mix(col, cFrame, 0.55);
             /* frame and neat lines */
             vec2 a = sp - uFrame.xy, b = uFrame.zw - sp;
-            if (min(min(a.x, a.y), min(b.x, b.y)) < 1.0) col = mix(col, cFrame, 0.8);
+            if (min(min(a.x, a.y), min(b.x, b.y)) < max(1.0, floor(uS + 0.5))) col = mix(col, cFrame, 0.8);
         }
         vec2 d = max(uMap.xy - sp, sp - uMap.zw);
-        if (max(d.x, d.y) < 1.0) col = mix(col, cFrame, 0.9);
+        if (max(d.x, d.y) < max(1.0, floor(uS + 0.5))) col = mix(col, cFrame, 0.9);
         return col;
     }
 
@@ -1393,7 +1394,7 @@ static const char *FS_MAP = "#version 330 core\n" GLSL(
 
         /* kilometre grid */
         vec2 dg = abs(fract(gm / 1000.0 + 0.5) - 0.5) * 1000.0 / uMpp;
-        col = mix(col, cGrid, max(cov(dg.x, 1.0), cov(dg.y, 1.0)) * aGrid * (1.0 - knock));
+        col = mix(col, cGrid, max(cov(dg.x, max(1.0, uS)), cov(dg.y, max(1.0, uS))) * aGrid * (1.0 - knock));
 
         /* waterlines: depths D (k / 1)^(4/3) out from the shore, fading */
         if (wet > 0.0) {
@@ -2668,12 +2669,12 @@ static void build_cartouche(void) {
     float x1 = mx1 - roundf(20 * S), y1 = my1 - roundf(20 * S), x0 = x1 - pw, y0 = y1 - ph_;
 
     rect(&ov, x0, y0, x1, y1, pc);
-    float l = fmaxf(1, roundf(S));
+    float l = fmaxf(1, roundf(S));     /* a hairline, scaled with the type */
     rect(&ov, x0, y0, x1, y0 + l, fc); rect(&ov, x0, y1 - l, x1, y1, fc);
     rect(&ov, x0, y0, x0 + l, y1, fc); rect(&ov, x1 - l, y0, x1, y1, fc);
     float in = roundf(4 * S);
-    rect(&ov, x0 + in, y0 + in, x1 - in, y0 + in + 1, fc2); rect(&ov, x0 + in, y1 - in - 1, x1 - in, y1 - in, fc2);
-    rect(&ov, x0 + in, y0 + in, x0 + in + 1, y1 - in, fc2); rect(&ov, x1 - in - 1, y0 + in, x1 - in, y1 - in, fc2);
+    rect(&ov, x0 + in, y0 + in, x1 - in, y0 + in + l, fc2); rect(&ov, x0 + in, y1 - in - l, x1 - in, y1 - in, fc2);
+    rect(&ov, x0 + in, y0 + in, x0 + in + l, y1 - in, fc2); rect(&ov, x1 - in - l, y0 + in, x1 - in, y1 - in, fc2);
 
     /* north arrow, with an N over it */
     float ax = roundf(x0 + pad + col * 0.5f);
@@ -2682,26 +2683,26 @@ static void build_cartouche(void) {
     text(&ov, ft, "N", ax, ay - 6 * S, 0, 0.5f, 0, 0, tc);
     blit(&ov, ga, ax, ay, 1, 0, -floorf(ga->w * 0.5f), 0, tc);
     float dx = roundf(x0 + pad + col + pad * 0.5f);
-    rect(&ov, dx, y0 + pad, dx + 1, y1 - pad, fc2);
+    rect(&ov, dx, y0 + pad, dx + l, y1 - pad, fc2);
 
     float tx = x0 + pad + col + pad;
     float by = y0 + pad + cap_h(ft);
     text(&ov, ft, title, tx, by, 0, 0, 0, track, tc);
     float ry = roundf(by + 10 * S);
-    rect(&ov, tx, ry, tx + inner, ry + 1, fc2);
+    rect(&ov, tx, ry, tx + inner, ry + l, fc2);
     float sy = ry + roundf(10 * S) + cap_h(fs);
     text(&ov, fs, sub, tx, sy, 0, 0, 0, 0, sc);
 
     /* scale bar: alternate halves of each kilometre filled */
     float bt = roundf(sy + 13 * S), bh = roundf(5 * S);
     float seg = bar / (km * 2);
-    rect(&ov, tx, bt, tx + bar, bt + 1, fc); rect(&ov, tx, bt + bh - 1, tx + bar, bt + bh, fc);
+    rect(&ov, tx, bt, tx + bar, bt + l, fc); rect(&ov, tx, bt + bh - l, tx + bar, bt + bh, fc);
     for (int i = 0; i < km * 2; i++) {
         float a = roundf(tx + i * seg), b = roundf(tx + (i + 1) * seg);
         if (!(i & 1)) rect(&ov, a, bt, b, bt + bh, bc);
-        rect(&ov, a, bt, a + 1, bt + bh, fc);
+        rect(&ov, a, bt, a + l, bt + bh, fc);
     }
-    rect(&ov, roundf(tx + bar) - 1, bt, roundf(tx + bar), bt + bh, fc);
+    rect(&ov, roundf(tx + bar) - l, bt, roundf(tx + bar), bt + bh, fc);
     char buf[16];
     float ly = bt + bh + roundf(5 * S) + cap_h(fm);
     for (int i = 0; i <= km; i++) {
@@ -2919,9 +2920,12 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static struct hidpi hd;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -2933,22 +2937,31 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "contours");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -2961,6 +2974,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -2988,6 +3003,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -2995,7 +3011,9 @@ static void usage(void) {
     fprintf(stderr,
         "usage: contours [--window | --root | --layer] [--seed N] [--interval METRES]\n"
         "                [--palette brass|cream|slate|blueprint|survey | --light] [--speed X] [--fps N]\n"
-        "                [--shot FILE.ppm [--size WxH] [--at SECONDS]] [--bench N [--size WxH]]\n");
+        "                [--shot FILE.ppm [--size WxH] [--at SECONDS]] [--bench N [--size WxH]]\n"
+        "                [--render-scale F]\n"
+        "  --render-scale F  with --layer, draw F x the output's native pixels (0 < F <= 1; default 1)\n");
     exit(1);
 }
 
@@ -3029,6 +3047,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-speed") && i + 1 < argc) opt_speed = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = atoi(argv[++i]);
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-shot") && i + 1 < argc) opt_shot = argv[++i];
         else if (!strcmp(a, "-bench") && i + 1 < argc) opt_bench = atoi(argv[++i]);
         else if (!strcmp(a, "-size") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &off_w, &off_h) != 2) usage(); }

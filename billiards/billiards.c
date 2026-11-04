@@ -88,6 +88,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 #define TAU (2 * M_PI)
 
@@ -1481,6 +1482,9 @@ static struct {
 } sc = {.idx = -1};
 static double fade_now = 1;
 static float min_dim, ui_m;
+/* buffer pixels per logical pixel (--layer at a HiDPI scale; else 1): the
+ * absolute pixel floors and caps below are logical, so the look holds */
+static float dpr = 1;
 static int st_title, st_sub, st_small, st_cap;
 static float px_title, px_sub;
 
@@ -1545,12 +1549,12 @@ static void layout(void) {
     float m = 0.05f * min_dim, gap = 0.045f * min_dim;
     ui_m = m;
     nstyles = 0;
-    px_title = clampf(0.030f * min_dim, 15, 60);
-    px_sub = clampf(0.0175f * min_dim, 11, 34);
+    px_title = dpr * clampf(0.030f * min_dim / dpr, 15, 60);
+    px_sub = dpr * clampf(0.0175f * min_dim / dpr, 11, 34);
     st_title = style(1, px_title);
     st_sub = style(1, px_sub);
-    st_small = style(1, clampf(0.0145f * min_dim, 10, 28));
-    st_cap = style(0, clampf(0.0150f * min_dim, 10, 28));
+    st_small = style(1, dpr * clampf(0.0145f * min_dim / dpr, 10, 28));
+    st_cap = style(0, dpr * clampf(0.0150f * min_dim / dpr, 10, 28));
     float cw = W - 2 * m, ch = H - 2 * m, ph0 = 0.25f * min_dim, pw0 = ph0 * PH_ASPECT;
     float title_w = measure(1, px_title, sc.title, -1);
     float bx[2][4], bs[2][4];
@@ -1666,7 +1670,7 @@ static void layout(void) {
 /* the line widths and intensities, normalised so that each act reaches about
  * the same mean density however long its lines and however big the screen */
 static void normalise(Panel *P) {
-    float sg = fmaxf(0.62f, 0.00062f * min_dim);
+    float sg = fmaxf(0.62f * dpr, 0.00062f * min_dim);
     P->sigma = sg;
     /* path length drawn, weighted by the decay it has had by the act's end */
     double Lw = 0;
@@ -1678,7 +1682,7 @@ static void normalise(Panel *P) {
     double dl = P->spec->mode == M_SWARM ? 0.30 : 0.55;   /* target mean density, in exposure units */
     double I = dl * area_px / (sg * sqrt(M_PI) * Lw * P->ts);
     P->I_line = clampf((float)I, 0.004f, 1.6f);
-    double sd = fmaxf(0.85f, 0.0009f * min_dim);
+    double sd = fmaxf(0.85f * dpr, 0.0009f * min_dim);
     double Id = (P->spec->mode == M_SWARM ? 0.25 : 0.6) * side_px / (M_PI * sd * sd * nbounce);
     P->I_dot = clampf((float)Id, P->spec->mode == M_SWARM ? 0.01f : 0.2f, 2.4f);
 }
@@ -1757,7 +1761,7 @@ static void ball_draw_to(Panel *P, Ball *b, double L, float w) {
             phase_px(P, b->ps, b->pp, &x, &y);
             pal_col(P->bu_dir ? 0.5f + 0.5f * b->pp * b->pp : b->u, c);
             if (P->bu_dir) ball_col(P, b, c);
-            emit(&acc_l, x, y, x, y, c, dot, fmaxf(0.9f, 0.00085f * min_dim), 1, 1, 1);
+            emit(&acc_l, x, y, x, y, c, dot, fmaxf(0.9f * dpr, 0.00085f * min_dim), 1, 1, 1);
         }
     }
 }
@@ -1988,7 +1992,7 @@ static void overlay(Panel *P, double tau, float I) {
         /* the swarm: each ball a soft point with a short trail; its last
          * bounce a point in the phase portrait */
         double tl = 0.10 * P->T.mfp;
-        float sg = P->sigma * 1.05f, sd = fmaxf(0.9f, 0.001f * min_dim);
+        float sg = P->sigma * 1.05f, sd = fmaxf(0.9f * dpr, 0.001f * min_dim);
         for (int i = 0; i < P->nb; i++) {
             Ball *b = &P->b[i];
             pal_col(b->u, c);
@@ -2042,7 +2046,7 @@ static void render(double t, double wt, GLuint target) {
         mk_target(tex_halo, fbo_halo, (W + HALO_DIV - 1) / HALO_DIV, (H + HALO_DIV - 1) / HALO_DIV, GL_LINEAR);
         sc.idx = -1;
     }
-    acc_sigma_px = 2.2f * fmaxf(1.0f, fminf(W, H) / 1200.0f);
+    acc_sigma_px = 2.2f * dpr * fmaxf(1.0f, fminf(W, H) / dpr / 1200.0f);
     if (idx != sc.idx || s != sc.spec || sc.built_w != W || sc.built_h != H || tau < sc.tau || tau - sc.tau > 3)
         scene_start(s, idx, tau);
     else scene_advance(tau);
@@ -2146,9 +2150,12 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static struct hidpi hd;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -2160,23 +2167,32 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    /* a resize rebuilds the layout and replays the act at the next frame */
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    dpr = (float)hidpi_factor(&hd, w);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "billiards");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -2189,6 +2205,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -2216,6 +2234,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -2224,6 +2243,7 @@ static void usage(void) {
         "usage: billiards [--window | --root | --layer] [--seed N] [--fps N] [--font FAMILY]\n"
         "                 [--palette spectral|gold|ice|paper|neon] [--scene NAME]\n"
         "                 [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "                 [--render-scale F (--layer: draw F x the output's native pixels, 0 < F <= 1; default 1)]\n"
         "                 [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--check]\n"
         "scenes:");
     for (int i = 0; i < NSOLO; i++) fprintf(stderr, " %s", SOLO[i].name);
@@ -2287,6 +2307,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-check")) opt_check = 1;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-font") && i + 1 < argc) opt_font = argv[++i];
         else if (!strcmp(a, "-palette") && i + 1 < argc) opt_palette = argv[++i];

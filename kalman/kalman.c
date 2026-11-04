@@ -89,12 +89,14 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 #define PI 3.14159265358979323846
 #define TAU (2 * PI)
 #define DEGR (PI / 180)
 
 static int W = 1280, H = 800;
+static float PX = 1;                    /* buffer pixels per logical pixel (--layer on a scaled output) */
 static int opt_root, opt_layer, opt_bench, opt_check, opt_resize;
 static float opt_fps = 30;
 static const char *opt_font = "DejaVu Sans Mono", *opt_math = "Latin Modern Math";
@@ -2765,7 +2767,7 @@ static void quad(float x0, float y0, float x1, float y1, float u0, float v0, flo
 }
 static void rectf(float x, float y, float w, float h, const float *c, float a) { quad(x, y, x + w, y + h, 0, 0, 0, 0, c, a, K_FLAT, 0); }
 static void disk(float x, float y, float r, const float *c, float a) { float e = r + 1; quad(x - e, y - e, x + e, y + e, -e, -e, e, e, c, a, K_DISK, r); }
-static void ring(float x, float y, float r, const float *c, float a) { float e = r + 2; quad(x - e, y - e, x + e, y + e, -e, -e, e, e, c, a, K_RING, r); }
+static void ring(float x, float y, float r, const float *c, float a) { float e = r + 2 * PX; quad(x - e, y - e, x + e, y + e, -e, -e, e, e, c, a, K_RING, r); }
 static void blob(float x, float y, float r, const float *c, float a) { quad(x - r, y - r, x + r, y + r, -r, -r, r, r, c, a, K_BLOB, r); }
 
 /* an anti-aliased segment w px wide (soft: a glow falloff instead) */
@@ -2953,7 +2955,7 @@ static float eq_atom(const char **pp, float x, float y, int lvl, int up, int dra
             if (*p == '}') p++;
             if (cmd == 'h' && draw) {      /* a hat: a little chevron over the base */
                 float cx = x + w * 0.55f, top = y - glyph(s, 'x')->top - em * 0.12f, hw = em * 0.16f, hh = em * 0.11f;
-                float lw = fmaxf(em * 0.05f, 0.9f);
+                float lw = fmaxf(em * 0.05f, 0.9f * PX);
                 seg(cx - hw, top, cx, top - hh, lw, c, a);
                 seg(cx, top - hh, cx + hw, top, lw, c, a);
             }
@@ -3075,7 +3077,8 @@ static void vstack(float x, float y, float w, float h, float g, int n, const int
 
 static void layout(void) {
     npan = 0;
-    U = clampf(fminf(W, H) / 1000.0f, 0.6f, 2.6f);
+    /* sized from the logical output, so a scale-2 panel draws the same layout at twice the pixels */
+    U = clampf(fminf(W, H) / PX / 1000.0f, 0.6f, 2.6f) * PX;
     float m = roundf(14 * U), g = roundf(10 * U), asp = (float)W / H;
     s_small = style(F_MONO, 11 * U); s_hud = style(F_MONO, 13 * U); s_hudb = style(F_MONOB, 13 * U);
     s_head = style(F_MONOB, 11.5f * U); s_title = style(F_MONOB, 22 * U); s_desc = style(F_MONO, 12.5f * U);
@@ -3133,7 +3136,7 @@ static int paper(void) { return pal[C_BG][0] > 0.5f; }
 
 static void frame(const Rect *r, const char *head) {
     rectf(r->x, r->y, r->w, r->h, pal[C_PANEL], 1);
-    float x0 = r->x + 0.5f, y0 = r->y + 0.5f, x1 = r->x + r->w - 0.5f, y1 = r->y + r->h - 0.5f, l = 9 * U, w = fmaxf(U, 1);
+    float x0 = r->x + 0.5f, y0 = r->y + 0.5f, x1 = r->x + r->w - 0.5f, y1 = r->y + r->h - 0.5f, l = 9 * U, w = fmaxf(U, PX);
     seg(x0, y0, x1, y0, w, pal[C_FRAME], 0.5f); seg(x0, y1, x1, y1, w, pal[C_FRAME], 0.5f);
     seg(x0, y0, x0, y1, w, pal[C_FRAME], 0.5f); seg(x1, y0, x1, y1, w, pal[C_FRAME], 0.5f);
     float cw = 1.6f * w;
@@ -3178,7 +3181,7 @@ static void chart_static(const Rect *r, const Chart *c) {
     frame(r, head);
     Rect in = chart_in(r, c->bars);
     const float *gc = pal[C_GRID], *dc = pal[C_DIM];
-    float lw = fmaxf(U, 1);
+    float lw = fmaxf(U, PX);
     /* y grid */
     if (c->logy) {
         int e0 = (int)ceil(log10(c->y0) - 1e-6), e1 = (int)floor(log10(c->y1) + 1e-6), est = e1 - e0 > 6 ? (e1 - e0 + 5) / 6 : 1;
@@ -3305,7 +3308,7 @@ static void chart_dynamic(const Rect *r, const Chart *c, double rt) {
     }
     (void)Q;
     float x = chart_x(&in, rt);
-    seg(x, in.y, x, in.y + in.h, fmaxf(U, 1), pal[C_DIM], 0.6f);
+    seg(x, in.y, x, in.y + in.h, fmaxf(U, PX), pal[C_DIM], 0.6f);
     /* the running mean of the NIS-like charts, against its expectation */
     if (c->bhi > 0 && c->ns && c->s[0]->n) {
         float ty = in.y + 4 * U + cap_h(s_small);
@@ -3379,7 +3382,7 @@ static void draw_truth(const Path *p, double t0, double t1, float a) {
     poly(P, n, 0, 1.1f * U, pal[C_TRUTH], a, NULL);
     double o[6];
     path_eval(p, t1, o);
-    float x = WX(o[0]), y = WY(o[1]), h = 3.5f * U, lw = fmaxf(U, 1);
+    float x = WX(o[0]), y = WY(o[1]), h = 3.5f * U, lw = fmaxf(U, PX);
     seg(x - h, y - h, x + h, y - h, lw, pal[C_TRUTH], a * 2); seg(x + h, y - h, x + h, y + h, lw, pal[C_TRUTH], a * 2);
     seg(x + h, y + h, x - h, y + h, lw, pal[C_TRUTH], a * 2); seg(x - h, y + h, x - h, y - h, lw, pal[C_TRUTH], a * 2);
 }
@@ -3391,7 +3394,7 @@ static void draw_est(const double *x, const double *P2, int col, float a, const 
     if (fill) fan(P, ELN, sx, sy, c, 0.10f * a);
     poly(P, ELN, 1, 1.4f * U, c, 0.9f * a, NULL);
     cov_ellipse(x[0], x[1], P2, 2, P);
-    poly_dash(P, ELN, 1, fmaxf(U, 1), c, 0.55f * a, 5 * U, 4 * U);
+    poly_dash(P, ELN, 1, fmaxf(U, PX), c, 0.55f * a, 5 * U, 4 * U);
     if (lead > 0) seg(sx, sy, WX(x[0] + x[2] * lead), WY(x[1] + x[3] * lead), 1.5f * U, c, 0.85f * a);
     if (glow_on) blob(sx, sy, 9 * U, c, 0.3f * a);
     ring(sx, sy, 3.6f * U, c, a);
@@ -3411,7 +3414,7 @@ static void circle(float cx, float cy, float r, float w, const float *c, float a
 static void draw_grid(void) {
     double wx0 = vcx - vr.w / 2 / vk, wx1 = vcx + vr.w / 2 / vk, wy0 = vcy - vr.h / 2 / vk, wy1 = vcy + vr.h / 2 / vk;
     double st = nice_step(fmin(wx1 - wx0, wy1 - wy0), 6);
-    float lw = fmaxf(U, 1);
+    float lw = fmaxf(U, PX);
     for (double x = ceil(wx0 / st) * st; x <= wx1; x += st) seg(WX(x), vr.y, WX(x), vr.y + vr.h, lw, pal[C_GRID], 0.55f);
     for (double y = ceil(wy0 / st) * st; y <= wy1; y += st) seg(vr.x, WY(y), vr.x + vr.w, WY(y), lw, pal[C_GRID], 0.55f);
     /* scale bar */
@@ -3439,7 +3442,7 @@ static void draw_radar(int rings) {
     if (rings) {
         double st = nice_step(rd->rmax, 5);
         for (double r = st; r <= rd->rmax + 1; r += st) {
-            circle(cx, cy, (float)(r * vk), fmaxf(U, 1), pal[C_GRID], 0.9f, 0);
+            circle(cx, cy, (float)(r * vk), fmaxf(U, PX), pal[C_GRID], 0.9f, 0);
             char b[16];
             snprintf(b, sizeof b, "%g", r / 1000);
             text(s_small, cx + (float)(r * vk) * 0.7071f + 3 * U, cy - (float)(r * vk) * 0.7071f - 3 * U, -1, b, pal[C_DIM], 0.9f);
@@ -3479,7 +3482,7 @@ static void draw_dets(double s, int wedges) {
                 P[2 * n] = WX(A.rd.x + r0 * cos(b)); P[2 * n + 1] = WY(A.rd.y + r0 * sin(b)); n++;
             }
             float wa = (float)(1 - age / (A.rd.T * 2.5));
-            poly(P, n, 1, fmaxf(U, 1), pal[C_MEAS], 0.75f * wa, NULL);
+            poly(P, n, 1, fmaxf(U, PX), pal[C_MEAS], 0.75f * wa, NULL);
             fan(P, n, x, y, pal[C_MEAS], 0.08f * wa);
         }
     }
@@ -3494,7 +3497,7 @@ static void draw_card(const Rect *r, double rt) {
     float h = pad * 2 + cap_h(s_head) + 14 * U + nt * styles[s_card].px * 1.15f + 6 * U + nl * styles[s_cardsub].px * 1.35f;
     float y = r->y + (r->h - h) * 0.42f;
     rectf(x, y, w, h, pal[C_BG], 0.86f * a);
-    float lw = fmaxf(U, 1);
+    float lw = fmaxf(U, PX);
     seg(x, y, x + w, y, lw, pal[C_FRAME], a); seg(x, y + h, x + w, y + h, lw, pal[C_FRAME], a);
     seg(x, y, x, y + h, lw, pal[C_FRAME], a); seg(x + w, y, x + w, y + h, lw, pal[C_FRAME], a);
     seg(x, y, x + w * 0.18f, y, 2.5f * U, pal[C_F1], a);
@@ -3562,7 +3565,7 @@ static void draw_plot(const Rect *r, double s, double rt) {
             if (d->t > s) continue;
             float a = 1 - (float)((s - d->t) / 40), x = WX(d->x), y = WY(d->y);
             if (a <= 0) continue;
-            if (s - d->t < 3) circle(x, y, (float)(GPS_SIG * vk), fmaxf(U, 1), pal[C_MEAS], 0.4f * a * (float)(1 - (s - d->t) / 3), 0);
+            if (s - d->t < 3) circle(x, y, (float)(GPS_SIG * vk), fmaxf(U, PX), pal[C_MEAS], 0.4f * a * (float)(1 - (s - d->t) / 3), 0);
             if (glow_on) blob(x, y, 5 * U, pal[C_MEAS], 0.3f * a);
             disk(x, y, 2.2f * U, pal[C_MEAS], a);
         }
@@ -3628,7 +3631,7 @@ static void draw_plot(const Rect *r, double s, double rt) {
                 det_R(&fake, R);
                 G[0] += R[0]; G[1] += R[1]; G[2] += R[3];
                 cov_ellipse(x[0], x[1], G, sqrt(GATE), pts);
-                poly_dash(pts, ELN, 1, fmaxf(U, 1), pal[C_F2], 0.45f, 2 * U, 4 * U);
+                poly_dash(pts, ELN, 1, fmaxf(U, PX), pal[C_F2], 0.45f, 2 * U, 4 * U);
                 ring(WX(x[0]), WY(x[1]), 3 * U, pal[C_F2], 0.6f);
                 continue;
             }
@@ -3644,7 +3647,7 @@ static void draw_plot(const Rect *r, double s, double rt) {
             det_R(&fake, R);
             G[0] += R[0]; G[1] += R[1]; G[2] += R[3];
             cov_ellipse(x[0], x[1], G, sqrt(GATE), pts);
-            poly_dash(pts, ELN, 1, fmaxf(U, 1), pal[C_F1], 0.4f * a, 2 * U, 3 * U);
+            poly_dash(pts, ELN, 1, fmaxf(U, PX), pal[C_F1], 0.4f * a, 2 * U, 3 * U);
             draw_est(x, P2, C_F1, a, lab, 30, 1, 0);
             if (k->st == TK_DEAD) {
                 float sx = WX(x[0]), sy = WY(x[1]), h = 6 * U;
@@ -3751,7 +3754,7 @@ static void heat(float x, float y, float cs, int nr, int nc, const double *M, in
             else c = v < GATE ? 1 - v / GATE * 0.8 : 0;
             int col = c >= 0 ? C_F1 : C_F2;
             float cx = x + j * cs, cy = y + i * cs;
-            float ins = cs < 9 * U ? 0 : 1;
+            float ins = cs < 9 * U ? 0 : PX;
             rectf(cx + ins, cy + ins, cs - 2 * ins, cs - 2 * ins, pal[col], 0.1f + 0.7f * (float)fmin(fabs(c), 1));
             if (numbers) {
                 char b[16];
@@ -3761,8 +3764,9 @@ static void heat(float x, float y, float cs, int nr, int nc, const double *M, in
             }
             if (asg && asg[i] == j) {
                 float lw = 1.6f * U;
-                seg(cx + 1, cy + 1, cx + cs - 1, cy + 1, lw, pal[C_TEXT], 1); seg(cx + cs - 1, cy + 1, cx + cs - 1, cy + cs - 1, lw, pal[C_TEXT], 1);
-                seg(cx + cs - 1, cy + cs - 1, cx + 1, cy + cs - 1, lw, pal[C_TEXT], 1); seg(cx + 1, cy + cs - 1, cx + 1, cy + 1, lw, pal[C_TEXT], 1);
+                float o = PX, e = cs - PX;
+                seg(cx + o, cy + o, cx + e, cy + o, lw, pal[C_TEXT], 1); seg(cx + e, cy + o, cx + e, cy + e, lw, pal[C_TEXT], 1);
+                seg(cx + e, cy + e, cx + o, cy + e, lw, pal[C_TEXT], 1); seg(cx + o, cy + e, cx + o, cy + o, lw, pal[C_TEXT], 1);
             }
         }
     for (int i = 0; rl && i < nr; i++) text(s_small, x - 5 * U, y + i * cs + cs / 2 + cap_h(s_small) / 2, 1, rl[i], pal[C_DIM], 1);
@@ -3833,11 +3837,11 @@ static void draw_mats(const Rect *r, double s) {
         double tr = hypot(oot[0] - oo[0], oot[1] - oo[1]) / 1000;
         for (int b = 0; b < 24; b++) {
             float h = (float)(hist[b] / mx) * bh;
-            rectf(x2 + b * bw + 1, by - h, bw - 2, h, pal[C_F1], 0.75f);
+            rectf(x2 + b * bw + PX, by - h, bw - 2 * PX, h, pal[C_F1], 0.75f);
         }
         float tx = x2 + (float)tr * bw;
         seg(tx, by - bh, tx, by, 1.4f * U, pal[C_TRUTH], 0.9f);
-        seg(x2, by, x2 + 24 * bw, by, fmaxf(U, 1), pal[C_FRAME], 1);
+        seg(x2, by, x2 + 24 * bw, by, fmaxf(U, PX), pal[C_FRAME], 1);
         for (int b = 0; b <= 24; b += 5) textf(s_small, x2 + b * bw, by + 4 * U + cap_h(s_small), 0, pal[C_DIM], 1, "%d", b);
         text(s_small, x2 + 24 * bw, by + 4 * U + cap_h(s_small), 1, "km", pal[C_DIM], 1);
         return;
@@ -3868,14 +3872,14 @@ static const char *meas_head(void) {
 }
 
 static void axes_box(const Rect *in) {
-    float lw = fmaxf(U, 1);
+    float lw = fmaxf(U, PX);
     seg(in->x, in->y, in->x + in->w, in->y, lw, pal[C_FRAME], 0.8f); seg(in->x, in->y + in->h, in->x + in->w, in->y + in->h, lw, pal[C_FRAME], 0.8f);
     seg(in->x, in->y, in->x, in->y + in->h, lw, pal[C_FRAME], 0.8f); seg(in->x + in->w, in->y, in->x + in->w, in->y + in->h, lw, pal[C_FRAME], 0.8f);
 }
 
 static void draw_meas(const Rect *r, double s, double rt) {
     Rect in = {r->x + 40 * U, r->y + 36 * U, r->w - 56 * U, r->h - 60 * U};
-    float lw = fmaxf(U, 1);
+    float lw = fmaxf(U, PX);
     if (A.id >= A_RTS) { np_meas(r, s); return; }
     if (A.id == A_KF) {
         float sz = fminf(in.w, in.h), cx = in.x + in.w / 2, cy = in.y + in.h / 2, k = sz / 2 / 22.0f;
@@ -4081,7 +4085,7 @@ static void draw_meas(const Rect *r, double s, double rt) {
 /* ---- whitened innovations ---- */
 static void draw_innov(const Rect *r) {
     Rect in = {r->x + 16 * U, r->y + 34 * U, r->w - 32 * U, r->h - 64 * U};
-    float sz = fminf(in.w, in.h), cx = in.x + in.w / 2, cy = in.y + in.h / 2, k = sz / 2 / 3.6f, lw = fmaxf(U, 1);
+    float sz = fminf(in.w, in.h), cx = in.x + in.w / 2, cy = in.y + in.h / 2, k = sz / 2 / 3.6f, lw = fmaxf(U, PX);
     seg(cx - sz / 2, cy, cx + sz / 2, cy, lw, pal[C_GRID], 1);
     int in2 = 0, n = A.inn_n;
     if (A.inn_m == 2) {
@@ -4228,7 +4232,7 @@ static void draw_title(const Rect *r) {
     float dl = styles[s_desc].px * 1.35f;
     nl = text_wrap(s_desc, x, y, w, dl, ACT_LINE[A.id], pal[C_DIM], 1, 1);
     y += (nl - 1) * dl + 12 * U;
-    seg(x, y, x + w, y, fmaxf(U, 1), pal[C_FRAME], 1);
+    seg(x, y, x + w, y, fmaxf(U, PX), pal[C_FRAME], 1);
     int ne = 0;
     while (ne < 6 && EQS[A.id][ne]) ne++;
     float base = 21 * U;
@@ -4236,7 +4240,7 @@ static void draw_title(const Rect *r) {
     float widest = 1;
     for (int i = 0; i < ne; i++) widest = fmaxf(widest, eq(0, 0, EQS[A.id][i], pal[C_TEXT], 1, 0));
     float avail = r->y + r->h - pad - y, sc = fminf(1.7f, fminf(w / widest, avail / (ne * 1.75f * base)));
-    float px = fmaxf(base * sc, 9);
+    float px = fmaxf(base * sc, 9 * PX);
     eq_s[0] = style(F_MATH, px); eq_s[1] = style(F_MATH, px * 0.7f);
     float el = fminf(px * 2.0f, avail / ne);
     y += el * 0.5f + px * 0.6f;
@@ -4277,7 +4281,7 @@ static void path_band(const Path *p, double t0, double t1, const char *label, fl
         P[2 * i] = WX(o[0]); P[2 * i + 1] = WY(o[1]);
     }
     poly(P, 121, 0, 16 * U, pal[C_WARN], 0.10f * a, NULL);
-    poly_dash(P, 121, 0, fmaxf(U, 1), pal[C_WARN], 0.5f * a, 4 * U, 5 * U);
+    poly_dash(P, 121, 0, fmaxf(U, PX), pal[C_WARN], 0.5f * a, 4 * U, 5 * U);
     if (label) text(s_small, P[120] + 12 * U, P[121] - 10 * U, -1, label, pal[C_WARN], 0.85f * a);
 }
 
@@ -4320,7 +4324,7 @@ static void rts_plot(double s) {
         if ((n - 1 - k) % 3 == 0 && k < n - 1) {
             double Pf3[3] = {RT.Pf[k][0], RT.Pf[k][1], RT.Pf[k][5]};
             cov_ellipse(RT.xf[k][0], RT.xf[k][1], Pf3, 1, pts);
-            poly_dash(pts, ELN, 1, fmaxf(U, 1), pal[C_F2], 0.55f * al[m], 3 * U, 3 * U);
+            poly_dash(pts, ELN, 1, fmaxf(U, PX), pal[C_F2], 0.55f * al[m], 3 * U, 3 * U);
             cov_ellipse(x[0], x[1], P3, 1, pts);
             fan(pts, ELN, WX(x[0]), WY(x[1]), pal[C_F1], 0.10f * al[m]);
             poly(pts, ELN, 1, 1.2f * U, pal[C_F1], 0.8f * al[m], NULL);
@@ -4339,8 +4343,8 @@ static void rts_plot(double s) {
         double o[6];
         path_eval(&A.tp[0], RT.t[j], o);
         float h = 3.5f * U;
-        seg(WX(o[0]) - h, WY(o[1]), WX(o[0]) + h, WY(o[1]), fmaxf(U, 1), pal[C_TRUTH], 0.8f);
-        seg(WX(o[0]), WY(o[1]) - h, WX(o[0]), WY(o[1]) + h, fmaxf(U, 1), pal[C_TRUTH], 0.8f);
+        seg(WX(o[0]) - h, WY(o[1]), WX(o[0]) + h, WY(o[1]), fmaxf(U, PX), pal[C_TRUTH], 0.8f);
+        seg(WX(o[0]), WY(o[1]) - h, WX(o[0]), WY(o[1]) + h, fmaxf(U, PX), pal[C_TRUTH], 0.8f);
     }
     double x[4], P2[3];
     fdisp(&A.f[0], s, x, P2);
@@ -4373,7 +4377,7 @@ static void rts_mats(const Rect *r) {
 
 static void rts_meas(const Rect *r, double s) {
     Rect in = {r->x + 44 * U, r->y + 40 * U, r->w - 60 * U, r->h - 64 * U};
-    float lw = fmaxf(U, 1), gh = 14 * U, hh = (in.h - gh) / 2;
+    float lw = fmaxf(U, PX), gh = 14 * U, hh = (in.h - gh) / 2;
     double win = 80, e = rts_ease(s);
     int n = RT.n, k0 = n - 1;
     if (n < 2) return;
@@ -4493,7 +4497,7 @@ static void fu_zoom(const Rect *b, double s, int mode, int small) {
 }
 static void fu_zoom_in(const Rect *b, double s, int mode, int small) {
     axes_box(b);
-    float cx = b->x + b->w / 2, cy = b->y + b->h / 2, pts[2 * ELN], lw = fmaxf(U, 1);
+    float cx = b->x + b->w / 2, cy = b->y + b->h / 2, pts[2 * ELN], lw = fmaxf(U, PX);
     float ty = b->y + 6 * U + cap_h(s_small);
     if (mode == 0) {
         /* cycle GPS, beacon 1, beacon 2, two seconds each; crossfade */
@@ -4575,7 +4579,7 @@ static void fu_plot(double s) {
         if (d->t > s) continue;
         float a = 1 - (float)((s - d->t) / 30), x = WX(d->x), y = WY(d->y);
         if (a <= 0) continue;
-        if (s - d->t < 2.5) circle(x, y, (float)(FU_GPS * vk), fmaxf(U, 1), pal[C_MEAS], 0.35f * a * (float)(1 - (s - d->t) / 2.5), 0);
+        if (s - d->t < 2.5) circle(x, y, (float)(FU_GPS * vk), fmaxf(U, PX), pal[C_MEAS], 0.35f * a * (float)(1 - (s - d->t) / 2.5), 0);
         disk(x, y, 2.2f * U, pal[C_MEAS], a);
     }
     double x[4], P2[3];
@@ -4594,7 +4598,7 @@ static void fu_plot(double s) {
                 double b = c - span + 2 * span * i / 40;
                 P[2 * i] = WX(FU.bx[j] + rr * cos(b)); P[2 * i + 1] = WY(FU.by[j] + rr * sin(b));
             }
-            if (d) poly_dash(P, 41, 0, fmaxf(U, 1), pal[C_F3], 0.5f * a, 3 * U, 3 * U);
+            if (d) poly_dash(P, 41, 0, fmaxf(U, PX), pal[C_F3], 0.5f * a, 3 * U, 3 * U);
             else poly(P, 41, 0, 1.5f * U, pal[C_F3], 0.85f * a, NULL);
         }
     }
@@ -4703,7 +4707,7 @@ static void nu_camera(double s) {
 }
 
 static void nu_plot(double s) {
-    float lw = fmaxf(U, 1), pts[2 * ELN];
+    float lw = fmaxf(U, PX), pts[2 * ELN];
     /* the truth's trail */
     {
         static float P[2 * 240];
@@ -4811,7 +4815,7 @@ static void nu_mats(const Rect *r) {
 static void nu_meas(const Rect *r, double s) {
     (void)s;
     Rect in = {r->x + 90 * U, r->y + 44 * U, r->w - 110 * U, r->h - 76 * U};
-    float lw = fmaxf(U, 1);
+    float lw = fmaxf(U, PX);
     double e0 = -14, e1 = 4;
     #define EX(v) (in.x + in.w * (float)((v - e0) / (e1 - e0)))
     for (int e = (int)e0; e <= (int)e1; e += 2) {
@@ -4899,7 +4903,7 @@ static double sl_p(int i, int j, double e) {
 }
 
 static void sl_plot(double s) {
-    float lw = fmaxf(U, 1), pts[2 * ELN];
+    float lw = fmaxf(U, PX), pts[2 * ELN];
     double e = sl_e(s), sd = fmax(s - SL_DT, 0);
     for (int j = 0; j < SL.L; j++) {
         float x = WX(SL.mx[j]), y = WY(SL.my[j]), h = 4 * U;
@@ -4986,7 +4990,7 @@ static void sl_mats(const Rect *r) {
     for (int i = 0; i < n; i++)
         for (int j = 0; j < n; j++) C[i * n + j] = SL.P[i * NSL + j];
     heat(in.x, in.y, cs, n, n, C, 0, NULL, NULL, NULL);
-    float lw = fmaxf(U, 1), tot = cs * n;
+    float lw = fmaxf(U, PX), tot = cs * n;
     seg(in.x + 3 * cs, in.y, in.x + 3 * cs, in.y + tot, 1.4f * U, pal[C_TEXT], 0.8f);
     seg(in.x, in.y + 3 * cs, in.x + tot, in.y + 3 * cs, 1.4f * U, pal[C_TEXT], 0.8f);
     text(s_small, in.x - 5 * U, in.y + 1.5f * cs + cap_h(s_small) / 2, 1, "r", pal[C_DIM], 1);
@@ -5021,7 +5025,7 @@ static void sl_mats(const Rect *r) {
 
 static void sl_meas(const Rect *r, double s) {
     Rect in = {r->x + 30 * U, r->y + 40 * U, r->w - 60 * U, r->h - 64 * U};
-    float lw = fmaxf(U, 1), pts[2 * ELN];
+    float lw = fmaxf(U, PX), pts[2 * ELN];
     axes_box(&in);
     float sz = fminf(in.w, in.h), cx = in.x + in.w / 2, cy = in.y + in.h * 0.62f, k = sz / 2 / (float)(SL_RMAX * 1.25);
     if (!SL.k) return;
@@ -5147,6 +5151,7 @@ static const char *VS = "#version 330 core\n" GLSL(
  * 3 thin ring, 4 text (u v texels), 5 soft blob, 6 soft line */
 static const char *FS = "#version 330 core\n" GLSL(
     uniform sampler2D uAtlas;
+    uniform float uPx;
     in vec2 vL;
     in vec4 vC;
     flat in vec2 vK;
@@ -5156,7 +5161,7 @@ static const char *FS = "#version 330 core\n" GLSL(
         int k = int(vK.x + 0.5);
         if (k == 1) a *= clamp(vK.y + 0.5 - abs(vL.x), 0.0, 1.0);
         else if (k == 2) a *= clamp(vK.y + 0.5 - length(vL), 0.0, 1.0);
-        else if (k == 3) a *= clamp(1.2 - abs(length(vL) - vK.y), 0.0, 1.0);
+        else if (k == 3) a *= clamp(0.7 * uPx + 0.5 - abs(length(vL) - vK.y), 0.0, 1.0);   /* 1.4 logical px wide */
         else if (k == 4) a *= texture(uAtlas, vL / vec2(2048.0)).r;
         else if (k == 5) { float d = length(vL) / vK.y; a *= exp(-d * d * 4.0) * step(d, 1.0); }
         else if (k == 6) { float d = clamp(1.0 - abs(vL.x) / (vK.y + 1.0), 0.0, 1.0); a *= d * d; }
@@ -5241,6 +5246,7 @@ static void flush(void) {
     }
     glUseProgram(prog);
     glUniform2f(UL(prog, "uRes"), (float)W, (float)H);
+    glUniform1f(UL(prog, "uPx"), PX);
     glUniform1i(UL(prog, "uAtlas"), 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex_atlas);
@@ -5757,9 +5763,12 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static struct hidpi hd;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -5771,22 +5780,32 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    PX = (float)hidpi_factor(&hd, W);
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "kalman");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -5799,6 +5818,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -5826,6 +5847,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -5834,6 +5856,7 @@ static void usage(void) {
         "usage: kalman [--window | --root | --layer] [--seed N] [--fps N] [--palette tactical|night|paper|mono]\n"
         "              [--act 1-9] [--act-len SECONDS] [--font FAMILY] [--math-font FAMILY]\n"
         "              [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "              [--render-scale F (--layer: draw F x the output's native pixels, 0 < F <= 1; default 1)]\n"
         "              [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--check] [--resize-test N]\n");
     exit(1);
 }
@@ -5892,6 +5915,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-check")) opt_check = 1;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-font") && i + 1 < argc) opt_font = argv[++i];
         else if (!strcmp(a, "-math-font") && i + 1 < argc) opt_math = argv[++i];

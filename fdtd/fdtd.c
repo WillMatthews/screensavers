@@ -85,11 +85,15 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 #define PI 3.14159265358979f
 #define DEG (PI / 180.0f)
 
 static int W = 1280, H = 800;
+static struct hidpi hd;                /* --layer: the output's scale (../common/hidpi.h) */
+static double opt_render_scale = 1;
+static float dpr = 1;                  /* framebuffer px per logical px, for strokes and minimum sizes */
 static int opt_root, opt_layer, opt_bench, opt_check, opt_poynting, opt_resize_test;
 static float opt_fps = 60;
 static float opt_speed = 1;            /* wave periods per second, times the act's own */
@@ -1135,7 +1139,7 @@ static const char *FS_COMP = VERSION GLSL(
     uniform sampler2D uAcc, uGlow, uMat, uExp;
     uniform vec4 uMap;
     uniform vec3 uBg, uNeg0, uNeg1, uPos0, uPos1, uTop, uGlowC, uDiel, uPec;
-    uniform float uLight, uGain, uFade, uPoynt, uArrow, uTime, uCardR, uH;
+    uniform float uLight, uGain, uFade, uPoynt, uArrow, uTime, uCardR, uH, uDpr;
     uniform vec4 uCard[3];
     uniform int uNCard;
     out vec4 o;
@@ -1179,14 +1183,14 @@ static const char *FS_COMP = VERSION GLSL(
         /* materials */
         vec4 mt = texture(uMat, uv);
         float de = mt.a, dg = mt.r;
-        float edge = de > 0.02 && de < 0.98 ? 1.0 - smoothstep(0.3, 1.3, abs(de - 0.5) / max(fwidth(de), 1e-4)) : 0.0;
+        float edge = de > 0.02 && de < 0.98 ? 1.0 - smoothstep(0.3, 1.3, abs(de - 0.5) / max(fwidth(de), 1e-4) / uDpr) : 0.0;
         col = mix(col, uDiel, de * 0.05 + dg * 0.11);
         col = mix(col, uDiel, edge * 0.55);
         float pe = smoothstep(0.25, 0.6, mt.g);
-        float pedge = mt.g > 0.02 && mt.g < 0.98 ? 1.0 - smoothstep(0.0, 1.2, abs(mt.g - 0.5) / max(fwidth(mt.g), 1e-4)) : 0.0;
+        float pedge = mt.g > 0.02 && mt.g < 0.98 ? 1.0 - smoothstep(0.0, 1.2, abs(mt.g - 0.5) / max(fwidth(mt.g), 1e-4) / uDpr) : 0.0;
         col = mix(col, uPec * (uLight > 0.5 ? 0.8 : 0.55), pe * 0.85);
         col = mix(col, uPec, pedge * 0.8);
-        float hatch = step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) / 7.0));
+        float hatch = step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) / (7.0 * uDpr)));
         col = mix(col, uPec, mt.b * (0.12 + 0.18 * hatch));
         /* Poynting arrows on a grid */
         if (uPoynt > 0.5) {
@@ -1200,9 +1204,9 @@ static const char *FS_COMP = VERSION GLSL(
                 vec2 q = gl_FragCoord.xy - cc;
                 q = vec2(dot(q, d), dot(q, vec2(-d.y, d.x)));
                 float L = uArrow * 0.38 * clamp(sqrt(sm) * 0.9, 0.3, 1.0);
-                float shaft = max(abs(q.y) - 0.6, max(q.x - L * 0.35, -L - q.x));
+                float shaft = max(abs(q.y) - 0.6 * uDpr, max(q.x - L * 0.35, -L - q.x));
                 float hd = max(abs(q.y) - (L - q.x) * 0.45, max(q.x - L, L * 0.3 - q.x));
-                float dist = min(shaft, hd);
+                float dist = min(shaft, hd) / uDpr;
                 float al = (1.0 - smoothstep(-0.5, 0.7, dist)) * smoothstep(0.02, 0.12, sm) * 0.55;
                 col = mix(col, uLight > 0.5 ? vec3(0.1) : vec3(0.92, 0.94, 0.96), al);
             }
@@ -1878,11 +1882,11 @@ static void build_text(double ta) {
     /* labels in the scene */
     {
         float u = fminf(front[2], front[3]) * sxs;
-        int s = style(F_UI, fmaxf(11, u * 0.0145f));
+        int s = style(F_UI, fmaxf(11 * dpr, u * 0.0145f));
         for (int i = 0; i < nlab; i++) {
             float x, y;
             local_to_fb(lab_list[i].x, lab_list[i].y, &x, &y);
-            if (x < -400 || x > W + 400 || y < -50 || y > H + 50) continue;
+            if (x < -400 * dpr || x > W + 400 * dpr || y < -50 * dpr || y > H + 50 * dpr) continue;
             text(s, x, y + cap_h(s) * 0.5f, lab_list[i].align, lab_list[i].s, cdim, 0.3f);
         }
     }
@@ -2100,7 +2104,8 @@ static void render(GLuint target, double ta, float dt) {
     float fade = smoothf(0, 1.2f, (float)ta) * smoothf(opt_act_secs, opt_act_secs - 1.2f, (float)ta);
     glUniform1f(U(p, "uFade"), fade);
     glUniform1f(U(p, "uPoynt"), (float)opt_poynting);
-    glUniform1f(U(p, "uArrow"), fmaxf(14, fminf(W, H) * 0.028f));
+    glUniform1f(U(p, "uArrow"), fmaxf(14 * dpr, fminf(W, H) * 0.028f));
+    glUniform1f(U(p, "uDpr"), dpr);
     glUniform1f(U(p, "uTime"), (float)fmod(ta, 100.0));
     glUniform1f(U(p, "uH"), (float)H);
     glUniform1f(U(p, "uCardR"), fminf(W, H) * 0.035f);
@@ -2121,7 +2126,7 @@ static void render(GLuint target, double ta, float dt) {
         glUniform1i(U(q, "uPat"), 0); glUniform1i(U(q, "uPatMax"), 1); glUniform1i(U(q, "uAna"), 2);
         bind_tex(0, tPat); bind_tex(1, tPatMax); bind_tex(2, tAna);
         set_col(q, "uInk", PC_INK); set_col(q, "uDim", PC_DIM); set_col(q, "uAcc", PC_ACC); set_col(q, "uBg", PC_BG);
-        glUniform1f(U(q, "uPx"), ppol[2]);
+        glUniform1f(U(q, "uPx"), ppol[2] / dpr);              /* strokes in logical px */
         glUniform1f(U(q, "uHasAna"), (float)(ana_kind != 0));
         glUniform1f(U(q, "uShowMark"), act == A_ARRAY ? 1.0f : 0.0f);
         glUniform1f(U(q, "uMark"), steer + (rot90 ? PI / 2 : 0));
@@ -2138,7 +2143,7 @@ static void render(GLuint target, double ta, float dt) {
         set_col(q, "uInk", PC_INK); set_col(q, "uDim", PC_DIM); set_col(q, "uAcc", PC_ACC); set_col(q, "uBg", PC_BG);
         glUniform1f(U(q, "uHead"), (float)step_n);
         glUniform1f(U(q, "uSpan"), trace_span);
-        glUniform1f(U(q, "uPxW"), ptr[2]); glUniform1f(U(q, "uPxH"), ptr[3]);
+        glUniform1f(U(q, "uPxW"), ptr[2] / dpr); glUniform1f(U(q, "uPxH"), ptr[3] / dpr);
         glUniform1f(U(q, "uFade"), ifade);
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
@@ -2179,6 +2184,7 @@ static void place(void) {
     /* the text sizes follow the output's size: start the styles afresh */
     nstyles = 0;
     style_gen++;
+    dpr = (float)hidpi_factor(&hd, W);
     if (span_me < 0) {
         lay[0] = lay[1] = 0; lay[2] = (float)W; lay[3] = (float)H;
         memcpy(front, lay, sizeof front); memcpy(inset, lay, sizeof inset); memcpy(view, lay, sizeof view);
@@ -2418,6 +2424,7 @@ static struct {
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -2429,25 +2436,34 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        /* a new size: place() runs before the next frame, which restarts the
-         * act (re-simulated to now) and the text styles */
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-        need_restart = 1;
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+    /* a new size: place() runs before the next frame, which restarts the
+     * act (re-simulated to now) and the text styles */
+    need_restart = 1;
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "fdtd");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -2460,6 +2476,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -2487,6 +2505,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -2495,6 +2514,7 @@ static void usage(void) {
         "usage: fdtd [--window | --root | --layer] [--seed N] [--fps N] [--palette field|phosphor|plasma|paper]\n"
         "            [--act NAME] [--act-secs S] [--speed X] [--cells N] [--poynting]\n"
         "            [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "            [--render-scale F (--layer: draw F x the output's native pixels, 0 < F <= 1; default 1)]\n"
         "            [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--check]\n"
         "acts: dipole array yagi horn dish lens luneburg bend crystal slits tir cavity\n");
     exit(1);
@@ -2535,6 +2555,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-check")) opt_check = 1;
         else if (!strcmp(a, "-resize-test") && i + 1 < argc) opt_resize_test = atoi(argv[++i]);
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-palette") && i + 1 < argc) opt_palette = argv[++i];
         else if (!strcmp(a, "-act") && i + 1 < argc) opt_act = argv[++i];

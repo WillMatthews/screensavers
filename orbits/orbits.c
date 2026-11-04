@@ -30,6 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 /* ================================================================== */
 /* ---- astrodynamics ----                                             */
@@ -498,6 +499,9 @@ static double pchip(const double *x, const double *y, int n, double t, double *s
 /* ---- the display ----                                               */
 /* ================================================================== */
 static int W = 1280, H = 800;
+/* buffer px per logical px (--layer at a HiDPI scale; else 1): hairlines,
+ * pads and the UI clamp are logical px, so the look holds at any scale */
+static float DP = 1;
 static int opt_root, opt_layer, opt_bench, opt_check, opt_act = -1;
 static float opt_fps = 60;
 static uint32_t opt_seed;
@@ -832,7 +836,7 @@ static float text(int s, float x, float y, int align, const char *str, const flo
 static float text_h(int s, float x, float y, int align, const char *str, const float *col) {
     float w = text_width(s, str, 0), ch = cap_h(s);
     float x0 = x - (align == 0 ? w * 0.5f : align > 0 ? w : 0);
-    rect(x0 - 3, y - ch - 3, x0 + w + 3, y + 4, 2, ca(pal->bg, 0.72f * col[3]));
+    rect(x0 - 3 * DP, y - ch - 3 * DP, x0 + w + 3 * DP, y + 4 * DP, 2 * DP, ca(pal->bg, 0.72f * col[3]));
     return text(s, x, y, align, str, col);
 }
 
@@ -843,7 +847,7 @@ static void styles_init(void) {
     float m = fminf((float)W, (float)H);
     nstyles = 0;                       /* sizes follow the output: start the cache afresh */
     atlas_dirty = 1;
-    UI = clampf(m / 1080.0f, 0.55f, 3.0f);
+    UI = DP * clampf(m / DP / 1080.0f, 0.55f, 3.0f);
     st_tiny = style(F_MONO, 11 * UI);
     st_lab = style(F_MONO, 12.5f * UI);
     st_small = style(F_SANS, 13.5f * UI);
@@ -913,7 +917,7 @@ static int hidden(const View *v, const double *p) {
 static void poly(const View *v, const double *pts, int n, float w, const float *c, float dash, float halo, float a0, float a1) {
     float px = 0, py = 0, phase = 0;
     int ph = 0;
-    float m = 40;
+    float m = 40 * DP;
     for (int i = 0; i < n; i++) {
         float x, y;
         proj(v, pts + 3 * i, &x, &y);
@@ -922,7 +926,7 @@ static void poly(const View *v, const double *pts, int n, float w, const float *
             float dx = x - px, dy = y - py, l = sqrtf(dx * dx + dy * dy);
             int vis = !(hd && ph);
             int off = (x < v->x0 - m && px < v->x0 - m) || (x > v->x1 + m && px > v->x1 + m) ||
-                      (y < v->y0 - m && py < v->y0 - m) || (y > v->y1 + m && py > v->y1 + m) || l > 6000;
+                      (y < v->y0 - m && py < v->y0 - m) || (y > v->y1 + m && py > v->y1 + m) || l > 6000 * DP;
             if (vis && !off && l > 0.01f) {
                 float t = n > 1 ? (float)i / (n - 1) : 1;
                 float al = c[3] * (a0 + (a1 - a0) * t);
@@ -1189,21 +1193,21 @@ static void range_rings(const View *v, const double *c, double rmax, double step
     char b[48], k[32];
     for (int i = 1; i * step <= rmax * 1.0001; i++) {
         double r = i * step;
-        draw_circle(v, c, r, 1, ca(pal->faint, a * (i % 2 ? 0.55f : 0.9f)), 0);
+        draw_circle(v, c, r, DP, ca(pal->faint, a * (i % 2 ? 0.55f : 0.9f)), 0);
         double p[3] = {c[0] + r * cos(-0.5), c[1] + r * sin(-0.5), c[2]};
         float x, y;
         proj(v, p, &x, &y);
         if (step * us < 1) snprintf(k, sizeof k, "%.2f", r * us);
         else fmt_k(k, sizeof k, r * us);
         snprintf(b, sizeof b, "%s %s", k, unit);
-        if (x > v->x0 + 20 && x < v->x1 - 60 && y > v->y0 + 20 && y < v->y1 - 20)
-            text(st_tiny, x + 4, y - 3, -1, b, ca(pal->dim, a * 0.75f));
+        if (x > v->x0 + 20 * DP && x < v->x1 - 60 * DP && y > v->y0 + 20 * DP && y < v->y1 - 20 * DP)
+            text(st_tiny, x + 4 * DP, y - 3 * DP, -1, b, ca(pal->dim, a * 0.75f));
     }
     for (int i = 0; i < 12; i++) {
         double t = i * TAU_D / 12, p0[3] = {c[0] + step * 0.5 * cos(t), c[1] + step * 0.5 * sin(t), c[2]};
         double p1[3] = {c[0] + rmax * cos(t), c[1] + rmax * sin(t), c[2]};
         double pts[6] = {p0[0], p0[1], p0[2], p1[0], p1[1], p1[2]};
-        poly(v, pts, 2, 1, ca(pal->faint, a * 0.35f), 0, 0, 1, 1);
+        poly(v, pts, 2, DP, ca(pal->faint, a * 0.35f), 0, 0, 1, 1);
     }
 }
 
@@ -1270,22 +1274,22 @@ static float pl_y(const Plot *p, double y) {
 }
 static void pl_frame(const Plot *p, const char *xl, const char *yl) {
     const Rect *r = &p->r;
-    rect_o(r->x0, r->y0, r->x1, r->y1, 0, 1, ca(pal->faint, 1));
+    rect_o(r->x0, r->y0, r->x1, r->y1, 0, DP, ca(pal->faint, 1));
     if (xl) text(st_tiny, r->x1, r->y1 + line_h(st_tiny) * 2.1f, 1, xl, ca(pal->dim, 0.9f));
     if (yl) text(st_tiny, r->x0, r->y0 - line_h(st_tiny) * 0.6f, -1, yl, ca(pal->dim, 0.9f));
 }
 static void pl_tick_x(const Plot *p, double x, const char *lab, int gridline) {
     float X = pl_x(p, x);
     if (X < p->r.x0 - 0.5f || X > p->r.x1 + 0.5f) return;
-    if (gridline) line(X, p->r.y0, X, p->r.y1, 1, ca(pal->faint, 0.45f));
-    line(X, p->r.y1, X, p->r.y1 + 5 * UI, 1, ca(pal->dim, 0.8f));
-    if (lab) text(st_tiny, X, p->r.y1 + 6 * UI + cap_h(st_tiny) + 2, 0, lab, ca(pal->dim, 0.9f));
+    if (gridline) line(X, p->r.y0, X, p->r.y1, DP, ca(pal->faint, 0.45f));
+    line(X, p->r.y1, X, p->r.y1 + 5 * UI, DP, ca(pal->dim, 0.8f));
+    if (lab) text(st_tiny, X, p->r.y1 + 6 * UI + cap_h(st_tiny) + 2 * DP, 0, lab, ca(pal->dim, 0.9f));
 }
 static void pl_tick_y(const Plot *p, double y, const char *lab, int gridline) {
     float Y = pl_y(p, y);
     if (Y < p->r.y0 - 0.5f || Y > p->r.y1 + 0.5f) return;
-    if (gridline) line(p->r.x0, Y, p->r.x1, Y, 1, ca(pal->faint, 0.45f));
-    line(p->r.x0 - 5 * UI, Y, p->r.x0, Y, 1, ca(pal->dim, 0.8f));
+    if (gridline) line(p->r.x0, Y, p->r.x1, Y, DP, ca(pal->faint, 0.45f));
+    line(p->r.x0 - 5 * UI, Y, p->r.x0, Y, DP, ca(pal->dim, 0.8f));
     if (lab) text(st_tiny, p->r.x0 - 8 * UI, Y + cap_h(st_tiny) * 0.5f, 1, lab, ca(pal->dim, 0.9f));
 }
 static void pl_curve(const Plot *p, const double *xs, const double *ys, int n, float w, const float *c, float dash) {
@@ -1419,7 +1423,7 @@ static void ho_draw(Rect R, double u) {
     sun_dir_eq(jd, sun);
     double step = ho.ph && u > 50 ? 25000 : 10000;
     range_rings(&v, O, ho.ph && u > 50 ? ho.rb * 1.05 : ho.r2 * 1.12, step, 1, "km", 0.9f);
-    planet(&v, O, R_EARTH, B_EARTH, sun, (float)gmst(jd), 4, pal->sea);
+    planet(&v, O, R_EARTH, B_EARTH, sun, (float)gmst(jd), 4 * DP, pal->sea);
     /* the orbits */
     draw_circle(&v, O, ho.r1, 1.2f * UI, ca(pal->orb2, 0.8f), 0);
     draw_circle(&v, O, ho.r2, 1.2f * UI, ca(pal->orb2, 0.8f), 0);
@@ -1512,7 +1516,7 @@ static void ho_plot(Rect r, double u) {
     pl_curve(&p, xs, y3, 200, 1.4f * UI, ca(pal->alt, 0.9f), 0);
     pl_curve(&p, xs, y1, 200, 2 * UI, ca(pal->orb, 1), 0);
     float X = pl_x(&p, 11.94);
-    line_d(X, r.y0, X, r.y1, 1, ca(pal->hi, 0.8f), 5 * UI);
+    line_d(X, r.y0, X, r.y1, DP, ca(pal->hi, 0.8f), 5 * UI);
     text(st_tiny, X + 4 * UI, r.y0 + line_h(st_tiny) * 1.2f, -1, "11.94: bi-elliptic wins (r\xe2\x82\x90\xe2\x86\x92\xe2\x88\x9e)", ca(pal->hi, 0.95f));
     double R = ho.r2 / ho.r1;
     float px = pl_x(&p, R), py = pl_y(&p, hoh_dv(R));
@@ -1747,7 +1751,7 @@ static void mx_draw(Rect R, double u) {
         }
         float x, y;
         proj(&v, mx.er[col], &x, &y);
-        ring(x, y, 9 * UI, 1, ca(pal->hi, 0.8f));
+        ring(x, y, 9 * UI, DP, ca(pal->hi, 0.8f));
     }
     if (mx.done == PCX * PCY) {
         float a = (float)smooth(26, 30, u);
@@ -1762,10 +1766,10 @@ static void mx_draw(Rect R, double u) {
         planet_rv(P_EARTH, mx.tarr, ge, vv);
         float x, y;
         proj(&v, gm, &x, &y);
-        ring(x, y, 5 * UI, 1, ca(pal->mars, 0.6f * a));
+        ring(x, y, 5 * UI, DP, ca(pal->mars, 0.6f * a));
         text_h(st_tiny, x + 8 * UI, y + 4 * UI, -1, "MARS AT LAUNCH", ca(pal->dim, 0.9f * a));
         proj(&v, ge, &x, &y);
-        ring(x, y, 5 * UI, 1, ca(pal->orb2, 0.6f * a));
+        ring(x, y, 5 * UI, DP, ca(pal->orb2, 0.6f * a));
         text_h(st_tiny, x + 8 * UI, y + 4 * UI, -1, "EARTH AT ARRIVAL", ca(pal->dim, 0.9f * a));
         /* the burns */
         double r0[3], v0[3], r1[3], v1[3];
@@ -1841,7 +1845,7 @@ static void mx_plot(Rect r, double u) {
     for (int tof = 100; tof <= 500; tof += 100) {
         double x0 = fmax(mx.dep0, mx.arr0 - tof), x1 = fmin(mx.dep1, mx.arr1 - tof);
         if (x1 <= x0) continue;
-        line_d(pl_x(&p, x0), pl_y(&p, x0 + tof), pl_x(&p, x1), pl_y(&p, x1 + tof), 1, ca(pal->dim, 0.55f), 4 * UI);
+        line_d(pl_x(&p, x0), pl_y(&p, x0 + tof), pl_x(&p, x1), pl_y(&p, x1 + tof), DP, ca(pal->dim, 0.55f), 4 * UI);
         snprintf(b, sizeof b, "%d d", tof);
         text_h(st_tiny, pl_x(&p, x1) - 4 * UI, pl_y(&p, x1 + tof) + 12 * UI, 1, b, ca(pal->dim, 0.85f));
     }
@@ -1849,7 +1853,7 @@ static void mx_plot(Rect r, double u) {
         float a = (float)smooth(24, 28, u);
         double xd = mx.dep0 + (mx.dep1 - mx.dep0) * mx.mi / (PCX - 1), ya = mx.arr0 + (mx.arr1 - mx.arr0) * mx.mj / (PCY - 1);
         float X = pl_x(&p, xd), Y = pl_y(&p, ya);
-        ring(X, Y, 5 * UI, 1, ca(pal->ink, 0.8f * a));
+        ring(X, Y, 5 * UI, DP, ca(pal->ink, 0.8f * a));
         snprintf(b, sizeof b, "C\xe2\x82\x83 min %.2f", mx.mc3);
         text_h(st_tiny, X - 9 * UI, Y - 8 * UI, 1, b, ca(pal->ink, 0.9f * a));
         X = pl_x(&p, mx.tdep); Y = pl_y(&p, mx.tarr);
@@ -1997,7 +2001,7 @@ static void fb_vectors(Rect r) {
 #define VY(y) (oy - (float)((y) * s))
     text(st_h, r.x0 + 4 * UI, r.y0 + cap_h(st_h) + 4 * UI, -1, "VELOCITY DIAGRAM  km/s", ca(pal->dim, 1));
     float tx = VX(fb.Vp[0]), ty = VY(fb.Vp[1]);
-    ring_d(tx, ty, (float)(fb.vinf * s), 1, ca(pal->alt, 0.55f), 48);
+    ring_d(tx, ty, (float)(fb.vinf * s), DP, ca(pal->alt, 0.55f), 48);
     disc(VX(0), VY(0), 2.5f * UI, ca(pal->ink, 0.8f));
     arrow(VX(0), VY(0), tx, ty, 1.5f * UI, ca(pal->dim, 0.95f), 10 * UI);
     arrow(VX(0), VY(0), VX(fb.vin[0]), VY(fb.vin[1]), 1.6f * UI, ca(pal->orb2, 1), 10 * UI);
@@ -2040,13 +2044,13 @@ static void fb_helio(Rect r) {
     v.cy += 10 * UI;
     text(st_h, r.x0 + 4 * UI, r.y0 + cap_h(st_h) + 4 * UI, -1, "HELIOCENTRIC", ca(pal->dim, 1));
     double O[3] = {0, 0, 0}, z[3] = {0, 0, 1};
-    draw_circle(&v, O, AU, 1, ca(pal->orb2, 0.6f), 0);
+    draw_circle(&v, O, AU, DP, ca(pal->orb2, 0.6f), 0);
     draw_circle(&v, O, fb.rJ, 1.2f * UI, ca(pal->orb2, 0.85f), 0);
     planet(&v, O, 696000, B_SUN, z, 0, 5 * UI, pal->sun);
     double nu0 = 0, nu1 = fb.nuenc_in;
     if (nu1 < nu0) nu1 += TAU_D;
     draw_conic(&v, &fb.hin, nu0, nu1, 1.5f * UI, ca(pal->orb2, 1), 0, 0);
-    draw_conic(&v, &fb.hin, nu1, nu0 + TAU_D, 1, ca(pal->orb2, 0.3f), 5 * UI, 0);
+    draw_conic(&v, &fb.hin, nu1, nu0 + TAU_D, DP, ca(pal->orb2, 0.3f), 5 * UI, 0);
     double e1 = fb.nuout_end;
     if (fb.hout.e < 1) { while (e1 < fb.nuenc_out) e1 += TAU_D; }
     int past = fb.t > 0;
@@ -2097,10 +2101,10 @@ static void fb_draw(Rect R, double u) {
     double L = 130 * R_JUP;
     double a0[6] = {C[0], C[1], 0, C[0] - fb.uin[0] * L, C[1] - fb.uin[1] * L, 0};
     double a1[6] = {C[0], C[1], 0, C[0] + fb.uout[0] * L, C[1] + fb.uout[1] * L, 0};
-    poly(&v, a0, 2, 1, ca(pal->dim, 0.7f), 6 * UI, 0, 1, 1);
+    poly(&v, a0, 2, DP, ca(pal->dim, 0.7f), 6 * UI, 0, 1, 1);
     double a2[6] = {C[0], C[1], 0, C[0] + fb.uin[0] * 14 * R_JUP, C[1] + fb.uin[1] * 14 * R_JUP, 0};
-    poly(&v, a2, 2, 1, ca(pal->dim, 0.45f), 2 * UI, 0, 1, 1);
-    poly(&v, a1, 2, 1, ca(pal->dim, 0.7f), 6 * UI, 0, 1, 1);
+    poly(&v, a2, 2, DP, ca(pal->dim, 0.45f), 2 * UI, 0, 1, 1);
+    poly(&v, a1, 2, DP, ca(pal->dim, 0.7f), 6 * UI, 0, 1, 1);
     double k = -(C[0] * fb.uin[0] + C[1] * fb.uin[1]);
     double F[3] = {C[0] + fb.uin[0] * k, C[1] + fb.uin[1] * k, 0}, bl[6] = {0, 0, 0, F[0], F[1], 0};
     poly(&v, bl, 2, 1.2f * UI, ca(pal->alt, 0.8f), 3 * UI, 0, 1, 1);
@@ -2155,7 +2159,7 @@ static void fb_draw(Rect R, double u) {
     arrow(jx, jy, x1, y1, 1.3f * UI, ca(pal->dim, 0.9f), 9 * UI);
     text_h(st_tiny, x1 + 6 * UI, y1, -1, "V(J)", ca(pal->dim, 1));
     proj(&v, Sd, &x1, &y1);
-    line_d(jx, jy, x1, y1, 1, ca(pal->sun, 0.6f), 4 * UI);
+    line_d(jx, jy, x1, y1, DP, ca(pal->sun, 0.6f), 4 * UI);
     text_h(st_tiny, x1, y1 - 6 * UI, 0, "\xe2\x86\x90 SUN", ca(pal->dim, 1));
     craft(&v, fb.pos, fb.vel, pal->orb, NULL);
     flush(&A);
@@ -2306,7 +2310,7 @@ static void cr_trail(const View *v, const double *s, int n, int upto, int tail, 
     /* the whole path so far, faint and thinned */
     int k = 0, step = upto > 2000 ? 4 : 2;
     for (int i = 0; i <= upto && k < 8000; i += step) { set3(pts + 3 * k, s[4 * i], s[4 * i + 1], 0); k++; }
-    poly(v, pts, k, 1, ca(c, 0.16f), 0, 0, 1, 1);
+    poly(v, pts, k, DP, ca(c, 0.16f), 0, 0, 1, 1);
     /* the recent tail, bright and fading */
     int i0 = upto - tail < 0 ? 0 : upto - tail;
     k = 0;
@@ -2346,10 +2350,10 @@ static void cr_draw(Rect R, double u) {
     }
     /* axes */
     double ax[6] = {-1.6, 0, 0, 1.6, 0, 0}, ay[6] = {0, -1.3, 0, 0, 1.3, 0};
-    poly(&v, ax, 2, 1, ca(pal->faint, 0.8f), 0, 0, 1, 1);
-    poly(&v, ay, 2, 1, ca(pal->faint, 0.5f), 0, 0, 1, 1);
+    poly(&v, ax, 2, DP, ca(pal->faint, 0.8f), 0, 0, 1, 1);
+    poly(&v, ay, 2, DP, ca(pal->faint, 0.5f), 0, 0, 1, 1);
     double O[3] = {-mu, 0, 0};
-    draw_circle(&v, O, 1, 1, ca(pal->faint, 0.8f), 5 * UI);
+    draw_circle(&v, O, 1, DP, ca(pal->faint, 0.8f), 5 * UI);
     char b[48];
     if (!cr.ph) {
         int nl = cr.nly;
@@ -2535,7 +2539,7 @@ static void wk_globe(Rect R, double u) {
     double O[3] = {0, 0, 0}, sun[3];
     view_occ(&v, O, R_EARTH);
     sun_dir_eq(wk.jd, sun);
-    planet(&v, O, R_EARTH, B_EARTH, sun, (float)wk.th, 4, pal->sea);
+    planet(&v, O, R_EARTH, B_EARTH, sun, (float)wk.th, 4 * DP, pal->sea);
     static double pts[3 * 129];
     double ci = cos(wk.d.inc * RAD), si = sin(wk.d.inc * RAD);
     for (int j = 0; j < wk.d.P; j++) {
@@ -2584,7 +2588,7 @@ static void wk_map(Rect R, double u) {
         }
         p += 2 * n + 1;
     }
-    rect_o(R.x0, R.y0, R.x1, R.y1, 0, 1, ca(pal->dim, 0.6f));
+    rect_o(R.x0, R.y0, R.x1, R.y1, 0, DP, ca(pal->dim, 0.6f));
     char b[16];
     for (int lo = -150; lo <= 150; lo += 30) {
         snprintf(b, sizeof b, "%d\xc2\xb0", lo);
@@ -2629,7 +2633,7 @@ static void wk_map(Rect R, double u) {
             double lat = asin(sin(lat0) * cos(l) + cos(lat0) * sin(l) * cos(th));
             double lon = wrap_pi(lon0 + atan2(sin(th) * sin(l) * cos(lat0), cos(l) - sin(lat0) * sin(lat)));
             float x = MX(lon), y = MY(lat);
-            if (i && fabs(lon - flon) < PI_D && (hl || wk.lam < 32 * RAD)) line(fx, fy, x, y, 1, ca(c, hl ? 0.7f : 0.22f));
+            if (i && fabs(lon - flon) < PI_D && (hl || wk.lam < 32 * RAD)) line(fx, fy, x, y, DP, ca(c, hl ? 0.7f : 0.22f));
             fx = x; fy = y; flon = lon;
         }
         float x = MX(lon0), y = MY(lat0);
@@ -2677,7 +2681,7 @@ static void wk_plot(Rect r, double u) {
         float x = pl_x(&p, O), y = pl_y(&p, uu);
         glow(x, y, 12 * UI, cadd(c, 0.5f));
         disc(x, y, 3 * UI, ca(c, 1));
-        if (i == 0) line(x, r.y0, x, r.y1, 1, ca(c, 0.25f));
+        if (i == 0) line(x, r.y0, x, r.y1, DP, ca(c, 0.25f));
     }
 }
 
@@ -2829,7 +2833,7 @@ static void dc_draw(Rect R, double u) {
     v.s = fit_scale(&v, (R_EARTH + DC_K * ha) * 1.04, el, 20 * UI);
     double O[3] = {0, 0, 0}, sun[3] = {0.4, -0.85, 0.35};
     view_occ(&v, O, R_EARTH);
-    planet(&v, O, R_EARTH, B_EARTH, sun, (float)(dc.t * 7.292115e-5), 4, pal->sea);
+    planet(&v, O, R_EARTH, B_EARTH, sun, (float)(dc.t * 7.292115e-5), 4 * DP, pal->sea);
     /* shells */
     double sh[] = {120, 200, 400, 800};
     char b[48];
@@ -2852,7 +2856,7 @@ static void dc_draw(Rect R, double u) {
         dc_state(t, p, vv, NULL);
         Orbit o;
         orb_from_rv(MU_EARTH, p, vv, t, &o);
-        if (o.e < 1) dc_orbit(&v, &o, 1, ca(pal->orb2, 0.55f - k * 0.06f), 0);
+        if (o.e < 1) dc_orbit(&v, &o, DP, ca(pal->orb2, 0.55f - k * 0.06f), 0);
     }
     if (!dc.gone && dc.osc.e < 1) dc_orbit(&v, &dc.osc, 1.4f * UI, ca(pal->orb, 0.55f), 0);
     /* the actual path over the last revolution, hotter as it goes deeper */
@@ -2896,7 +2900,7 @@ static void dc_plot(Rect r, double u) {
     for (int d = 0; d <= dc.life / DAY * 1.04; d += step) { snprintf(b, sizeof b, "%d", d); pl_tick_x(&p, d, b, 1); }
     for (int a = 0; a <= 800; a += 200) { snprintf(b, sizeof b, "%d", a); pl_tick_y(&p, a, b, 1); }
     float ey = pl_y(&p, 120);
-    line_d(r.x0, ey, r.x1, ey, 1, ca(pal->warn, 0.7f), 5 * UI);
+    line_d(r.x0, ey, r.x1, ey, DP, ca(pal->warn, 0.7f), 5 * UI);
     text(st_tiny, r.x0 + 6 * UI, ey - 5 * UI, -1, "120 km", ca(pal->warn, 0.9f));
     static double xs[4000], ya[4000], yp[4000];
     int n = 0, cut = 0;
@@ -2948,7 +2952,7 @@ static const char *VS_PRIM = "#version 330 core\n" GLSL(
 static const char *FS_PRIM = "#version 330 core\n" GLSL(
     uniform sampler2D uAtlas, uLand, uPork;
     uniform vec3 uLandC, uBg, uBg2, uInk, uFaint, uAlt, uHi;
-    uniform float uPaper;
+    uniform float uPaper, uDp;            /* uDp: buffer px per logical px */
     in vec2 vL;
     in vec4 vP;
     in vec4 vC;
@@ -2959,7 +2963,7 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
     float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
     float sdb(vec2 p, vec2 b, float r) { vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }
     float gridline(float v, float step) {
-        float f = v / step, d = abs(fract(f + 0.5) - 0.5) / max(fwidth(f), 1e-5);
+        float f = v / step, d = abs(fract(f + 0.5) - 0.5) / max(fwidth(f) * uDp, 1e-5);
         return 1.0 - smoothstep(0.3, 1.2, d);
     }
     float landAt(float lon, float lat) {
@@ -3005,7 +3009,7 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
             vec3 sun = vP.yzw;
             if (dist > r) {
                 /* the atmosphere's rim */
-                float h = (dist - r) / (r * 0.06 + 2.0);
+                float h = (dist - r) / (r * 0.06 + 2.0 * uDp);
                 float lit = clamp(dot(normalize(vec3(q, 0.0)), sun) * 0.8 + 0.4, 0.0, 1.0);
                 a = (ty == 0 && uPaper < 0.5) ? exp(-h * 3.0) * 0.55 * lit : 0.0;
                 c = mix(c, vec3(0.55, 0.8, 1.0), 0.6);
@@ -3043,7 +3047,7 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
                         float g = max(gridline(lon, 0.5235988), gridline(lat, 0.5235988));
                         c = mix(c, uInk, g * (0.03 + 0.09 * day));
                     }
-                    if (uPaper > 0.5) c = mix(c, uInk, (1.0 - smoothstep(0.5, 1.0, dist / r)) * 0.0 + smoothstep(r - 1.5, r, dist) * 0.8);
+                    if (uPaper > 0.5) c = mix(c, uInk, (1.0 - smoothstep(0.5, 1.0, dist / r)) * 0.0 + smoothstep(r - 1.5 * uDp, r, dist) * 0.8);
                 }
             }
         } else if (vK == 7) {
@@ -3055,12 +3059,12 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
             float day = smoothstep(-0.10, 0.10, cz);
             if (uPaper > 0.5) {
                 c = base * (0.86 + 0.14 * day);
-                float hatch = step(fract((gl_FragCoord.x - gl_FragCoord.y) / 6.0), 0.2);
+                float hatch = step(fract((gl_FragCoord.x - gl_FragCoord.y) / (6.0 * uDp)), 0.2);
                 c = mix(c, uInk, (1.0 - day) * hatch * 0.18);
             } else c = base * (0.30 + 0.70 * day);
             float g = max(gridline(lon, 0.5235988), gridline(lat, 0.5235988));
             c = mix(c, uInk, g * 0.13);
-            float eq = 1.0 - smoothstep(0.5, 1.5, abs(vL.y) );
+            float eq = 1.0 - smoothstep(0.5, 1.5, abs(vL.y) / uDp);
             c = mix(c, uInk, eq * 0.18);
         } else if (vK == 8) {
             /* the zero-velocity curve: 2 Omega(x, y) = C, the realm where it's below hatched */
@@ -3068,15 +3072,14 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
             float m = vQ.x;
             float r1 = length(w - vec2(-m, 0.0)), r2 = length(w - vec2(1.0 - m, 0.0));
             float f = dot(w, w) + 2.0 * (1.0 - m) / r1 + 2.0 * m / r2 - vP.w;
-            float px = f / max(fwidth(f), 1e-7);
+            float px = f / max(fwidth(f) * uDp, 1e-7);
             float ln = 1.0 - smoothstep(0.6, 1.6, abs(px));
             float forb = smoothstep(0.5, -0.5, px);
-            float hatch = 1.0 - smoothstep(0.5, 1.4, abs(mod(gl_FragCoord.x + gl_FragCoord.y, 9.0) - 4.5) * 1.0 - 3.0);
-            hatch = step(mod(gl_FragCoord.x + gl_FragCoord.y, 9.0), 1.6);
+            float hatch = step(mod((gl_FragCoord.x + gl_FragCoord.y) / uDp, 9.0), 1.6);
             a = max(ln * 0.95, forb * (0.10 + 0.22 * hatch));
             /* a few faint level curves of the potential outside */
             float lv = log(max(f + vP.w, 1e-3)) * 24.0;
-            a = max(a, (1.0 - forb) * (1.0 - smoothstep(0.0, 1.0, abs(fract(lv + 0.5) - 0.5) / max(fwidth(lv), 1e-5))) * 0.06);
+            a = max(a, (1.0 - forb) * (1.0 - smoothstep(0.0, 1.0, abs(fract(lv + 0.5) - 0.5) / max(fwidth(lv) * uDp, 1e-5))) * 0.06);
         } else if (vK == 9) {
             /* the porkchop: C3 contours (relative to the minimum) over a fill, v-infinity dashed */
             vec2 uv = vec2(vL.x / vP.x * 0.5 + 0.5, 0.5 - vL.y / vP.y * 0.5);
@@ -3084,7 +3087,7 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
             float c3 = g.r;
             a = step(uv.x, vQ.x) * step(0.5, c3) * (1.0 - smoothstep(160.0, 420.0, c3));
             float l = log(max(c3, 0.5) / vP.z) / log(1.22);
-            float dl = max(fwidth(l), 1e-4);
+            float dl = max(fwidth(l) * uDp, 1e-4);
             float f = abs(fract(l + 0.5) - 0.5) / dl;
             float ln = (1.0 - smoothstep(0.35, 1.2, f)) * step(l, 13.5);
             float major = step(abs(mod(floor(l + 0.5), 3.0)), 0.5);
@@ -3092,8 +3095,8 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
             vec3 fill = mix(uBg2, c, pow(t, 1.8) * 0.42);
             fill = mix(fill, uHi, smoothstep(0.86, 1.0, t) * 0.30);
             vec3 col = mix(fill, mix(c, uInk, 0.25), ln * (0.35 + 0.45 * major));
-            float vl = g.g, vf = abs(fract(vl + 0.5) - 0.5) / max(fwidth(vl), 1e-4);
-            float dash = step(fract((gl_FragCoord.x + gl_FragCoord.y) / 9.0), 0.5);
+            float vl = g.g, vf = abs(fract(vl + 0.5) - 0.5) / max(fwidth(vl) * uDp, 1e-4);
+            float dash = step(fract((gl_FragCoord.x + gl_FragCoord.y) / (9.0 * uDp)), 0.5);
             col = mix(col, uAlt, (1.0 - smoothstep(0.35, 1.1, vf)) * dash * 0.6 * step(g.g, 6.5) * step(l, 13.5));
             c = col;
             a *= 0.96;
@@ -3115,6 +3118,7 @@ static const char *VS_FULL = "#version 330 core\n" GLSL(
 /* the backdrop: deep space and its stars, or a sheet of plotting paper */
 static const char *FS_BG = "#version 330 core\n" GLSL(
     uniform vec2 uRes, uOff;
+    uniform float uDp;
     uniform vec3 uBg, uBg2, uStar, uGrid;
     uniform float uPaper;
     out vec4 o;
@@ -3131,7 +3135,7 @@ static const char *FS_BG = "#version 330 core\n" GLSL(
         vec2 p = gl_FragCoord.xy, q = p / uRes;
         float v = length((q - 0.5) * vec2(uRes.x / uRes.y, 1.0));
         vec3 c = mix(uBg2, uBg, smoothstep(0.0, 0.9, v));
-        vec2 w = vec2(p.x, uRes.y - p.y) + uOff;
+        vec2 w = vec2(p.x, uRes.y - p.y) / uDp + uOff;   /* logical px */
         if (uPaper > 0.5) {
             float n = h21(floor(w * 0.7)) * 0.025 + h21(floor(w * 0.11)) * 0.02;
             c = uBg * (0.985 + n);
@@ -3237,6 +3241,7 @@ static void flush(const Rect *clip) {
     glUniform3fv(U(p, "uAlt"), 1, pal->alt);
     glUniform3fv(U(p, "uHi"), 1, pal->hi);
     glUniform1f(U(p, "uPaper"), (float)pal->paper);
+    glUniform1f(U(p, "uDp"), DP);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, tex_pork);
     glActiveTexture(GL_TEXTURE1);
@@ -3347,7 +3352,7 @@ static void act_at(double wt) {
 /* ---- the panels ---- */
 static void card(Rect r) {
     rect(r.x0, r.y0, r.x1, r.y1, 3 * UI, ca(pal->bg2, pal->paper ? 0.92f : 0.88f));
-    rect_o(r.x0, r.y0, r.x1, r.y1, 3 * UI, 1, ca(pal->faint, 0.9f));
+    rect_o(r.x0, r.y0, r.x1, r.y1, 3 * UI, DP, ca(pal->faint, 0.9f));
     float t = 9 * UI;
     const float *c = ca(pal->dim, 0.9f);
     line(r.x0, r.y0, r.x0 + t, r.y0, 1.5f * UI, c); line(r.x0, r.y0, r.x0, r.y0 + t, 1.5f * UI, c);
@@ -3359,7 +3364,7 @@ static float header(float x0, float x1, float y, const char *s, const char *righ
     text_t(st_h, x0, y, -1, s, ca(pal->dim, 1), 1.2f * UI);
     if (right) text_t(st_h, x1, y, 1, right, ca(pal->hi, 0.95f), 1 * UI);
     y += 7 * UI;
-    line(x0, y, x1, y, 1, ca(pal->faint, 1));
+    line(x0, y, x1, y, DP, ca(pal->faint, 1));
     return y + 8 * UI;
 }
 /* wrapped text; returns the y below it */
@@ -3412,11 +3417,11 @@ static float dv_block(float x0, float x1, float y, const Info *in) {
     float lh = line_h(st_small) * 1.12f;
     for (int i = 0; i < in->ndv; i++) {
         const DvRow *d = &in->dv[i];
-        if (d->st == 2) { line(x0, y - 2 * UI, x1, y - 2 * UI, 1, ca(pal->faint, 1)); y += 4 * UI; }
+        if (d->st == 2) { line(x0, y - 2 * UI, x1, y - 2 * UI, DP, ca(pal->faint, 1)); y += 4 * UI; }
         float by = y + cap_h(st_small);
         const float *c = d->st == 3 ? ca(pal->dim, 1) : ca(pal->ink, 1);
         if (d->st == 1) disc(x0 + 3 * UI, by - cap_h(st_small) * 0.5f, 2.6f * UI, ca(pal->hi, 1));
-        else if (d->st == 0) ring(x0 + 3 * UI, by - cap_h(st_small) * 0.5f, 2.6f * UI, 1, ca(pal->dim, 1));
+        else if (d->st == 0) ring(x0 + 3 * UI, by - cap_h(st_small) * 0.5f, 2.6f * UI, DP, ca(pal->dim, 1));
         text(d->st == 2 ? st_bodyb : st_small, x0 + 12 * UI, by, -1, d->name, c);
         text(d->st == 2 ? st_numb : st_num, x1, by, 1, d->val, d->st == 2 ? ca(pal->hi, 1) : c);
         y += lh;
@@ -3446,13 +3451,13 @@ static void warp_block(float cx, float y, const Info *in, float w) {
     y += 14 * UI;
     for (int d = 0; d <= 7; d++) {
         float x = x0 + (x1 - x0) * d / 7.0f;
-        line(x, y, x, y + (d % 2 ? 4 : 7) * UI, 1, ca(pal->dim, 0.9f));
+        line(x, y, x, y + (d % 2 ? 4 : 7) * UI, DP, ca(pal->dim, 0.9f));
         for (int m = 2; m < 10 && d < 7; m++) {
             float xm = x + (x1 - x0) / 7.0f * log10f((float)m);
-            line(xm, y, xm, y + 2.5f * UI, 1, ca(pal->faint, 1));
+            line(xm, y, xm, y + 2.5f * UI, DP, ca(pal->faint, 1));
         }
     }
-    line(x0, y, x1, y, 1, ca(pal->dim, 0.9f));
+    line(x0, y, x1, y, DP, ca(pal->dim, 0.9f));
     float wv = (float)clampd(log10(fmax(in->warp, 1)), 0, 7);
     float wx = x0 + (x1 - x0) * wv / 7.0f;
     line(x0, y, wx, y, 2 * UI, ca(pal->hi, 1));
@@ -3648,6 +3653,7 @@ static void render(double wt) {
     glViewport(0, 0, W, H);
     glUseProgram(prog_bg);
     glUniform2f(U(prog_bg, "uRes"), (float)W, (float)H);
+    glUniform1f(U(prog_bg, "uDp"), DP);
     glUniform2f(U(prog_bg, "uOff"), span_me >= 0 ? span[span_me][0] * 1.37f : 0, span_me >= 0 ? span[span_me][1] * 1.37f : 0);
     glUniform3fv(U(prog_bg, "uBg"), 1, pal->bg);
     glUniform3fv(U(prog_bg, "uBg2"), 1, pal->bg2);
@@ -3684,9 +3690,12 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static struct hidpi hd;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -3698,22 +3707,32 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    DP = (float)hidpi_factor(&hd, w);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "orbits");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -3726,6 +3745,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -3753,6 +3774,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -3760,6 +3782,7 @@ static void usage(void) {
     fprintf(stderr,
         "usage: orbits [--window | --root | --layer] [--seed N] [--fps N] [--palette mission|phosphor|paper|mono]\n"
         "              [--act N] [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "              [--render-scale F (--layer: draw F x the output's native pixels, 0 < F <= 1; default 1)]\n"
         "              [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--check]\n"
         "              [--font-mono FAMILY] [--font-sans FAMILY]\n");
     exit(1);
@@ -3897,6 +3920,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-window")) opt_root = 0;
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-shot") && i + 1 < argc) opt_shot = argv[++i];
         else if (!strcmp(a, "-bench") && i + 1 < argc) opt_bench = atoi(argv[++i]);

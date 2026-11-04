@@ -80,6 +80,24 @@ a wide layout so its swirling wake travels onto the neighbouring screen.
 ![gauges: core bank, main cluster, auxiliaries](docs/img/wall-gauges.jpg)
 <sub>`gauges` puts the main cluster in the middle and extra instruments either side.</sub>
 
+### Resolution
+
+Under `--layer` every native saver draws at its output's full pixel
+resolution: on a 3840x2400 panel at sway `scale 2` (or a fractional scale
+like 1.3), it asks for the output's preferred scale (`wp_fractional_scale_v1`)
+and draws a buffer that big, mapped onto the logical area with
+`wp_viewporter` (`common/hidpi.h`). Layouts, text and line weights are kept
+at their logical size, so a HiDPI screen looks the same, only sharper.
+Compositors without those protocols get the logical size, as before.
+
+A saver too heavy for a host's GPU can draw a fraction of that. Put
+`SAVER FACTOR` lines (`* FACTOR` for the rest) in
+`~/.config/wallpapers/render-scale` and `lock-bg.sh` passes them as
+`--render-scale`; no file means full resolution everywhere. Benchmark first,
+e.g. `./contours/contours --bench 90 --size 3840x2400`. The heavy 3D savers
+(flightsim, orrery, clockwork, clocktower, aquarium) choose their own scene
+resolution from a frame budget, so they rarely need an entry.
+
 ## The savers
 
 ### In the rotation
@@ -184,7 +202,8 @@ Every saver has the same interface:
 ./stir/stir --window                # plain X11 window
 ./stir/stir --layer                 # wlr-layer-shell surface (what the lock screen uses)
 ./stir/stir --shot out.ppm --size 1920x1200 --at 30   # render one frame offscreen
-./stir/stir --bench 300 --size 1920x1080              # time 300 frames offscreen
+./voronoi/voronoi --bench 300 --size 1920x1080        # time 300 frames offscreen (most savers)
+./stir/stir --layer --render-scale 0.75               # draw 3/4 of the native pixels
 ```
 
 Common options: `--seed N`, `--palette NAME` (where there are palettes),
@@ -249,7 +268,9 @@ L='0,0,1440,2560;1440,560,1969,1231;3409,560,2560,1440'
 1. Create `NAME/` with `NAME.c`, a `Makefile`, `run.sh` and a `.gitignore`
    for the binary and the generated `proto-*` files. Copy the plumbing
    (window, layer surface, `--shot`, `--bench`, layout) from an existing
-   saver such as `gauges/`. The root Makefile discovers it automatically.
+   saver such as `gauges/`, including `common/hidpi.h` for native
+   resolution (include `../common/hidpi.mk` at the end of the Makefile).
+   The root Makefile discovers it automatically.
 2. Add `NAME` to `BENCHED` in `savers.sh` (and to `SPANNING` if it takes
    `--epoch/--layout/--output`), and to the `pkill` pattern in `lock-next.sh`.
 3. When it's ready, move it from `BENCHED` to `SAVERS`.

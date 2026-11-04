@@ -84,11 +84,13 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 #define PI 3.14159265358979323846
 #define TAU (2 * PI)
 
 static int W = 1280, H = 800;
+static float dpr = 1;                  /* buffer px per logical px: > 1 under --layer on a HiDPI output */
 static int opt_root, opt_layer, opt_bench, opt_check, opt_caption = 1, opt_load, opt_count, opt_variant = -1;
 static float opt_fps = 60;
 static uint32_t opt_seed;
@@ -1304,6 +1306,7 @@ static int cvn, cvcap;
 static void cap_add(float ax, float ay, float bx, float by, float r, float gr, float ga, const float *rgb, float a) {
     if (cvn + 11 > cvcap) cv = realloc(cv, (size_t)(cvcap = cvcap ? cvcap * 2 : 1 << 16) * sizeof *cv);
     float *o = cv + cvn;
+    r *= dpr; gr *= dpr;                /* widths are in logical px: the same look on a HiDPI output */
     o[0] = ax; o[1] = ay; o[2] = bx; o[3] = by;
     o[4] = rgb[0]; o[5] = rgb[1]; o[6] = rgb[2]; o[7] = a;
     o[8] = r; o[9] = gr; o[10] = ga;
@@ -1494,10 +1497,10 @@ static void draw_ensemble_trails(const View *v, float fade, int single) {
     nstrips = 0;
     int reset = trail_reset || !nrec;
     if (morph_step >= 0 && last_step < morph_step && fan_step >= morph_step) reset = 1;
-    float hw = single ? 1.1f : 0.6f;
+    float hw = (single ? 1.1f : 0.6f) * dpr;
     TJ.v = v; TJ.fade = fade; TJ.single = single; TJ.reset = reset; TJ.dn = dn;
     TJ.ka = single ? 0.9f : fminf(1.0f, 34.0f / dn);
-    TJ.ext = hw + 1.0f;
+    TJ.ext = hw + dpr;
     TJ.vref = v->s * 2.0f;             /* px per time unit: a gentle long-exposure falloff above it */
     TJ.h = cur.tscale / HZ;
     if (nrec) par_for(dn, trail_job, NULL);
@@ -1524,7 +1527,7 @@ static void draw_ensemble_trails(const View *v, float fade, int single) {
     if (!nstrips) return;
     glUseProgram(prog_strip);
     glUniform2f(U(prog_strip, "uRes"), (float)W, (float)H);
-    glUniform1f(U(prog_strip, "uHW"), fmaxf(hw, 0.5f));
+    glUniform1f(U(prog_strip, "uHW"), fmaxf(hw, 0.5f * dpr));
     glUniform1f(U(prog_strip, "uExt"), ext);
     glBindVertexArray(vao_strip);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_strip);
@@ -2013,7 +2016,7 @@ static void render_phase(double wt, GLuint target, int clock) {
         glUniform2f(U(prog_pts, "uRes"), (float)W, (float)H);
         glUniform4f(U(prog_pts, "uRect"), rect[0], rect[1], rect[2], rect[3]);
         glUniform4f(U(prog_pts, "uRange"), (float)-ph_xr, (float)ph_xr, (float)-wr, (float)wr);
-        float ps = fmaxf(fminf((float)W, (float)H) / 600.0f, 1.6f) + 1.0f;
+        float ps = fmaxf(fminf((float)W, (float)H) / 600.0f, 1.6f * dpr) + dpr;
         glUniform1f(U(prog_pts, "uSize"), ps);
         glUniform1f(U(prog_pts, "uT"), (float)scene_el);
         float keep = (float)(1 - exp(-frame_dt / trail_tau));
@@ -2245,9 +2248,12 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static struct hidpi hd;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -2259,23 +2265,33 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        text_reset();
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    dpr = (float)hidpi_factor(&hd, W);
+    text_reset();
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "pendulums");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -2288,6 +2304,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -2315,6 +2333,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -2323,7 +2342,7 @@ static void usage(void) {
         "usage: pendulums [--window | --root | --layer] [--seed N] [--fps N]\n"
         "                 [--scene cycle|fan|map|phase] [--palette spectrum|ember|ice|neon|ink]\n"
         "                 [--variant classic|low|sweep] [--count N] [--load] [--no-caption]\n"
-        "                 [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "                 [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX] [--render-scale F]\n"
         "                 [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH] [--check]\n");
     exit(1);
 }
@@ -2393,6 +2412,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-load")) opt_load = 1;
         else if (!strcmp(a, "-no-caption")) opt_caption = 0;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-count") && i + 1 < argc) opt_count = atoi(argv[++i]);
         else if (!strcmp(a, "-palette") && i + 1 < argc) opt_pal = pal_by_name(argv[++i]);

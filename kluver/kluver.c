@@ -84,8 +84,10 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 static int W = 1280, H = 800;
+static float dpr = 1;                  /* buffer px per logical px: the output's scale in --layer, else 1 */
 static int opt_root, opt_layer, opt_caption = 1, opt_schedule;
 static const char *opt_font = "Inter";
 static double opt_fps = 30;
@@ -414,6 +416,7 @@ static const char *FS_MAIN = "#version 330 core\n" GLSL(
     uniform float uNorm;               /* 1 / the planform's peak */
     uniform float uDL, uCreep, uFeat;  /* line spacing, its creep (lines), the wire's level */
     uniform float uWire, uWireOn, uInkW;       /* the wire's half-width (cortical), line width (px) */
+    uniform float uPx;                 /* device px per logical px: the thresholds below are logical */
     uniform float uSat, uTint, uRest;
     uniform vec3 uRamp[4], uWireCol, uGround;
     uniform int uNR, uFilm;
@@ -482,6 +485,7 @@ static const char *FS_MAIN = "#version 330 core\n" GLSL(
         /* fine isolines, coloured by level, creeping out of the cells */
         float sl = u / uDL + uCreep;
         float fl = max(fwidth(sl), 1e-4);
+        float flL = fl * uPx;          /* the same, per logical px */
         float nl = floor(sl + 0.5);
         float dl = abs(sl - nl);
         float ul = (nl - uCreep) * uDL;
@@ -492,15 +496,15 @@ static const char *FS_MAIN = "#version 330 core\n" GLSL(
          * far apart; where they crowd, drop every other one, then every
          * other again, like the contours of a map */
         float rpx = r * uL * uView.z;  /* one cortical unit, in device px */
-        cov *= mix(smoothstep(0.012, 0.045, fl) * smoothstep(uRest * 0.5, uRest, fl * rpx), 1.0, major);
+        cov *= mix(smoothstep(0.012, 0.045, flL) * smoothstep(uRest * 0.5, uRest, fl * rpx), 1.0, major);
         float m4 = mod(nl, 4.0);
-        float lod = m4 == 0.0 ? 1.0 : m4 == 2.0 ? 1.0 - smoothstep(0.17, 0.30, fl) : 1.0 - smoothstep(0.08, 0.15, fl);
+        float lod = m4 == 0.0 ? 1.0 : m4 == 2.0 ? 1.0 - smoothstep(0.17, 0.30, flL) : 1.0 - smoothstep(0.08, 0.15, flL);
         cov *= max(lod, major);
         vec3 lm = ramp(u);
         vec3 lc = mix(lm, uWireCol, major * 0.7);
         vec3 base = mix(uGround, lm, uTint);
         /* finer than a couple of pixels (the centre of gaze): their average */
-        float dense = smoothstep(0.45, 0.9, fl);
+        float dense = smoothstep(0.45, 0.9, flL);
         vec3 col = mix(base, lc, mix(cov, min(0.3, 0.15 * wpx * fl), dense) * uSat);
 
         /* the wire: a double line of constant cortical width along the
@@ -511,7 +515,7 @@ static const char *FS_MAIN = "#version 330 core\n" GLSL(
         vec2 gw = (gc.x * er + gc.y * et) / rw + vec2(dFdx(org), -dFdy(org)) * uView.z;
         float ad = abs(u - uFeat) / max(length(gw), 1e-6) * uView.z;
         float hw = uWire * rw * uView.z;
-        float two = smoothstep(1.2, 2.5, hw);
+        float two = smoothstep(1.2, 2.5, hw / uPx);
         float l1 = clamp(0.55 * uInkW - abs(ad - hw) + 0.5, 0.0, 1.0);
         float l0 = clamp(0.65 * uInkW - ad + 0.5, 0.0, 1.0);
         float wire = max(l1 * two, l0 * (1.0 - two)) * (1.0 - dense) * uWireOn;
@@ -700,6 +704,7 @@ static void build_atlas(void) {
     int px0 = (int)fmax(13, H * 0.024), px1 = (int)fmax(11, H * 0.0145);
     if (px0 == cap_px[0] && px1 == cap_px[1]) return;
     cap_px[0] = px0; cap_px[1] = px1;
+    cap_line[0][0] = 0;                 /* lay the caption out again at the new size */
     unsigned char *a = calloc((size_t)atlas_w * 1024, 1);
     int x = 1, y = 1, shelf = 0;
     for (int s = 0; s < 2; s++) {
@@ -873,7 +878,9 @@ static void render(double t, double wall, GLuint target) {
     glUniform1f(U(pr, "uFeat"), (float)(A.feat * (1 - mu) + B.feat * mu));
     glUniform1f(U(pr, "uWire"), (float)WIRE);
     glUniform1f(U(pr, "uWireOn"), (float)ease((I - 0.3) / 0.5));
-    glUniform1f(U(pr, "uInkW"), (float)(P->inkw * fmax(1.0, v_sc * 0.75)));
+    /* line widths are logical px; v_sc beyond the output's scale is a --shot zoom */
+    glUniform1f(U(pr, "uInkW"), (float)(P->inkw * dpr * fmax(1.0, v_sc / dpr * 0.75)));
+    glUniform1f(U(pr, "uPx"), dpr);
     glUniform1f(U(pr, "uSat"), (float)(0.55 + 0.45 * I));
     glUniform1f(U(pr, "uTint"), P->tint);
     glUniform1f(U(pr, "uRest"), (float)REST);
@@ -916,9 +923,12 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static struct hidpi hd;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -930,22 +940,32 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    dpr = (float)hidpi_factor(&hd, W);
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "kluver");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -958,6 +978,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -985,6 +1007,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -996,9 +1019,11 @@ static void usage(void) {
         "              [--no-caption] [--font FAMILY]\n"
         "              [--schedule] [--epoch UNIXTIME] [--layout 'x,y,w,h;...' --output INDEX]\n"
         "              [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH]\n"
+        "              [--render-scale F]\n"
         "  --form      hold one form constant (re-formed every %.0f s) instead of cycling\n"
         "  --phase     hold a point of the %.0f s come-up / peak / comedown cycle\n"
-        "  --schedule  print what happens when (seconds after the epoch) and exit\n", ACT, CYCLE);
+        "  --schedule  print what happens when (seconds after the epoch) and exit\n"
+        "  --render-scale F  with --layer, draw F x the output's native pixels (0 < F <= 1; default 1)\n", ACT, CYCLE);
     exit(1);
 }
 
@@ -1042,6 +1067,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-window")) opt_root = 0;
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-palette") && i + 1 < argc) opt_palette = argv[++i];
         else if (!strcmp(a, "-form") && i + 1 < argc) opt_form = argv[++i];

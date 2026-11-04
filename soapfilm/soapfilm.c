@@ -99,10 +99,12 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 #define PI 3.14159265358979f
 
 static int W = 1280, H = 800;
+static float dpr = 1;                  /* buffer px per logical px: > 1 under --layer on a HiDPI output */
 static int opt_root, opt_layer, opt_bench, opt_scene = -1, opt_caption = 1;
 static uint32_t opt_seed;
 static const char *opt_shot, *opt_lutstrip;
@@ -1124,6 +1126,9 @@ static GLuint scene_fbo, scene_col, scene_dep;
 static RT half_rt, dof_rt;
 
 static void scene_targets(float budget) {
+    /* the budget is in logical px: on a HiDPI output the scene keeps the same
+     * share of the native pixels (--render-scale 0.5 at scale 2 is the old 1 MP) */
+    budget *= dpr * dpr;
     float s = opt_scale > 0 ? opt_scale : fminf(1.0f, sqrtf(budget / ((float)W * H)));
     int iw = (int)lroundf(W * s), ih = (int)lroundf(H * s);
     if (iw == IW && ih == IH && scene_fbo) return;
@@ -1159,7 +1164,8 @@ static float wallA;                    /* wall aspect */
 static float out_w0[4];                /* this output's rect in wall units: x0, y0, w, h */
 static void view_update(void) {
     if (span_me < 0) {
-        wallr[0] = wallr[1] = 0; wallr[2] = (float)W; wallr[3] = (float)H;
+        /* logical, like a --layout rect, so the film's grid is the same at any output scale */
+        wallr[0] = wallr[1] = 0; wallr[2] = W / dpr; wallr[3] = H / dpr;
         memcpy(outr, wallr, sizeof outr);
     }
     float wh = wallr[3];
@@ -2430,7 +2436,7 @@ static void render(double t, GLuint target) {
     static int nodof = -1;
     if (nodof < 0) nodof = getenv("SOAP_NODOF") != NULL;
     float pxw = out_w0[3] / IH * 3.0f;        /* wall units per DOF pixel (a third of the scene's) */
-    float maxc = 7.0f;
+    float maxc = 7.0f * dpr;                 /* the widest blur keeps its size on a HiDPI output */
     rt_bind(&half_rt);
     glUseProgram(p_down);
     tex_unit(0, GL_TEXTURE_2D, scene_col);
@@ -2491,9 +2497,12 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static struct hidpi hd;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -2505,22 +2514,32 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    dpr = (float)hidpi_factor(&hd, W);
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "soapfilm");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -2533,6 +2552,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -2560,6 +2581,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -2599,7 +2621,7 @@ static void span_setup(void) {
 static void usage(void) {
     fprintf(stderr,
         "usage: soapfilm [--window | --root | --layer] [--seed N] [--scene film|bubbles|foam]\n"
-        "                [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "                [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX] [--render-scale F]\n"
         "                [--shot FILE.ppm | --bench N] [--size WxH] [--at SECONDS]\n"
         "                [--scale F] [--no-caption]\n");
     exit(1);
@@ -2636,6 +2658,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-window")) opt_root = 0;
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-scene") && i + 1 < argc) {
             const char *n = argv[++i];
             for (int k = 0; k < NSCENE; k++) if (!strcmp(n, SCENE_NAME[k])) opt_scene = k;

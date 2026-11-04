@@ -91,11 +91,13 @@
 #include <unistd.h>
 #include <sys/resource.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 #define PI 3.14159265f
 #define TAU 6.28318531f
 
 static int W = 1280, H = 800;
+static float PX = 1;                    /* buffer pixels per logical pixel (--layer on a scaled output) */
 static int opt_root, opt_layer, opt_bench, opt_gradcheck, opt_act = -1;
 static float opt_fps = 60;
 static uint32_t opt_seed;
@@ -1701,7 +1703,7 @@ static const char *FS_FIELD = "#version 330 core\n" CMAPS GLSL(
     uniform vec4 uDom;
     uniform int uLayer, uUnit;
     uniform vec3 uC0, uC1, uBg, uFg;
-    uniform float uScale, uAlpha;
+    uniform float uScale, uAlpha, uPx;
     in vec2 vUV;
     out vec4 o;
     void main() {
@@ -1745,7 +1747,7 @@ static const char *FS_FIELD = "#version 330 core\n" CMAPS GLSL(
             float pr = 1.0 / (1.0 + exp(-z));
             float k = abs(pr - 0.5) * 2.0;
             c = mix(uBg, mix(uC0, uC1, step(0.5, pr)), 0.16 + 0.42 * k * k);
-            float fw = max(fwidth(z), 1e-4);
+            float fw = max(fwidth(z) * uPx, 1e-4);   /* line widths in logical px */
             float iso = abs(fract(z * 0.5 + 0.5) - 0.5) * 2.0 / (fw * 0.5);
             c = mix(c, uFg, 0.10 * clamp(1.0 - iso, 0.0, 1.0));
             c = mix(c, uFg, 0.85 * clamp(1.6 - abs(z) / fw, 0.0, 1.0));
@@ -1790,7 +1792,7 @@ static const char *VS_SURF = "#version 330 core\n" SURF_FN GLSL(
     });
 static const char *FS_SURF = "#version 330 core\n" CMAPS GLSL(
     uniform vec3 uFg, uBg;
-    uniform float uTop;
+    uniform float uTop, uPx;
     in vec3 vN;
     in float vH;
     in vec2 vP;
@@ -1801,10 +1803,10 @@ static const char *FS_SURF = "#version 330 core\n" CMAPS GLSL(
         c *= l;
         float lv = vH * 16.0;
         float d = abs(fract(lv) - 0.5) * 2.0;
-        float fw = max(fwidth(lv) * 2.0, 1e-4);
+        float fw = max(fwidth(lv) * 2.0 * uPx, 1e-4);
         c = mix(c, uFg, 0.28 * clamp((d - (1.0 - fw)) / fw, 0.0, 1.0));
         vec2 g = abs(fract(vP + 0.5) - 0.5) * 2.0;
-        vec2 gw = max(fwidth(vP) * 2.0, 1e-4);
+        vec2 gw = max(fwidth(vP) * 2.0 * uPx, 1e-4);
         float gl = max(clamp((g.x - (1.0 - gw.x)) / gw.x, 0.0, 1.0), clamp((g.y - (1.0 - gw.y)) / gw.y, 0.0, 1.0));
         c = mix(c, uBg, 0.25 * gl);
         o = vec4(c, 1.0);
@@ -2085,8 +2087,8 @@ static double draw_t;                  /* seconds into the act, for animation */
 
 static void layout_styles(void) {
     nstyles = 0;
-    Uu = fminf((float)W, (float)H) / 1000.0f;
-    if (Uu < 0.5f) Uu = 0.5f;
+    /* from the logical size, so a scale-2 output gets the same layout at twice the pixels */
+    Uu = fmaxf(fminf((float)W, (float)H) / PX / 1000.0f, 0.5f) * PX;
     int reg = P.mono_text ? F_MONO : F_REG, semi = P.mono_text ? F_MONO : F_SEMI, light = P.mono_text ? F_MONO : F_LIGHT;
     st_label = style(semi, 11.5f * Uu);
     st_tiny = style(F_MONO, 10.5f * Uu);
@@ -2378,7 +2380,7 @@ static void fit_tiles(Rect r, int layer, int cols) {
     Rect in = panel(r, lab, F.model == M_SIREN ? "sin(30 (Wx + b))" : "max(0, Wx + b)");
     if (layer >= F.ntl) layer = F.ntl - 1;
     int rows = FH / cols;
-    float gap = fmaxf(2, 3 * Uu);
+    float gap = fmaxf(2 * PX, 3 * Uu);
     float t = fminf((rw(in) - gap * (cols - 1)) / cols, (rh(in) - gap * (rows - 1)) / rows);
     t = floorf(t);
     if (t < 4) return;
@@ -2450,7 +2452,7 @@ static void fit_net(Rect r) {
             if (c == ncol - 1) hex4(rgbn[i], col);
             else memcpy(col, P.fg, sizeof col);
             circle(colx[c], y, rr, P.bg);
-            ring(colx[c], y, rr, fmaxf(1, 1.2f * Uu), ca(col, c == ncol - 1 ? 1 : 0.75f));
+            ring(colx[c], y, rr, fmaxf(PX, 1.2f * Uu), ca(col, c == ncol - 1 ? 1 : 0.75f));
         }
         const char *nm = c == 0 ? (F.model == M_SIREN ? "x, y" : "sin, cos (Bx)") : c == ncol - 1 ? "r g b" : "64";
         text(st_tiny, colx[c], top - 12 * Uu, 0, nm, P.dim, 0);
@@ -2471,6 +2473,7 @@ static void cls_uniforms(void) {
     }
     glUniform2f(U(p, "uRes"), (float)W, (float)H);
     glUniform1f(U(p, "uScale"), IN_SCALE);
+    glUniform1f(U(p, "uPx"), PX);
     glUniform3fv(U(p, "uC0"), 1, P.cls[0]);
     glUniform3fv(U(p, "uC1"), 1, P.cls[1]);
     glUniform3fv(U(p, "uBg"), 1, P.panel);
@@ -2503,7 +2506,7 @@ static void cls_field(Rect r) {
     cls_uniforms();
     field(x0, y0, x0 + s, y0 + s, -1, 0, CLS_DOM);
     rect_line(x0 - 0.5f, y0 - 0.5f, x0 + s + 0.5f, y0 + s + 0.5f, 1 * Uu, P.grid);
-    float pr = fmaxf(2.2f, 3.4f * Uu * s / 700);
+    float pr = fmaxf(2.2f * PX, 3.4f * Uu * s / PX / 700);   /* s / PX: the panel in logical px */
     for (int i = 0; i < NP2; i++) {
         float px = x0 + (C.x[i * 2] / CLS_DOM * 0.5f + 0.5f) * s, py = y0 + (0.5f - C.x[i * 2 + 1] / CLS_DOM * 0.5f) * s;
         int c = C.y[i] > 0.5f;
@@ -2839,6 +2842,7 @@ static void opt_view(Rect r, int top) {
     glUniform1i(U(p, "uFn"), O.fn);
     glUniform1f(U(p, "uFmax"), O.fmax);
     glUniform1f(U(p, "uTop"), (float)top);
+    glUniform1f(U(p, "uPx"), PX);
     glUniform3fv(U(p, "uFg"), 1, P.light ? P.fg : P.bg);
     glUniform3fv(U(p, "uBg"), 1, P.bg);
     glBindVertexArray(vao);
@@ -3304,9 +3308,12 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static struct hidpi hd;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -3318,22 +3325,32 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    PX = (float)hidpi_factor(&hd, W);
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "neural");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -3346,6 +3363,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -3374,6 +3393,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -3382,6 +3402,7 @@ static void usage(void) {
         "usage: neural [--window | --root | --layer] [--seed N] [--palette spectral|mono|paper|terminal]\n"
         "              [--act 1-4] [--act-len SECONDS] [--fps N] [--budget MS] [--name NAME]\n"
         "              [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "              [--render-scale F (--layer: draw F x the output's native pixels, 0 < F <= 1; default 1)]\n"
         "              [--shot FILE.ppm [--at SECONDS]] [--bench N] [--soak SECONDS] [--size WxH]\n"
         "              [--picture clock|host|sunset|zone] [--model siren|fourier]\n"
         "              [--gradcheck] [--converge]\n");
@@ -3445,6 +3466,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-window")) opt_root = 0;
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-palette") && i + 1 < argc) opt_palette = argv[++i];
         else if (!strcmp(a, "-name") && i + 1 < argc) opt_name = argv[++i];

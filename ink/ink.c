@@ -78,8 +78,12 @@
 #include <time.h>
 #include <unistd.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 static int W = 1280, H = 800;
+/* --layer: the buffer is the output's logical size x its scale (hidpi.h);
+ * hidpi_factor(&hd, W) is the physical pixels per logical pixel (1 otherwise) */
+static struct hidpi hd;
 static int opt_root, opt_layer, opt_bench, opt_split, opt_nocap;
 static uint32_t opt_seed;
 static const char *opt_shot;
@@ -433,6 +437,7 @@ static const char *FS_SHOW = GLSL(
     uniform int uNVis;
     uniform vec4 uVis[8];       /* drops: x, time since impact, radius, ink */
     uniform float uPx;          /* an output pixel, in canvas heights */
+    uniform float uLine;        /* FINAL: a logical pixel (the line widths), in canvas heights */
     uniform float uAspect;
     uniform vec2 uLowScale;     /* FINAL: the first pass's size / ours */
     out vec4 o;
@@ -564,11 +569,11 @@ static const char *FS_SHOW = GLSL(
 ) "\n#else\n" GLSL(
         vec3 col = texture(uLow, fc * uLowScale / vec2(textureSize(uLow, 0))).rgb;
         /* the surface line, seen nearly edge on */
-        float ld = abs(q.y - s) / uPx;
+        float ld = abs(q.y - s) / uLine;
         if (q.x > uTank.x && q.x < uTank.y) {
             float line = exp(-ld * ld * 0.25);
             col = uDark == 1 ? col + vec3(0.10, 0.11, 0.12) * line : col * (1.0 - 0.28 * line);
-            float glint = exp(-pow((q.y - s - 1.6 * uPx) / uPx, 2.0) * 0.5);
+            float glint = exp(-pow((q.y - s - 1.6 * uLine) / uLine, 2.0) * 0.5);
             col = uDark == 1 ? col + vec3(0.05) * glint : mix(col, vec3(1.0), 0.35 * glint);
         }
         /* the glass walls, seen edge on: a thick green-grey band with bright faces */
@@ -579,7 +584,7 @@ static const char *FS_SHOW = GLSL(
                 float band = smoothstep(-0.05, 0.05, d) * smoothstep(1.05, 0.95, d);
                 vec3 glass = uDark == 1 ? vec3(0.05, 0.075, 0.07) : vec3(0.80, 0.86, 0.83);
                 col = mix(col, col * glass * (uDark == 1 ? 12.0 : 1.0), 0.2 * band);
-                float face = exp(-pow(d * 0.006 / uPx, 2.0) * 0.4) + 0.6 * exp(-pow((d - 1.0) * 0.006 / uPx, 2.0) * 0.4);
+                float face = exp(-pow(d * 0.006 / uLine, 2.0) * 0.4) + 0.6 * exp(-pow((d - 1.0) * 0.006 / uLine, 2.0) * 0.4);
                 col = uDark == 1 ? col + vec3(0.04, 0.05, 0.048) * face : col * (1.0 - 0.1 * face);
             }
         }
@@ -1025,8 +1030,9 @@ static void fonts_init(void) {
 static void build_atlas(int h) {
     font_for_h = h;
     font_px[0] = (int)lroundf(h * 0.03f); font_px[1] = (int)lroundf(h * 0.017f);
-    if (font_px[0] < 12) font_px[0] = 12;
-    if (font_px[1] < 9) font_px[1] = 9;
+    float dpr = (float)hidpi_factor(&hd, W);
+    if (font_px[0] < 12 * dpr) font_px[0] = (int)lroundf(12 * dpr);
+    if (font_px[1] < 9 * dpr) font_px[1] = (int)lroundf(9 * dpr);
     int cap = 1024;
     unsigned char *px = calloc((size_t)atlas_w * cap, 1);
     int x = 1, y = 1, shelf = 0;
@@ -1185,7 +1191,7 @@ static void prof_read(void) {
     prof_n++;
 }
 
-/* the first pass's target, at --scale of the output */
+/* the first pass's target, at --scale of the output's logical size */
 static GLuint low_tex, low_fbo;
 static int low_w, low_h;
 static float opt_scale;                /* 0: 0.7, less on a big output */
@@ -1259,9 +1265,12 @@ static void render(double t, GLuint target) {
     }
     prof_mark(2);
 
-    /* the water and the ink, scaled down */
-    float sc = opt_scale > 0 ? opt_scale : fminf(0.7f, sqrtf(1.1e6f / ((float)W * H)));
-    int lw = (int)lroundf(W * sc), lh = (int)lroundf(H * sc);
+    /* the water and the ink, scaled down: a fraction of the output's logical
+     * size, so a HiDPI output costs no more here (only the final pass is
+     * drawn at native resolution) */
+    float dpr = (float)hidpi_factor(&hd, W), lgw = W / dpr, lgh = H / dpr;
+    float sc = opt_scale > 0 ? opt_scale : fminf(0.7f, sqrtf(1.1e6f / (lgw * lgh)));
+    int lw = (int)lroundf(lgw * sc), lh = (int)lroundf(lgh * sc);
     if (lw < 1) lw = 1;
     if (lh < 1) lh = 1;
     if (lw != low_w || lh != low_h) {
@@ -1284,6 +1293,7 @@ static void render(double t, GLuint target) {
     set_uniforms(prog_final, lt, fade);
     glUniform4f(U(prog_final, "uMap"), mx, sx, my, sy);
     glUniform1f(U(prog_final, "uPx"), sy);
+    glUniform1f(U(prog_final, "uLine"), sy * dpr);
     glUniform2f(U(prog_final, "uLowScale"), (float)lw / W, (float)lh / H);
     bind(4, low_tex);
     glBindFramebuffer(GL_FRAMEBUFFER, target);
@@ -1304,9 +1314,11 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -1318,22 +1330,31 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "ink");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -1346,6 +1367,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -1373,6 +1396,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -1419,8 +1443,9 @@ static void span_setup(void) {
 static void usage(void) {
     fprintf(stderr,
         "usage: ink [--window | --root | --layer] [--seed N] [--palette NAME] [--font FAMILY] [--no-caption]\n"
-        "           [--scale F (of the output the ink is drawn at; default 0.7, less above 1.1 Mpx)]\n"
+        "           [--scale F (of the output's logical size the ink is drawn at; default 0.7, less above 1.1 Mpx)]\n"
         "           [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX] [--split]\n"
+        "           [--render-scale F (--layer: draw F x the output's native pixels, 0 < F <= 1; default 1)]\n"
         "           [--shot FILE.ppm | --bench N] [--size WxH] [--at SECONDS]\n"
         "palettes: indigo sumi botanical neon sunset (default: from the seed)\n");
     exit(1);
@@ -1459,6 +1484,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-split")) opt_split = 1;
         else if (!strcmp(a, "-no-caption")) opt_nocap = 1;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-palette") && i + 1 < argc) {
             const char *n = argv[++i];
             for (int k = 0; k < NPAL; k++) if (!strcmp(n, PALETTES[k].name)) opt_palette = k;

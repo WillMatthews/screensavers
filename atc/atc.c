@@ -88,6 +88,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include "proto-layer-shell.h"
+#include "../common/hidpi.h"
 
 /* fields are fixed width on the scope and the strips: cutting a long name short is meant */
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -97,7 +98,11 @@ extern char **environ;
 #define PI 3.14159265f
 #define DEG (PI / 180.0f)
 
-static int W = 1280, H = 800;
+static int W = 1280, H = 800;           /* the buffer, px */
+/* Everything is laid out and drawn in logical px, LW x LH; the vertex
+ * shader maps them onto the buffer, dpr buffer px each (> 1 under --layer on
+ * a HiDPI output), so the picture is the same at any scale, only sharper. */
+static float dpr = 1, LW = 1280, LH = 800;
 static int opt_root, opt_layer, opt_bench;
 static float opt_fps = 60;
 static uint32_t opt_seed;
@@ -307,7 +312,7 @@ static void build_atlas(void) {
     int x = 1, y = 1, shelf = 0;
     for (int s = 0; s < nstyles; s++) {
         FT_Face f = faces[styles[s].face];
-        FT_Set_Pixel_Sizes(f, 0, (FT_UInt)styles[s].px);
+        FT_Set_Pixel_Sizes(f, 0, (FT_UInt)lroundf(styles[s].px * dpr));   /* the glyphs at buffer px */
         for (int c = 0; c < NGLYPH; c++) {
             Glyph *gl = &styles[s].g[c];
             memset(gl, 0, sizeof *gl);
@@ -334,10 +339,10 @@ static const Glyph *glyph(int s, unsigned char c) { return &styles[s].g[gidx(c)]
 
 static float text_width(int s, const char *str, float track) {
     float w = 0;
-    for (const char *p = str; *p; p++) w += glyph(s, (unsigned char)*p)->adv + (p[1] ? track : 0);
+    for (const char *p = str; *p; p++) w += glyph(s, (unsigned char)*p)->adv / dpr + (p[1] ? track : 0);
     return w;
 }
-static float cap_h(int s) { return glyph(s, 'H')->top; }
+static float cap_h(int s) { return glyph(s, 'H')->top / dpr; }
 
 /* ---- the vector stream: every shape is a quad whose fragment shader works
  * out its own anti-aliased coverage from a signed distance ----
@@ -451,7 +456,8 @@ static float text_ex(int s, float x, float y, int align, const char *str, const 
                 gs = 1 + (((h >> 16) & 255) / 255.0f - 0.5f) * 0.10f;
             }
             /* glyph box in the line's frame */
-            float bx0 = pen + g->left, by0 = -g->top * gs + dy, bx1 = bx0 + g->w * gs, by1 = by0 + g->h * gs;
+            const float k = 1 / dpr;      /* the glyph's metrics are in buffer px */
+            float bx0 = pen + g->left * k, by0 = -g->top * k * gs + dy, bx1 = bx0 + g->w * k * gs, by1 = by0 + g->h * k * gs;
             float gc = cosf(ga), gsn = sinf(ga), mx = (bx0 + bx1) * 0.5f, my = by1;
             float L[4][2] = {{bx0, by0}, {bx1, by0}, {bx1, by1}, {bx0, by1}};
             float U[4][2] = {{g->x, g->y}, {g->x + g->w, g->y}, {g->x + g->w, g->y + g->h}, {g->x, g->y + g->h}};
@@ -466,7 +472,7 @@ static float text_ex(int s, float x, float y, int align, const char *str, const 
             int ix[6] = {0, 1, 2, 0, 2, 3};
             for (int i = 0; i < 6; i++) vtx(P[ix[i]][0], P[ix[i]][1], U[ix[i]][0], U[ix[i]][1], zp, c, K_TEXT);
         }
-        pen += g->adv + track;
+        pen += g->adv / dpr + track;
     }
     return w;
 }
@@ -2979,7 +2985,11 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
     in vec4 vP;
     in vec4 vC;
     flat in int vK;
+    uniform float uPx;          /* buffer px per logical px */
     out vec4 o;
+    /* coverage from a 1-px ramp in logical px, v = 0.5 on the edge: the ramp
+     * is one buffer px wide, the total the same, so edges sharpen with dpr */
+    float cov(float v) { return clamp((v - 0.5) * uPx + 0.5, 0.0, 1.0); }
     float sdb(vec2 p, vec2 b, float r) { vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }
     void main() {
         vec3 c = vC.rgb;
@@ -2987,20 +2997,20 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
         if (vK == 0) {
             float hw = vP.y, t = max(hw, 0.5);
             float d = length(vec2(max(abs(vL.x) - vP.x, 0.0), vL.y)) - t;
-            a = clamp(0.5 - d, 0.0, 1.0) * min(hw * 2.0, 1.0);
+            a = cov(0.5 - d) * min(hw * 2.0, 1.0);
             if (vP.z > 0.0) {
                 float u = mod(vL.x + vP.x, vP.z), on = vP.z * vP.w;
-                a *= clamp(0.5 - max(-u, u - on), 0.0, 1.0);
+                a *= cov(0.5 - max(-u, u - on));
             }
         } else if (vK == 1) {
             float r = length(vL);
-            if (vP.y > 0.0) a = clamp(0.5 - (abs(r - vP.x) - max(vP.y, 0.5)), 0.0, 1.0) * min(vP.y * 2.0, 1.0);
-            else a = clamp(0.5 - (r - vP.x), 0.0, 1.0);
+            if (vP.y > 0.0) a = cov(0.5 - (abs(r - vP.x) - max(vP.y, 0.5))) * min(vP.y * 2.0, 1.0);
+            else a = cov(0.5 - (r - vP.x));
         } else if (vK == 2) {
             a = texture(uAtlas, vL / vec2(textureSize(uAtlas, 0))).r;
         } else if (vK == 3) {
             float d = sdb(vL, vP.xy, vP.z);
-            a = clamp(0.5 - d, 0.0, 1.0);
+            a = cov(0.5 - d);
             int m = int(vP.w);
             float sd = fract(vP.w) * 977.0;
             if (m == 1) {                       /* paper: fibres, a little tooth, darker at the edge */
@@ -3013,7 +3023,7 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
                 c += vec3(0.20) * exp(-pow((vL.y + vP.y - 1.6) / 1.1, 2.0));
                 c *= 1.0 - 0.22 * smoothstep(-2.5, 0.0, d);
             } else if (m == 3) {                /* powder-coated steel */
-                vec2 p = gl_FragCoord.xy;
+                vec2 p = gl_FragCoord.xy / uPx;
                 c *= 0.95 + 0.06 * tn(p * 4.0) + 0.05 * tn(p * 0.05 + 13.0);
             } else if (m == 4) {                /* smoked glass over the LEDs */
                 float t = vL.y / vP.y * 0.5 + 0.5;
@@ -3022,7 +3032,7 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
             } else if (m == 5) {                /* embossing tape */
                 c *= 0.88 + 0.12 * (0.5 + 0.5 * sin(vL.y * 2.2));
             } else if (m == 6) {
-                c *= 0.97 + 0.03 * tn(gl_FragCoord.xy * 3.0);
+                c *= 0.97 + 0.03 * tn(gl_FragCoord.xy / uPx * 3.0);
             }
         } else if (vK == 4) {
             float d = sdb(vL, vP.xy, vP.z);
@@ -3031,8 +3041,8 @@ static const char *FS_PRIM = "#version 330 core\n" GLSL(
             vec2 p = vL / vP.xy;
             float k = length(p), g = length(p / vP.xy);
             float d = (k - 1.0) * k / max(g, 1e-4);
-            if (vP.z > 0.0) a = clamp(0.5 - (abs(d) - max(vP.z, 0.5)), 0.0, 1.0);
-            else a = clamp(0.5 - d, 0.0, 1.0);
+            if (vP.z > 0.0) a = cov(0.5 - (abs(d) - max(vP.z, 0.5)));
+            else a = cov(0.5 - d);
         } else {
             float r = length(vL) / vP.x;
             a = exp(-r * r * 4.0) * (1.0 - smoothstep(0.85, 1.0, r));
@@ -3054,13 +3064,15 @@ static const char *FS_BG = "#version 330 core\n" NOISE GLSL(
     uniform vec4 uRect;
     uniform vec2 uC;
     uniform float uPPN, uStep, uStepA, uOuter, uSweep, uSweepA;
+    uniform float uPx;          /* buffer px per logical px */
     out vec4 o;
+    float cov(float v) { return clamp((v - 0.5) * uPx + 0.5, 0.0, 1.0); }   /* as FS_PRIM's */
     float ringline(float rn, float s) {
         float d = abs(rn - s * floor(rn / s + 0.5)) * uPPN;
-        return clamp(1.0 - d, 0.0, 1.0);
+        return cov(1.0 - d);
     }
     void main() {
-        vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
+        vec2 p = vec2(gl_FragCoord.x / uPx, uRes.y - gl_FragCoord.y / uPx);
         vec2 rc = (uRect.xy + uRect.zw) * 0.5, rs = (uRect.zw - uRect.xy) * 0.5;
         float rr = length((p - rc) / max(rs.x, rs.y));
         vec3 col = mix(vec3(0.050, 0.068, 0.088), vec3(0.020, 0.027, 0.036), smoothstep(0.05, 1.25, rr));
@@ -3077,21 +3089,21 @@ static const char *FS_BG = "#version 330 core\n" NOISE GLSL(
         if (ang < 0.0) ang += 360.0;
         if (uOuter > 0.0) {
             float R = uOuter * uPPN;
-            a += clamp(1.4 - abs(r - R), 0.0, 1.0) * 0.30;
+            a += cov(1.4 - abs(r - R)) * 0.30;
             /* ticks inside the ring every 5 degrees, longer at 10 and 30 */
             float t5 = abs(ang - 5.0 * floor(ang / 5.0 + 0.5)) * 0.0174533 * r;
             float t10 = abs(ang - 10.0 * floor(ang / 10.0 + 0.5)) * 0.0174533 * r;
             float t30 = abs(ang - 30.0 * floor(ang / 30.0 + 0.5)) * 0.0174533 * r;
             float in5 = step(R - 6.0, r) * step(r, R), in10 = step(R - 11.0, r) * step(r, R), in30 = step(R - 18.0, r) * step(r, R);
-            a += clamp(0.9 - t5, 0.0, 1.0) * in5 * 0.28 + clamp(0.9 - t10, 0.0, 1.0) * in10 * 0.12 + clamp(1.0 - t30, 0.0, 1.0) * in30 * 0.2;
+            a += cov(0.9 - t5) * in5 * 0.28 + cov(0.9 - t10) * in10 * 0.12 + cov(1.0 - t30) * in30 * 0.2;
             /* faint radials every 30 degrees, dashed */
             float dash = step(0.5, fract(rn / (uStep * 0.125)));
-            a += clamp(0.8 - t30, 0.0, 1.0) * 0.045 * dash * step(uStep * 0.25, rn) * step(r, R);
+            a += cov(0.8 - t30) * 0.045 * dash * step(uStep * 0.25, rn) * step(r, R);
         }
         col += rcol * a * far;
         /* the sweep: a bright edge, a long dim wake */
         float behind = mod(uSweep - ang + 360.0, 360.0);
-        float sw = (exp(-behind / 40.0) * 0.03 + clamp(1.0 - behind * 0.0174533 * r / 1.2, 0.0, 1.0) * 0.045) * uSweepA;
+        float sw = (exp(-behind / 40.0) * 0.03 + cov(1.0 - behind * 0.0174533 * r / 1.2) * 0.045) * uSweepA;
         sw *= smoothstep(0.0, 30.0, r) * (uOuter > 0.0 ? 1.0 - smoothstep(uOuter * uPPN, uOuter * uPPN * 1.05, r) : 1.0);
         col += vec3(0.30, 0.78, 0.72) * sw;
         col += (hash(p + fract(uSweep)) - 0.5) / 255.0;
@@ -3193,10 +3205,12 @@ static void flush(const float *clip) {
     if (!vbn) return;
     if (clip) {
         glEnable(GL_SCISSOR_TEST);
-        glScissor((GLint)clip[0], (GLint)(H - clip[3]), (GLsizei)(clip[2] - clip[0]), (GLsizei)(clip[3] - clip[1]));
+        glScissor((GLint)((clip[0]) * dpr), (GLint)(((LH - clip[3])) * dpr), (GLsizei)(((clip[2] - clip[0])) * dpr),
+                  (GLsizei)(((clip[3] - clip[1])) * dpr));
     }
     glUseProgram(prog_prim);
-    glUniform2f(U(prog_prim, "uRes"), (float)W, (float)H);
+    glUniform2f(U(prog_prim, "uRes"), LW, LH);
+    glUniform1f(U(prog_prim, "uPx"), dpr);
     glUniform1i(U(prog_prim, "uAtlas"), 0);
     glUniform1i(U(prog_prim, "uNoise"), 1);
     glActiveTexture(GL_TEXTURE1);
@@ -3219,9 +3233,11 @@ static void draw_bg(const View *v, float step, float step_a, double wt) {
     float hx, hy;
     vp(v, v->hx, v->hy, &hx, &hy);
     glEnable(GL_SCISSOR_TEST);
-    glScissor((GLint)v->x0, (GLint)(H - v->y1), (GLsizei)(v->x1 - v->x0), (GLsizei)(v->y1 - v->y0));
+    glScissor((GLint)((v->x0) * dpr), (GLint)(((LH - v->y1)) * dpr), (GLsizei)(((v->x1 - v->x0)) * dpr),
+              (GLsizei)(((v->y1 - v->y0)) * dpr));
     glUseProgram(prog_bg);
-    glUniform2f(U(prog_bg, "uRes"), (float)W, (float)H);
+    glUniform2f(U(prog_bg, "uRes"), LW, LH);
+    glUniform1f(U(prog_bg, "uPx"), dpr);
     glUniform4f(U(prog_bg, "uRect"), v->x0, v->y0, v->x1, v->y1);
     glUniform2f(U(prog_bg, "uC"), hx, hy);
     glUniform1f(U(prog_bg, "uPPN"), v->ppn);
@@ -3241,7 +3257,7 @@ static int lay_w, lay_h;
 
 static int pick_role(void) {
     if (opt_role >= 0) return opt_role;
-    int portrait = H > W * 1.1f;
+    int portrait = LH > LW * 1.1f;
     if (span_me < 0) return portrait ? R_COMBO : R_SCOPE;
     float x0 = 1e9f, x1 = -1e9f;
     for (int i = 0; i < span_n; i++) { x0 = fminf(x0, span[i][0]); x1 = fmaxf(x1, span[i][0] + span[i][2]); }
@@ -3271,9 +3287,9 @@ static void board_geom(float bw) {
 static void layout(void) {
     role = pick_role();
     nstyles = 0;
-    float base = fminf((float)W, (float)H);
+    float base = fminf(LW, LH);
     float fs = clampf(base / 74.0f, 11, 22);
-    if (role == R_COMBO) fs = clampf(W / 80.0f, 11, 20);
+    if (role == R_COMBO) fs = clampf(LW / 80.0f, 11, 20);
     lbl_lh = roundf(fs * 1.12f);
     st_lbl = style(F_MONO, fs);
     st_lblb = style(F_MONOB, fs);
@@ -3284,7 +3300,7 @@ static void layout(void) {
     st_bar = style(F_SANS, fs * 0.82f);
     st_barb = style(F_MONOB, fs * 0.95f);
     st_big = style(F_SANSB, fs * 1.6f);
-    float bw = (float)W;
+    float bw = LW;
     board_geom(bw);
     st_cs = style(F_MONOB, strip_h * 0.27f);
     st_sm = style(F_MONO, strip_h * 0.165f);
@@ -3292,7 +3308,7 @@ static void layout(void) {
     st_hand = style(F_HAND, strip_h * 0.25f);
     st_handb = style(F_HAND, strip_h * 0.30f);
     st_dymo = style(F_MONOB, fmaxf(strip_h * 0.19f, fs * 0.95f));
-    float hh = fminf(H * 0.075f, W * 0.13f);
+    float hh = fminf(LH * 0.075f, LW * 0.13f);
     st_tape = style(F_SANSB, hh * 0.20f);
     st_led_lab = style(F_SANSB, hh * 0.13f);
     build_atlas();
@@ -3361,6 +3377,7 @@ static int main_apt(void) {
 
 static GLuint target_fbo;
 static void render(double wt, float dt) {
+    LW = W / dpr; LH = H / dpr;
     if (W != lay_w || H != lay_h) layout();
     if (atlas_dirty) upload_atlas();
     glBindFramebuffer(GL_FRAMEBUFFER, target_fbo);
@@ -3371,31 +3388,31 @@ static void render(double wt, float dt) {
     char b1[48], b2[48];
     if (role == R_SCOPE || role == R_WIDE || role == R_COMBO) {
         View v;
-        float sy1 = role == R_COMBO ? fminf((float)H * 0.62f, (float)W + bar_h) : (float)H;
+        float sy1 = role == R_COMBO ? fminf(LH * 0.62f, LW + bar_h) : LH;
         float R0 = role == R_WIDE ? fmaxf(opt_range * 2, opt_radius) : opt_range;
-        scope_view(&v, 0, bar_h, (float)W, sy1, wt, role != R_WIDE, R0);
+        scope_view(&v, 0, bar_h, LW, sy1, wt, role != R_WIDE, R0);
         scope_pass(&v, wt, dt);
         Ac *sel = fol_id ? ac_find(fol_id, 0) : NULL;
         snprintf(b1, sizeof b1, "RNG %.0f " S_DOT " TFC %d", 0.46f * fminf(v.x1 - v.x0, v.y1 - v.y0) / v.ppn, count_traffic());
         if (sel && sel_alpha > 0.5f) snprintf(b2, sizeof b2, "TRK %s", sel->cs);
-        draw_topbar(0, 0, (float)W, wt, b1, sel && sel_alpha > 0.5f ? b2 : NULL);
+        draw_topbar(0, 0, LW, wt, b1, sel && sel_alpha > 0.5f ? b2 : NULL);
         float m = lbl_lh;
         draw_track_info(m, sy1 - m, sel, sel_alpha);
         float fy = sy1 - m;
         if (sel && sel_alpha > 0) fy -= lbl_lh * 8;
         draw_far_ship(m, fy, R0);
-        if (role == R_WIDE) text_t(st_tinyb, W - m, sy1 - m, 1, "WIDE " S_DOT " ALL TRAFFIC", ca(COL_DIM, 0.8f), 2);
+        if (role == R_WIDE) text_t(st_tinyb, LW - m, sy1 - m, 1, "WIDE " S_DOT " ALL TRAFFIC", ca(COL_DIM, 0.8f), 2);
         flush(NULL);
         if (role == R_COMBO) {
-            draw_board(0, sy1, (float)W, (float)H, wt, dt, 0);
-            line(0, sy1, (float)W, sy1, 2, C4(0, 0, 0, 0.6f));
+            draw_board(0, sy1, LW, LH, wt, dt, 0);
+            line(0, sy1, LW, sy1, 2, C4(0, 0, 0, 0.6f));
             flush(NULL);
         }
     } else if (role == R_APPROACH) {
         int ai = main_apt();
-        float lx = roundf(W * 0.64f);
+        float lx = roundf(LW * 0.64f);
         View v = {0};
-        v.x0 = 0; v.y0 = bar_h; v.x1 = lx; v.y1 = (float)H;
+        v.x0 = 0; v.y0 = bar_h; v.x1 = lx; v.y1 = LH;
         v.approach = 1;
         v.outer = 0;
         if (ai >= 0) {
@@ -3412,12 +3429,12 @@ static void render(double wt, float dt) {
         sel_alpha = 0;
         scope_pass(&v, wt, dt);
         snprintf(b1, sizeof b1, "APP %s", ai >= 0 ? apt[ai].d->icao : "----");
-        draw_topbar(0, 0, (float)W, wt, b1, NULL);
-        draw_lists(lx, bar_h, (float)W, (float)H, ai, wt);
+        draw_topbar(0, 0, LW, wt, b1, NULL);
+        draw_lists(lx, bar_h, LW, LH, ai, wt);
         flush(NULL);
     } else {
-        draw_board(0, 0, (float)W, (float)H, wt, dt, 1);
-        text_t(st_tiny, W - W * 0.025f, H - W * 0.012f, 1, src_credit(), C4(0.7f, 0.72f, 0.75f, 0.5f), 1);
+        draw_board(0, 0, LW, LH, wt, dt, 1);
+        text_t(st_tiny, LW - LW * 0.025f, LH - LW * 0.012f, 1, src_credit(), C4(0.7f, 0.72f, 0.75f, 0.5f), 1);
         flush(NULL);
     }
 }
@@ -3469,9 +3486,12 @@ static struct {
     EGLSurface es;
     int configured, closed;
 } wl;
+static struct hidpi hd;
+static double opt_render_scale = 1;
 
 static void wl_global(void *data, struct wl_registry *r, uint32_t name, const char *intf, uint32_t ver) {
     (void)data;
+    if (hidpi_bind(&hd, r, name, intf, ver)) return;
     if (!strcmp(intf, wl_compositor_interface.name))
         wl.comp = wl_registry_bind(r, name, &wl_compositor_interface, ver < 4 ? ver : 4);
     else if (!strcmp(intf, zwlr_layer_shell_v1_interface.name))
@@ -3483,22 +3503,32 @@ static const struct wl_registry_listener wl_reg_l = {wl_global, wl_global_remove
 static void ls_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
     (void)data;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w && h && ((int)w != W || (int)h != H)) {
-        W = (int)w; H = (int)h;
-        if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
-    }
+    hidpi_logical(&hd, (int)w, (int)h);
     wl.configured = 1;
 }
 static void ls_closed(void *data, struct zwlr_layer_surface_v1 *ls) { (void)data; (void)ls; wl.closed = 1; }
 static const struct zwlr_layer_surface_v1_listener ls_l = {ls_configure, ls_closed};
 
+/* the buffer follows the logical size and the output's scale (hidpi.h) */
+static void wl_resize(void) {
+    if (!hidpi_take_change(&hd)) return;
+    int w = W, h = H;
+    hidpi_size(&hd, &w, &h);
+    if (w == W && h == H) return;
+    W = w; H = h;
+    dpr = (float)hidpi_factor(&hd, W);
+    if (wl.ew) wl_egl_window_resize(wl.ew, W, H, 0, 0);
+}
+
 static void wl_init(void) {
+    hidpi_init(&hd, opt_render_scale);
     if (!(wl.d = wl_display_connect(NULL))) die("can't connect to the Wayland display");
     struct wl_registry *reg = wl_display_get_registry(wl.d);
     wl_registry_add_listener(reg, &wl_reg_l, NULL);
     wl_display_roundtrip(wl.d);
     if (!wl.comp || !wl.shell) die("the compositor has no wlr-layer-shell");
     wl.surf = wl_compositor_create_surface(wl.comp);
+    hidpi_attach(&hd, wl.surf);
     wl.ls = zwlr_layer_shell_v1_get_layer_surface(wl.shell, wl.surf, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "atc");
     zwlr_layer_surface_v1_add_listener(wl.ls, &ls_l, NULL);
     zwlr_layer_surface_v1_set_anchor(wl.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -3511,6 +3541,8 @@ static void wl_init(void) {
     wl_surface_commit(wl.surf);
     while (!wl.configured && !wl.closed && wl_display_dispatch(wl.d) >= 0) {}
     if (!wl.configured) die("the layer surface was never configured");
+    wl_display_roundtrip(wl.d);                    /* the preferred scale, before the first buffer */
+    wl_resize();
 
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_disp = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     wl.ed = get_disp ? get_disp(EGL_PLATFORM_WAYLAND_KHR, wl.d, NULL) : eglGetDisplay((EGLNativeDisplayType)wl.d);
@@ -3538,6 +3570,7 @@ static int wl_poll(void) {
     if (poll(&pf, 1, 0) > 0) wl_display_read_events(wl.d);
     else wl_display_cancel_read(wl.d);
     if (wl_display_dispatch_pending(wl.d) < 0) return 0;
+    wl_resize();
     return !wl.closed;
 }
 
@@ -3548,7 +3581,7 @@ static void usage(void) {
         "           [--range NM] [--radius NM] [--no-sweep] [--no-follow]\n"
         "           [--role scope|strips|approach|wide|combo]\n"
         "           [--font-mono FAMILY] [--font-sans FAMILY] [--font-hand FAMILY]\n"
-        "           [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX]\n"
+        "           [--epoch UNIXTIME] [--layout 'x,y,w,h;x,y,w,h;...' --output INDEX] [--render-scale F]\n"
         "           [--shot FILE.ppm [--at SECONDS]] [--bench N] [--size WxH]\n"
         "Traffic: a local readsb/dump1090 (--feed URL, else 127.0.0.1:8080 or /tar1090),\n"
         "else adsb.lol around --lat/--lon or ~/.config/wallpapers/location (\"LAT LON\"),\n"
@@ -3587,6 +3620,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-window")) opt_root = 0;
         else if (!strcmp(a, "-layer")) opt_layer = 1;
         else if (!strcmp(a, "-seed") && i + 1 < argc) opt_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(a, "-render-scale") && i + 1 < argc) opt_render_scale = strtod(argv[++i], NULL);
         else if (!strcmp(a, "-fps") && i + 1 < argc) opt_fps = strtof(argv[++i], NULL);
         else if (!strcmp(a, "-shot") && i + 1 < argc) opt_shot = argv[++i];
         else if (!strcmp(a, "-bench") && i + 1 < argc) opt_bench = atoi(argv[++i]);
