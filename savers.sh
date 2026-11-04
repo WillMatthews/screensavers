@@ -6,11 +6,11 @@
 SAVERS=(pipes maze flightsim stir gauges nightsky soapfilm aquarium atc voronoi pendulums currents papercut)
 
 # kept and buildable, but out of the rotation while they're being worked on
-BENCHED=(bridge orrery contours clockwork marbling ink lavalamp billiards algorithms netflow splitflap kalman clocktower neural orbits fdtd quantum sand origami burrow maw)
+BENCHED=(bridge orrery contours clockwork marbling ink lavalamp billiards algorithms netflow splitflap kalman clocktower neural orbits fdtd quantum sand origami)
 
 # savers launched with --epoch/--layout/--output as one wall. Soapfilm and
 # aquarium can span too, but each monitor gets its own full scene when locked.
-SPANNING=(flightsim stir nightsky marbling splitflap gauges clockwork ink orrery lavalamp atc billiards pendulums algorithms voronoi netflow kalman clocktower neural bridge currents orbits fdtd quantum sand papercut origami burrow maw)
+SPANNING=(flightsim stir nightsky marbling splitflap gauges clockwork ink orrery lavalamp atc billiards pendulums algorithms voronoi netflow kalman clocktower neural bridge currents orbits fdtd quantum sand papercut origami)
 
 # the executable for a saver
 saver_bin() {
