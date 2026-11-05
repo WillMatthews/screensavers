@@ -129,6 +129,35 @@ class RotationTests(unittest.TestCase):
     def test_no_render_scale_without_a_config(self):
         self.assertNotIn("--render-scale", self.launch("stir"))
 
+    def skip_saver(self, *args, cur=None):
+        """Run lock-next.sh with a stand-in locked session; returns lock-bg.cur."""
+        shutil.copy2(ROOT / "lock-next.sh", self.root / "lock-next.sh")
+        run = self.root / "run"
+        run.mkdir(exist_ok=True)
+        if cur is not None:
+            (run / "lock-bg.cur").write_text(cur)
+        for tool in ("pgrep", "pkill"):   # "locked", and nothing to kill
+            self.executable(f"stubs/{tool}", "#!/bin/sh\nexit 0\n")
+        env = dict(self.env, XDG_RUNTIME_DIR=str(run),
+                   PATH=f"{self.root / 'stubs'}:{os.environ['PATH']}")
+        subprocess.check_call([str(self.root / "lock-next.sh"), *args], env=env)
+        return (run / "lock-bg.cur").read_text().split()
+
+    def test_reroll_keeps_the_saver_with_a_new_seed_and_epoch(self):
+        saver, seed, epoch = self.skip_saver("--reroll", cur="tiedye 12345 1790000000.5\n")
+        self.assertEqual(saver, "tiedye")
+        self.assertNotEqual(seed, "12345")
+        self.assertNotEqual(epoch, "1790000000.5")
+
+    def test_reroll_with_nothing_running_picks_a_saver(self):
+        saver, _, _ = self.skip_saver("--reroll")
+        self.assertIn(saver, self.savers)
+
+    def test_next_moves_to_another_pick(self):
+        picks = {self.skip_saver(cur="tiedye 1 1\n")[0] for _ in range(len(self.savers))}
+        self.assertTrue(picks <= set(self.savers))
+        self.assertGreater(len(picks), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

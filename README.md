@@ -19,7 +19,8 @@ swaylock-plugin --command-each lock-bg.sh      one instance per output
         │                     passes --seed / --epoch / --layout / --output, execs it
         ├─ savers.sh          which savers exist, which are benched, which span outputs
         ├─ pick-saver.sh      shuffle bag: every saver once per cycle, no repeats at the seam
-        └─ lock-next.sh       skip to the next saver while locked (bind to $mod+n --locked)
+        └─ lock-next.sh       skip to the next saver while locked (bind to $mod+n --locked);
+                              --reroll keeps the saver with a new seed ($mod+m --locked)
 ```
 
 `savers.sh` holds three lists:
@@ -35,7 +36,8 @@ Binaries aren't committed; each host builds what it wants (`make <saver>`).
 unbuilt one can never leave the lock screen blank.
 
 The shuffle bag shows every built, non-benched saver once per cycle (12
-when all are built). Both locking and skipping consume a pick. A new cycle
+when all are built). Both locking and skipping consume a pick; a reroll
+(a new palette, scene or piece of the same saver) doesn't. A new cycle
 is shuffled again and never starts with the previous cycle's last saver;
 repeats can still be close together across a cycle boundary, so this does
 not promise all savers in every sliding window of 16 picks. New builds
