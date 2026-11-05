@@ -601,7 +601,7 @@ static const char *FS_COMP_MAIN = GLSL(
         /* the weave and the wet front, per sample: how much of what came
          * took. A dye counts for the timing only where enough of it took to
          * see; a trace that didn't would show early as wet, grey cloth */
-        float sk[4], sc[4], took = 0.0;
+        float sk[4], sc[4], took = 0.0, dmax = 0.0, ostrong = 9.0;
         for (int sidx = 0; sidx < 4; sidx++) {
             vec2 off = vec2(sidx & 1, sidx >> 1) - 0.5;
             off = mat2(0.894, 0.447, -0.447, 0.894) * off * 0.5;
@@ -627,7 +627,10 @@ static const char *FS_COMP_MAIN = GLSL(
         for (int k = 0; k < 6; k++) {
             if (k >= uND) break;
             if (dose[k] * took > 0.01 && ord[k] < 8.0) { omin = min(omin, ord[k]); omax = max(omax, ord[k]); }
+            if (dose[k] > dmax && ord[k] < 8.0) { dmax = dose[k]; ostrong = ord[k]; }
         }
+        /* only a faint trace: when the dye it's mostly of went on */
+        if (omin > 8.0 && dmax > 0.0) omin = omax = ostrong;
         /* nothing shows before this wedge or band's own dye goes on (dye
          * that bled across a white vein would look detached); then the dyes
          * already on, then the rest as they arrive */
