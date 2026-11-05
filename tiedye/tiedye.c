@@ -597,13 +597,11 @@ static const char *FS_COMP_MAIN = GLSL(
                     if (abs(tk - m0.y) < best) { best = abs(tk - m0.y); ord[k] = tk; }
                 }
             }
-            if (dose[k] > 0.004 && ord[k] < 8.0) { omin = min(omin, ord[k]); omax = max(omax, ord[k]); }
         }
-        if (omin > 8.0) {   /* no dye to speak of: its own wedge or band's time */
-            omin = uFold == 0 ? (mod(floor(fract(m0.x) * uOrd.x) - uOrd.y, uOrd.x) + 0.8 * m0.y) / uOrd.x : m0.y;
-            omax = omin;
-        }
-        vec3 acc = vec3(0.0), acc1 = vec3(0.0);
+        /* the weave and the wet front, per sample: how much of what came
+         * took. A dye counts for the timing only where enough of it took to
+         * see; a trace that didn't would show early as wet, grey cloth */
+        float sk[4], sc[4], took = 0.0;
         for (int sidx = 0; sidx < 4; sidx++) {
             vec2 off = vec2(sidx & 1, sidx >> 1) - 0.5;
             off = mat2(0.894, 0.447, -0.447, 0.894) * off * 0.5;
@@ -622,16 +620,32 @@ static const char *FS_COMP_MAIN = GLSL(
             /* the feathered wet front: where the dye ran thin it didn't
              * take, and where it stopped it piled up (the tide line) */
             float take = smoothstep(0.035, 0.12, raw * lift + 0.10 * fibre);
+            sk[sidx] = lift * take * tl;
+            sc[sidx] = 1.0 - 0.012 * gap - 0.015 * yarn;
+            took += 0.25 * sk[sidx];
+        }
+        for (int k = 0; k < 6; k++) {
+            if (k >= uND) break;
+            if (dose[k] * took > 0.01 && ord[k] < 8.0) { omin = min(omin, ord[k]); omax = max(omax, ord[k]); }
+        }
+        /* nothing shows before this wedge or band's own dye goes on (dye
+         * that bled across a white vein would look detached); then the dyes
+         * already on, then the rest as they arrive */
+        float own = uFold == 0 ? (mod(floor(fract(m0.x) * uOrd.x) - uOrd.y, uOrd.x) + 0.8 * m0.y) / uOrd.x : m0.y;
+        if (omin > 8.0) omin = omax = own;
+        omin = max(omin, own);
+        omax = max(omax, omin);
+        vec3 acc = vec3(0.0), acc1 = vec3(0.0);
+        for (int sidx = 0; sidx < 4; sidx++) {
             vec3 K = uKSc, K1 = uKSc;
             for (int k = 0; k < 6; k++) {
                 if (k >= uND) break;
-                vec3 dk = uStr * dose[k] * lift * take * tl * uKS[k];
+                vec3 dk = uStr * dose[k] * sk[sidx] * uKS[k];
                 K += dk;
                 if (ord[k] <= omin + 1e-4) K1 += dk;
             }
-            float cloth = 1.0 - 0.012 * gap - 0.015 * yarn;
-            acc += km(K) * cloth;
-            acc1 += km(K1) * cloth;
+            acc += km(K) * sc[sidx];
+            acc1 += km(K1) * sc[sidx];
         }
         /* when it shows: the order the dye went on, then how long it took
          * to wick */
