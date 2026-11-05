@@ -437,8 +437,11 @@ static const char *FS_STEP_MAIN = GLSL(
         oB = vec4(nb, arr, max(w + dw, 0.0));
     });
 
-/* stages 2 and 3: unfold and print, into the cache: rgb the finished
- * piece (linear), a when its dye arrived (0..1 over the bloom; > 1 never) */
+/* stages 2 and 3: unfold and print, into the cache. Two layers, each rgb
+ * (linear) and a when it shows (0..1 over the bloom; > 1 never): the first
+ * holds only the dye that got here first, the second the finished mix, once
+ * the last dye to bleed in has arrived. One layer and one time would show a
+ * mix (purple where blue bled into red) before the second dye was on. */
 static const char *FS_COMP_MAIN = GLSL(
     uniform sampler2D uSA, uSB;
     uniform int uFold, uND;
@@ -450,7 +453,9 @@ static const char *FS_COMP_MAIN = GLSL(
     uniform float uStr, uTP, uTide, uComb, uMid;
     uniform vec4 uView;                  /* ox, oy, scale, device height */
     uniform vec3 uFC;                    /* front centre (world), L */
-    out vec4 frag;
+    uniform float uWD[16], uBand[16], uNB;
+    layout(location = 0) out vec4 oFirst;
+    layout(location = 1) out vec4 oAll;
 
     /* yarn wicking: each warp yarn (vertical) carries dye a different
      * distance along itself, and each weft yarn likewise across; plus a
@@ -565,7 +570,40 @@ static const char *FS_COMP_MAIN = GLSL(
         float raw = 0.0;
         for (int k = 0; k < 6; k++) if (k < uND) raw += dose[k];
         float tl = 1.0 + uTide / max(raw, 0.03) * smoothstep(0.03, 0.10, raw) * (1.0 - smoothstep(0.10, 0.30, raw));
-        vec3 acc = vec3(0.0);
+        /* when each dye went on here: the order it went on (centre
+         * outwards, wedge by wedge or band by band), from the nearest wedge
+         * or band that carried it, since that's where it bled in from */
+        float ord[6];
+        float omin = 9.0, omax = -9.0;
+        for (int k = 0; k < 6; k++) {
+            ord[k] = 9.0;
+            if (k >= uND) break;
+            float best = 9.0;
+            if (uFold == 0) {
+                float wf = fract(m0.x) * uOrd.x;
+                for (int j = 0; j < 16; j++) {
+                    if (float(j) >= uOrd.x) break;
+                    if (abs(uWD[j] - float(k)) > 0.5) continue;
+                    float c = float(j) + 0.5, d = abs(wf - c);
+                    d = max(min(d, uOrd.x - d) - 0.5, 0.0);
+                    if (d < best) { best = d; ord[k] = (mod(float(j) - uOrd.y, uOrd.x) + 0.8 * m0.y) / uOrd.x; }
+                }
+            } else {
+                for (int j = 0; j < 17; j++) {
+                    if (float(j) > uNB) break;
+                    if (abs(uWD[j] - float(k)) > 0.5) continue;
+                    float lo = j == 0 ? 0.0 : uBand[j - 1], hi = float(j) >= uNB ? 1.0 : uBand[j];
+                    float tk = clamp(m0.y, lo, hi);
+                    if (abs(tk - m0.y) < best) { best = abs(tk - m0.y); ord[k] = tk; }
+                }
+            }
+            if (dose[k] > 0.004 && ord[k] < 8.0) { omin = min(omin, ord[k]); omax = max(omax, ord[k]); }
+        }
+        if (omin > 8.0) {   /* no dye to speak of: its own wedge or band's time */
+            omin = uFold == 0 ? (mod(floor(fract(m0.x) * uOrd.x) - uOrd.y, uOrd.x) + 0.8 * m0.y) / uOrd.x : m0.y;
+            omax = omin;
+        }
+        vec3 acc = vec3(0.0), acc1 = vec3(0.0);
         for (int sidx = 0; sidx < 4; sidx++) {
             vec2 off = vec2(sidx & 1, sidx >> 1) - 0.5;
             off = mat2(0.894, 0.447, -0.447, 0.894) * off * 0.5;
@@ -584,39 +622,39 @@ static const char *FS_COMP_MAIN = GLSL(
             /* the feathered wet front: where the dye ran thin it didn't
              * take, and where it stopped it piled up (the tide line) */
             float take = smoothstep(0.035, 0.12, raw * lift + 0.10 * fibre);
-            vec3 K = uKSc;
+            vec3 K = uKSc, K1 = uKSc;
             for (int k = 0; k < 6; k++) {
                 if (k >= uND) break;
-                K += uStr * dose[k] * lift * take * tl * uKS[k];
+                vec3 dk = uStr * dose[k] * lift * take * tl * uKS[k];
+                K += dk;
+                if (ord[k] <= omin + 1e-4) K1 += dk;
             }
-            vec3 R = km(K);
-            R *= 1.0 - 0.012 * gap - 0.015 * yarn;
-            acc += R;
+            float cloth = 1.0 - 0.012 * gap - 0.015 * yarn;
+            acc += km(K) * cloth;
+            acc1 += km(K1) * cloth;
         }
-        /* when the dye got here: the order it went on (centre outwards,
-         * wedge by wedge or band by band), then how long it took to wick */
-        float sim = B.b;
-        float order = 0.0;
-        if (uFold == 0) {
-            float w = floor(fract(m0.x) * uOrd.x);
-            order = (mod(w - uOrd.y, uOrd.x) + 0.8 * m0.y) / uOrd.x;
-        } else order = m0.y;
-        float arr = 0.62 * order + 0.36 * sim;
-        arr += 0.012 * (fbm3(p0 * 40.0, 63u) - 0.5);
-        if (raw < 0.02) arr = 2.0;
-        frag = vec4(acc * 0.25, arr);
+        /* when it shows: the order the dye went on, then how long it took
+         * to wick */
+        float sim = B.b, jit = 0.012 * (fbm3(p0 * 40.0, 63u) - 0.5);
+        float arr1 = 0.62 * omin + 0.36 * sim + jit, arr2 = 0.62 * omax + 0.36 * sim + jit;
+        if (raw < 0.02) arr1 = arr2 = 2.0;
+        oFirst = vec4(acc1 * 0.25, arr1);
+        oAll = vec4(acc * 0.25, arr2);
     });
 
 /* every frame: the cached piece, as far as the dye has got */
 static const char *FS_SHOW_MAIN = GLSL(
-    uniform sampler2D uC;
+    uniform sampler2D uC, uC2;
     uniform vec3 uCloth;                 /* linear */
     uniform float uT, uWet, uFade;
     out vec4 frag;
     float tosrgb(float c) { return c <= 0.0031308 ? 12.92 * c : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
     void main() {
-        vec4 c = texelFetch(uC, ivec2(gl_FragCoord.xy), 0);
-        /* dyed where the dye has arrived, with a feathered front */
+        vec4 c1 = texelFetch(uC, ivec2(gl_FragCoord.xy), 0), c2 = texelFetch(uC2, ivec2(gl_FragCoord.xy), 0);
+        /* dyed where the dye has arrived, with a feathered front; where a
+         * second dye bleeds in, the mix once that has arrived too */
+        float m2 = 1.0 - smoothstep(uT - 0.012, uT, c2.a);
+        vec4 c = vec4(mix(c1.rgb, c2.rgb, m2), c1.a);
         float m = 1.0 - smoothstep(uT - 0.012, uT, c.a);
         /* the water runs a little ahead of the dye: damp cloth, greyer */
         float damp = uWet * (1.0 - smoothstep(uT, uT + 0.05, c.a)) * (1.0 - m);
@@ -678,7 +716,7 @@ static GLuint mk_prog(const char *fs) {
 
 static GLuint prog_init, prog_step, prog_comp, prog_show, prog_text, vao, vao_text, vbo_text, tex_atlas;
 static GLuint sim_tex[2][2], sim_perm, sim_fbo[2], init_fbo;
-static GLuint cache_tex, cache_fbo;
+static GLuint cache_tex[2], cache_fbo;
 static int cache_w, cache_h;
 
 static void tex_params(GLint wrap_s, GLint filter) {
@@ -890,14 +928,19 @@ static void view_update(void) {
 
 static void cache_resize(void) {
     if (cache_w == W && cache_h == H) return;
-    if (cache_w) glDeleteTextures(1, &cache_tex);
-    glGenTextures(1, &cache_tex);
-    glBindTexture(GL_TEXTURE_2D, cache_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, W, H, 0, GL_RGBA, GL_HALF_FLOAT, NULL);
-    tex_params(GL_CLAMP_TO_EDGE, GL_NEAREST);
+    if (cache_w) glDeleteTextures(2, cache_tex);
+    glGenTextures(2, cache_tex);
     if (!cache_fbo) glGenFramebuffers(1, &cache_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, cache_fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, cache_tex, 0);
+    for (int i = 0; i < 2; i++) {
+        glBindTexture(GL_TEXTURE_2D, cache_tex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, W, H, 0, GL_RGBA, GL_HALF_FLOAT, NULL);
+        tex_params(GL_CLAMP_TO_EDGE, GL_NEAREST);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, cache_tex[i], 0);
+    }
+    static const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(2, bufs);
+    glReadBuffer(GL_COLOR_ATTACHMENT1);   /* the finished piece, for the caption */
     fbo_check();
     cache_w = W; cache_h = H;
     built_act = -1000;                  /* a new size: make it again */
@@ -919,6 +962,9 @@ static void comp_strip(int k) {
     glUniform4fv(U(prog_comp, "uF"), 8, &uF[0][0]);
     glUniform4fv(U(prog_comp, "uH"), NH, &uH[0][0]);
     glUniform4fv(U(prog_comp, "uOrd"), 1, uOrd);
+    glUniform1fv(U(prog_comp, "uWD"), 16, uWD);
+    glUniform1fv(U(prog_comp, "uBand"), 16, uBand);
+    glUniform1f(U(prog_comp, "uNB"), uI[0][0]);
     glUniform3fv(U(prog_comp, "uKS"), MAXDYE, &ks[0][0]);
     glUniform3fv(U(prog_comp, "uKSc"), 1, ks_cloth);
     glUniform1f(U(prog_comp, "uStr"), palettes[pal].strength);
@@ -1153,12 +1199,15 @@ static void render(double t, double wall, GLuint target) {
     glBindVertexArray(vao);
     glUseProgram(prog_show);
     glUniform1i(U(prog_show, "uC"), 0);
+    glUniform1i(U(prog_show, "uC2"), 1);
     glUniform3fv(U(prog_show, "uCloth"), 1, cloth_lin);
     glUniform1f(U(prog_show, "uT"), uT);
     glUniform1f(U(prog_show, "uWet"), wet);
     glUniform1f(U(prog_show, "uFade"), fade);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, cache_tex[1]);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, cache_tex);
+    glBindTexture(GL_TEXTURE_2D, cache_tex[0]);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     if (opt_caption && (span_me < 0 || span_me == span_front)) {
