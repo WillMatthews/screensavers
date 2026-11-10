@@ -63,21 +63,9 @@ launched manually with the layout flags.
 Aquarium also runs a separate full tank on each monitor, with a different
 seed per output instead of spanning the wall.
 
-Bridge keeps one continuous structure across the shared screen band, with
-longer spans for a wide wall. On a portrait/laptop/landscape desk it puts
-equations and readouts on the portrait, the clock on the centre screen and
-a large live plot on the right. Trains start outside the visible wall and
-are clipped naturally as each carriage enters and leaves.
-
-![bridge across three monitors](docs/img/wall-bridge.jpg)
-<sub>`bridge` on a portrait/laptop/landscape wall: one continuous structure, with equations, readouts and a live deflection plot around it.</sub>
-
 Currents draws one continuous striped sheet across the wall. Its chrome
 sphere sits on the front output, and the flow turns toward horizontal on
 a wide layout so its swirling wake travels onto the neighbouring screen.
-
-![splitflap: platform, departures and arrivals boards](docs/img/wall-splitflap.jpg)
-<sub>`splitflap` gives each screen a different board of the same station, all flipping together.</sub>
 
 ![gauges: core bank, main cluster, auxiliaries](docs/img/wall-gauges.jpg)
 <sub>`gauges` puts the main cluster in the middle and extra instruments either side.</sub>
@@ -132,10 +120,8 @@ in `savers.sh`.
 | ![gauges](docs/img/gauges.jpg) | **gauges**: the machine's vital signs on a brass instrument panel: CPU temperature and load, a clock, memory, battery, and odometers for uptime and time away. |
 | ![aquarium](docs/img/aquarium.jpg) | **aquarium**: a planted freshwater tank through the front glass: schooling neon tetras, angelfish, discus and corys with lofted bodies and rayed fins, a fire eel that burrows into the sand, cherry and Amano shrimp picking at the stones. Caustics, light shafts and real time-of-day lighting; a thermometer on the glass reads the CPU temperature. |
 | ![orrery](docs/img/orrery.jpg) | **orrery**: a brass and enamel orrery in a dim study, planets where they really are tonight, its gear train turning in true ratios; now and then it winds forward months and back. |
-| ![bridge](docs/img/bridge.jpg) | **bridge**: a structural-analysis screen with the finite-element solver written from scratch: Warren, Pratt, arch, cable-stayed and suspension bridges with trains crossing (stress-coloured members, the deck ringing after), a plate with a hole against Kirsch, a cantilever and a bracket, and topology optimisation growing a truss out of grey. |
 | ![contours](docs/img/contours.jpg) | **contours**: a drifting topographic map of terrain carved by its own drainage, with streams, villages, roads and invented place names. The sun moves and hills cast shadows. Palettes: brass, cream, slate, blueprint, survey. |
 | ![clockwork](docs/img/clockwork.jpg) | **clockwork**: an opened-up clock movement ticking at the real time; on a wall the side screens show the escapement and the gear train. |
-| ![splitflap](docs/img/splitflap.jpg) | **splitflap**: a railway departures board that clatters at each minute. Portrait screens get a tall platform board; a wall gets departures, arrivals and platform boards. Palettes: brass, classic, blue, led. |
 | ![lavalamp](docs/img/lavalamp.jpg) | **lavalamp**: a lava lamp warming up from cold, its wax swelling, necking, pinching off, rising and sinking back; on a wall, one lamp per screen along a shared shelf. |
 | ![ink](docs/img/ink.jpg) | **ink**: drops of ink falling into a tank of water and rolling into vortex rings and curling wisps, on a GPU fluid sim. Palettes: indigo, sumi, botanical, neon, sunset. |
 | ![marbling](docs/img/marbling.jpg) | **marbling**: paper marbling made live: inks dropped, combed and raked into stone, chevron, nonpareil and bouquet patterns, then the sheet is lifted. |

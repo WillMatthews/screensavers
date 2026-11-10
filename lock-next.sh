@@ -12,4 +12,4 @@ saver=
 [[ -n $saver ]] || saver=$("$dir/pick-saver.sh")
 echo "$saver $((SRANDOM | 1)) $(date +%s.%N)" > "$cur"
 # anchored on the full path so this script's own command line can't match
-pkill -f "^$dir/(pipes/bin/pipes|maze3d/bin/maze3d|(flightsim|stir|splitflap|gauges|marbling|contours|clockwork|nightsky|ink|soapfilm|orrery|lavalamp|atc|billiards|pendulums|voronoi|aquarium|netflow|kalman|clocktower|neural|bridge|currents|fdtd|quantum|sand|papercut|kluver|tiedye)/[a-z]+) --(root|layer)"
+pkill -f "^$dir/(pipes/bin/pipes|maze3d/bin/maze3d|(flightsim|stir|gauges|marbling|contours|clockwork|nightsky|ink|soapfilm|orrery|lavalamp|atc|billiards|pendulums|voronoi|aquarium|netflow|kalman|clocktower|neural|currents|fdtd|quantum|sand|papercut|kluver|tiedye)/[a-z]+) --(root|layer)"
